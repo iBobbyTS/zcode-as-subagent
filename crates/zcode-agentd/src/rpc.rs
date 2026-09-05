@@ -247,6 +247,9 @@ pub enum RpcSuccess {
         pending_requests: Vec<PendingRequestView>,
         result_available: bool,
         activity: TaskActivityView,
+        latest_progress: Option<String>,
+        result: Option<TaskResultView>,
+        instruction: Option<String>,
         timed_out: bool,
     },
     TaskResult {
@@ -394,6 +397,7 @@ pub struct TaskActivityView {
     pub latest_text_tail: String,
     pub latest_text_updated_at: Option<u64>,
     pub latest_text_truncated: bool,
+    pub latest_progress: Option<String>,
     pub active_tools: Vec<ActiveToolView>,
     pub window_60s: ActivityWindowView,
     pub telemetry_status: TelemetryStatusView,
@@ -624,6 +628,12 @@ impl RpcService {
             return RpcResponse::error(
                 request_id,
                 RpcError::new(RpcErrorCode::Validation, "request fields are invalid"),
+            );
+        }
+        if contains_legacy_field(&value) {
+            return RpcResponse::error(
+                request_id,
+                RpcError::new(RpcErrorCode::Validation, "legacy fields are not supported"),
             );
         }
         let method = value.get("method").and_then(Value::as_str);
@@ -992,16 +1002,38 @@ impl RpcService {
                     && now >= deadline;
                 return Ok(RpcSuccess::TaskPoll {
                     activity: task_activity_view(task.phase, activity),
-                    task: task_view(task),
+                    task: task_view(task.clone()),
                     revision,
                     next_revision: revision,
                     pending_requests,
                     result_available,
+                    latest_progress: self.scheduler.passive_activity_snapshot(&task.agent_id).and_then(|a| a.latest_progress),
+                    result: if terminal {
+                        self.store.task_result(&task.agent_id).map_err(map_store)?.map(TaskResultView::from)
+                    } else { None },
+                    instruction: (!terminal).then(|| "Use poll for progress".to_owned()),
                     timed_out,
                 });
             }
             thread::sleep((deadline - now).min(Duration::from_millis(10)));
         }
+    }
+}
+
+fn contains_legacy_field(value: &Value) -> bool {
+    const LEGACY: &[&str] = &[
+        "base_ref", "worktree", "head", "head_commit", "base_commit", "patch",
+        "changes_patch", "artifact", "artifacts", "repo_context", "attachments",
+        "retain_partial", "group_id", "idempotency_key", "allowed_command_ids",
+        "required_command_ids", "validation_commands", "budget", "max_turns",
+        "max_tool_calls", "max_context_bytes", "max_artifact_bytes", "named_checks",
+    ];
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            LEGACY.contains(&key.as_str()) || contains_legacy_field(value)
+        }),
+        Value::Array(values) => values.iter().any(contains_legacy_field),
+        _ => false,
     }
 }
 
@@ -1158,6 +1190,7 @@ fn task_activity_view(
             latest_text_tail: String::new(),
             latest_text_updated_at: None,
             latest_text_truncated: false,
+            latest_progress: None,
             active_tools: Vec::new(),
             window_60s: ActivityWindowView::default(),
             telemetry_status: TelemetryStatusView::Unavailable,
@@ -1173,6 +1206,7 @@ fn task_activity_view(
         latest_text_tail: snapshot.latest_text_tail,
         latest_text_updated_at: snapshot.latest_text_updated_at,
         latest_text_truncated: snapshot.latest_text_truncated,
+        latest_progress: snapshot.latest_progress,
         active_tools: snapshot
             .active_tools
             .into_iter()

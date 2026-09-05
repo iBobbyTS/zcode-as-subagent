@@ -137,6 +137,9 @@ pub struct PassiveActivitySnapshot {
     pub latest_text_tail: String,
     pub latest_text_updated_at: Option<u64>,
     pub latest_text_truncated: bool,
+    /// Latest assistant message that has reached an explicit finish/done
+    /// boundary. In-flight deltas are deliberately excluded.
+    pub latest_progress: Option<String>,
     pub active_tools: Vec<PassiveActiveTool>,
     pub(crate) oldest_active_tool_age_ms: Option<u64>,
     pub window_60s: PassiveActivityWindow,
@@ -192,6 +195,8 @@ struct ParsedActivity {
     tool_call_id: Option<String>,
     tool_kind: PassiveToolKind,
     telemetry_known: bool,
+    assistant_message_id: Option<String>,
+    message_finished: bool,
 }
 
 impl ParsedActivity {
@@ -207,6 +212,8 @@ impl ParsedActivity {
             tool_call_id: None,
             tool_kind: PassiveToolKind::Other,
             telemetry_known: true,
+            assistant_message_id: None,
+            message_finished: false,
         }
     }
 }
@@ -220,6 +227,8 @@ struct PassiveActivityState {
     latest_text_tail: String,
     latest_text_updated_at: Option<u64>,
     latest_text_truncated: bool,
+    assistant_buffers: HashMap<String, String>,
+    latest_progress: Option<String>,
     terminal_text: String,
     terminal_text_limit: u64,
     terminal_text_oversized: bool,
@@ -307,6 +316,21 @@ impl PassiveActivityTracker {
         if admitted {
             if let Some(delta) = parsed.text_delta.as_deref() {
                 append_latest_text(&mut state, delta, wall_now_ms);
+                if let Some(message_id) = parsed.assistant_message_id.as_deref() {
+                    let buffer = state.assistant_buffers.entry(message_id.to_owned()).or_default();
+                    buffer.push_str(delta);
+                    if buffer.len() > MAX_LATEST_TEXT_BYTES {
+                        let keep_from = buffer.len().saturating_sub(MAX_LATEST_TEXT_BYTES);
+                        *buffer = buffer[keep_from..].to_owned();
+                    }
+                }
+            }
+            if parsed.message_finished {
+                if let Some(message_id) = parsed.assistant_message_id.as_deref() {
+                    if let Some(buffer) = state.assistant_buffers.remove(message_id) {
+                        state.latest_progress = Some(buffer);
+                    }
+                }
             }
         }
 
@@ -424,6 +448,7 @@ impl PassiveActivityTracker {
             latest_text_tail: state.latest_text_tail.clone(),
             latest_text_updated_at: state.latest_text_updated_at,
             latest_text_truncated: state.latest_text_truncated,
+            latest_progress: state.latest_progress.clone(),
             active_tools,
             oldest_active_tool_age_ms: state
                 .active_tools
@@ -554,6 +579,15 @@ fn parse_activity_message(
                 parsed.identity = event_id.map(|id| format!("stream:{id}"));
                 parsed.sample = Some(ActivitySampleKind::TextDelta { bytes });
                 parsed.text_delta = delta.map(str::to_owned);
+                parsed.assistant_message_id = activity_id(payload.get("assistantMessageId"));
+            }
+            (Some("model.streaming"), kind, _) if matches!(kind, Some("message_finished") | Some("message_done") | Some("text_done")) => {
+                parsed.assistant_message_id = activity_id(payload.get("assistantMessageId"));
+                parsed.message_finished = true;
+            }
+            (Some("message.completed" | "message.finished" | "message.done" | "text.done"), _, _) => {
+                parsed.assistant_message_id = activity_id(payload.get("assistantMessageId"));
+                parsed.message_finished = true;
             }
             (Some("tool.updated" | "streamRecovery.updated"), _, _) => {
                 parse_tool_activity(&mut parsed, payload, source);
@@ -6089,6 +6123,7 @@ mod tests {
             latest_text_tail: String::new(),
             latest_text_updated_at: None,
             latest_text_truncated: false,
+            latest_progress: None,
             active_tools: Vec::new(),
             oldest_active_tool_age_ms: None,
             window_60s: PassiveActivityWindow::default(),
