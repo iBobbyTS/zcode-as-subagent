@@ -3,6 +3,11 @@ name = "zcode-agentd"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
+autobins = false
+
+[[bin]]
+name = "zcode-as-subagentd"
+path = "src/main.rs"
 
 [dependencies]
 zcode-driver = { path = "../zcode-driver" }

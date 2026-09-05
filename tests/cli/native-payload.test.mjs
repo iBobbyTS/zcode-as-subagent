@@ -4,14 +4,16 @@ import path from 'node:path';
 import test from 'node:test';
 
 const root = path.resolve(import.meta.dirname, '../..');
-const binary = path.join(root, 'npm/native/darwin-arm64/zcode-agentd');
-const facade = path.join(root, 'npm/native/darwin-arm64/zcode-subagent-mcp');
+const binary = path.join(root, 'npm/native/darwin-arm64/zcode-as-subagentd');
+const facade = path.join(root, 'npm/native/darwin-arm64/zcode-as-subagent-mcp');
 
 test('macOS arm64 daemon payload is present and executable', () => {
   const stat = fs.statSync(binary);
   assert.equal(stat.mode & 0o777, 0o755);
   assert.ok(stat.size > 0);
   assert.equal(fs.statSync(facade).mode & 0o777, 0o755);
+  assert.equal(fs.existsSync(path.join(root, 'npm/native/darwin-arm64/zcode-agentd')), false);
+  assert.equal(fs.existsSync(path.join(root, 'npm/native/darwin-arm64/zcode-subagent-mcp')), false);
 });
 
 test('npm files whitelist includes the native payload directory', () => {

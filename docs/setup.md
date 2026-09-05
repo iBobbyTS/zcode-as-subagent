@@ -15,10 +15,10 @@ Use private absolute database and socket paths outside the target repository:
 ```text
 export ZCODE_AGENTD_STORE=/absolute/private/zcode-agent.sqlite3
 export ZCODE_AGENTD_SOCKET=/absolute/private/zcode-agent.sock
-./target/release/zcode-agentd
+./target/release/zcode-as-subagentd
 ```
 
-The daemon and Store are the sole durable lifecycle owner. The runtime owner keeps child process, stdio, session, turn, stop, and reap authority. `--database`, `--socket`, `--runtime`, and `--command-catalog` are equivalent CLI options.
+The daemon and Store are the sole durable lifecycle owner. The runtime owner keeps child process, stdio, session, turn, stop, and reap authority. `--database`, `--socket`, `--runtime`, and `--command-catalog` are equivalent CLI options. The MCP facade executable is `./target/release/zcode-as-subagent-mcp`.
 Hooks are optional. The daemon starts without hook configuration or provenance;
 `ZCODE_AGENT_HOOK_PROVENANCE` and `ZCODE_AGENT_SERVICE_GENERATION` are only
 used by explicit hook installation/checking workflows.

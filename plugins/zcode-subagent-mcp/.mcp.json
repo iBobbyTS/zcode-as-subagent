@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "zcode-subagent": {
-      "command": "zcode-subagent-mcp",
+      "command": "zcode-as-subagent-mcp",
       "env_vars": ["ZCODE_AGENTD_SOCKET"]
     }
   }

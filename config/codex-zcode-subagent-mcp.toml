@@ -1,6 +1,6 @@
 # Merge this table into ~/.codex/config.toml and replace the absolute paths.
 [mcp_servers.zcode_subagent]
-command = "/absolute/path/to/zcode-mcp/target/release/zcode-subagent-mcp"
+command = "/absolute/path/to/zcode-mcp/target/release/zcode-as-subagent-mcp"
 enabled = true
 required = true
 startup_timeout_sec = 10
