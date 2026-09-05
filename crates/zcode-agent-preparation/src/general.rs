@@ -1194,6 +1194,12 @@ impl GeneralFinalizer {
         // read-only patch of the caller-owned workspace for result evidence.
         if prepared.direct_workspace {
             validate_direct_workspace_identity(prepared)?;
+            if prepared.write_manifest.is_empty()
+                && prepared.direct_read_only_snapshot_sha256.as_deref()
+                    != Some(direct_workspace_snapshot(&prepared.repository)?.as_str())
+            {
+                return Err("CHANGED_PATH_NOT_ALLOWLISTED".into());
+            }
             return Ok(GeneralCompletion {
                 outcome: requested,
                 reason_code: None,
