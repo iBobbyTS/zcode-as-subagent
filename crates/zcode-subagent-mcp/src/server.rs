@@ -386,16 +386,36 @@ impl TryFrom<TaskArtifactMetadataView> for PublicArtifact {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct PublicResult {
+    #[schemars(skip)]
+    #[serde(skip)]
     pub outcome: PublicOutcome,
     pub final_text: String,
+    #[schemars(skip)]
+    #[serde(skip)]
     pub partial: bool,
+    #[schemars(skip)]
+    #[serde(skip)]
     pub retained: bool,
+    #[schemars(skip)]
+    #[serde(skip)]
     pub base_commit: Option<String>,
+    #[schemars(skip)]
+    #[serde(skip)]
     pub head_commit: Option<String>,
+    #[schemars(skip)]
+    #[serde(skip)]
     pub changed_files: Vec<String>,
+    #[schemars(skip)]
+    #[serde(skip)]
     pub diff_stat: Option<String>,
+    #[schemars(skip)]
+    #[serde(skip)]
     pub checks: Vec<String>,
+    #[schemars(skip)]
+    #[serde(skip)]
     pub residual_gaps: Vec<String>,
+    #[schemars(skip)]
+    #[serde(skip)]
     pub result_sha256: String,
 }
 
@@ -695,10 +715,16 @@ pub struct AgentStateOutput {
 pub struct AgentResultInput {
     pub agent_id: String,
     #[serde(default, deserialize_with = "optional_non_null")]
+    #[schemars(skip)]
+    #[serde(skip)]
     pub artifact_id: Option<String>,
     #[serde(default, deserialize_with = "optional_non_null")]
+    #[schemars(skip)]
+    #[serde(skip)]
     pub offset_bytes: Option<u64>,
     #[serde(default, deserialize_with = "optional_non_null")]
+    #[schemars(skip)]
+    #[serde(skip)]
     pub limit_bytes: Option<usize>,
 }
 
@@ -719,7 +745,11 @@ pub struct PublicArtifactChunk {
 pub struct AgentResultOutput {
     pub task: PublicTask,
     pub result: Option<PublicResult>,
+    #[schemars(skip)]
+    #[serde(skip)]
     pub artifacts: Vec<PublicArtifact>,
+    #[schemars(skip)]
+    #[serde(skip)]
     pub artifact_chunk: Option<PublicArtifactChunk>,
 }
 
@@ -802,7 +832,7 @@ fn attachment(value: &PublicAttachmentInput) -> Result<AttachmentInput, String> 
     })
 }
 
-fn general_manifest(input: &AgentSpawnInput) -> Result<GeneralTaskManifest, String> {
+fn general_manifest(input: &AgentSpawnInput, request_identity: &str) -> Result<GeneralTaskManifest, String> {
     for (field, value, max) in [
         ("repository", input.repository.as_str(), MAX_PATH_BYTES),
         ("prompt", input.prompt.as_str(), MAX_PROMPT_BYTES),
@@ -841,7 +871,7 @@ fn general_manifest(input: &AgentSpawnInput) -> Result<GeneralTaskManifest, Stri
         }),
         validation_commands: BTreeMap::new(),
         retain_partial: false,
-        idempotency_key: "mcp-generated".into(),
+        idempotency_key: request_identity.to_owned(),
     })
 }
 
@@ -939,7 +969,8 @@ impl SubagentMcp {
         &self,
         Parameters(input): Parameters<AgentSpawnInput>,
     ) -> Result<Json<AgentSpawnOutput>, String> {
-        let manifest = general_manifest(&input)?;
+        let request_identity = format!("mcp-request-{}", self.next_request.fetch_add(1, Ordering::Relaxed));
+        let manifest = general_manifest(&input, &request_identity)?;
         let (task, disposition) = match self.rpc(RpcMethod::SubmitGeneral {
             input: GeneralSubmitInput {
                 manifest,
@@ -1408,23 +1439,21 @@ mod generic_tests {
             let input = serde_json::from_value::<AgentSpawnInput>(serde_json::json!({
                 "repository": "/tmp/repository",
                 "permission_mode": mode,
-                "prompt": "write a file",
-                "idempotency_key": mode
+                "prompt": "write a file"
             }))
             .unwrap();
             assert_eq!(
-                general_manifest(&input).unwrap().write_manifest,
+                general_manifest(&input, "test-request").unwrap().write_manifest,
                 [PathBuf::from(".")]
             );
         }
         let input = serde_json::from_value::<AgentSpawnInput>(serde_json::json!({
             "repository": "/tmp/repository",
             "permission_mode": "plan",
-            "prompt": "inspect files",
-            "idempotency_key": "plan"
+            "prompt": "inspect files"
         }))
         .unwrap();
-        assert!(general_manifest(&input).unwrap().write_manifest.is_empty());
+        assert!(general_manifest(&input, "test-request").unwrap().write_manifest.is_empty());
     }
 
     #[tokio::test]
