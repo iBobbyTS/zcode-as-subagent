@@ -2,7 +2,7 @@
 
 ## Facade restart
 
-The MCP facade is stateless. Restart it with the same `ZCODE_AGENTD_SOCKET`, then use `zcode_subagent_poll` or `zcode_subagent_result` with the durable `agent_id`. The configured `service_generation` is bound to the installed Hook provenance and is reused across daemon restarts; reinstalling or regenerating that provenance changes it. Do not confuse this configured binding with a facade restart or a task identity.
+The MCP facade is stateless. Restart it with the same `ZCODE_AGENTD_SOCKET`, then use `zcode_subagent_poll` or `zcode_subagent_result` with the durable `agent_id`. Hook provenance and service generation are optional integration metadata and are not required for daemon startup. Do not confuse a daemon restart with a facade restart or a task identity.
 
 ## Daemon restart
 

@@ -104,50 +104,28 @@ fn success(response: zcode_agentd::rpc::RpcResponse) -> RpcSuccess {
 }
 
 #[test]
-fn daemon_rejects_missing_hook_provenance_before_socket_publication() {
+fn daemon_starts_without_hooks_or_service_generation() {
     let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("missing-provenance.sqlite3");
-    let socket = directory.path().join("private").join("missing.sock");
+    let database = directory.path().join("no-hooks.sqlite3");
+    let socket = directory.path().join("private").join("no-hooks.sock");
     let daemon_executable = env!("CARGO_BIN_EXE_zcode-agentd");
     let mut daemon = Command::new(daemon_executable)
         .env("ZCODE_AGENTD_STORE", &database)
         .env("ZCODE_AGENTD_SOCKET", &socket)
-        .env("ZCODE_AGENT_SERVICE_GENERATION", "daemon-test")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon socket was not created");
+        thread::sleep(Duration::from_millis(10));
+    }
+    unsafe {
+        assert_eq!(libc::kill(daemon.id() as i32, libc::SIGTERM), 0);
+    }
     let status = daemon.wait().unwrap();
-    assert!(!status.success());
-    assert!(!socket.exists());
-    let mut stderr = String::new();
-    daemon
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut stderr)
-        .unwrap();
-    assert!(stderr.contains("provenance"), "{stderr}");
-}
-
-#[test]
-fn daemon_rejects_hook_provenance_from_another_service_generation() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("mismatched-provenance.sqlite3");
-    let socket = directory.path().join("private").join("mismatched.sock");
-    let (provenance, _) = hook_provenance(directory.path());
-    let daemon_executable = env!("CARGO_BIN_EXE_zcode-agentd");
-    let mut daemon = Command::new(daemon_executable)
-        .env("ZCODE_AGENTD_STORE", &database)
-        .env("ZCODE_AGENTD_SOCKET", &socket)
-        .env("ZCODE_AGENT_HOOK_PROVENANCE", &provenance)
-        .env("ZCODE_AGENT_SERVICE_GENERATION", "different-daemon")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let status = daemon.wait().unwrap();
-    assert!(!status.success());
+    assert!(status.success());
     assert!(!socket.exists());
 }
 
@@ -473,14 +451,9 @@ fn signal_before_daemon_start_exits_without_socket_runtime_or_durable_activation
     drop(store);
 
     let daemon_executable = env!("CARGO_BIN_EXE_zcode-agentd");
-    let runtime = fake_runtime();
-    let (hook_file, service_generation) = hook_provenance(directory.path());
     let mut daemon = Command::new(daemon_executable)
         .env("ZCODE_AGENTD_STORE", &database)
         .env("ZCODE_AGENTD_SOCKET", &socket)
-        .env("ZCODE_RUNTIME_PATH", &runtime)
-        .env("ZCODE_AGENT_HOOK_PROVENANCE", &hook_file)
-        .env("ZCODE_AGENT_SERVICE_GENERATION", &service_generation)
         .env("ZCODE_AGENTD_TEST_STARTUP_GATE", &gate_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

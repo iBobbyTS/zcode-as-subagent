@@ -13,9 +13,9 @@ git diff --check
 For the macOS release payload, run `sh scripts/release/check-native-tarball.sh`
 and `sh scripts/release/test-installed-tarball.sh`. The latter installs the
 generated tarball into a fresh prefix and HOME, then checks the installed CLI,
-daemon path, and LaunchAgent plist. A daemon process also requires the existing
-plugin hook provenance and `ZCODE_AGENT_SERVICE_GENERATION`; missing or stale
-provenance must remain a fail-closed result.
+daemon path, and LaunchAgent plist. A daemon process does not require plugin
+hooks or hook provenance; hook installation and provenance checks remain
+independent explicit capabilities.
 
 The pack must exclude `.DS_Store`, `__MACOSX`, `__pycache__`, `.agent-work`,
 raw sessions/reasoning, build output, and caches. Native daemon/runtime payload
