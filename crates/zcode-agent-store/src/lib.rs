@@ -385,6 +385,17 @@ pub struct TaskPageFilter {
     pub outcome: Option<TaskOutcome>,
 }
 
+/// Inclusive time/workspace selector used by the reduced adapter query API.
+/// `start_ms` is compared with `created_at`; `end_ms` is compared with
+/// `completed_at` and therefore only matches tasks that have completed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TaskWindowQuery {
+    pub agent_id: Option<String>,
+    pub workspace_path: Option<String>,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPage {
     pub tasks: Vec<TaskRecord>,
@@ -618,30 +629,22 @@ impl Store {
                 task.agent_id
             )));
         }
-        if task.workspace_path == task.repository
-            && serde_json::from_str::<serde_json::Value>(&task.prepared_launch_json)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("direct_workspace")
-                        .and_then(serde_json::Value::as_bool)
-                })
-                == Some(true)
+        // Workspace ownership is the collision boundary.  It applies to every
+        // submission, regardless of launch metadata or repository identity;
+        // terminal rows remain queryable and therefore do not block reuse.
+        if let Some(active_agent_id) = transaction
+            .query_row(
+                "SELECT agent_id FROM tasks WHERE workspace_path=?1
+             AND phase IN ('QUEUED','PREPARING','RUNNING','WAITING_INPUT','CANCELLING')
+             ORDER BY created_at, rowid LIMIT 1",
+                [&task.workspace_path],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
         {
-            if let Some(active_agent_id) = transaction
-                .query_row(
-                    "SELECT agent_id FROM tasks WHERE workspace_path=?1 AND repository=?2
-                 AND phase IN ('QUEUED','PREPARING','RUNNING','WAITING_INPUT','CANCELLING')
-                 ORDER BY created_at, rowid LIMIT 1",
-                    params![task.workspace_path, task.repository],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-            {
-                return Err(StoreError::Conflict(format!(
-                    "WORKSPACE_BUSY active_agent_id={active_agent_id}"
-                )));
-            }
+            return Err(StoreError::Conflict(format!(
+                "WORKSPACE_BUSY active_agent_id={active_agent_id}"
+            )));
         }
         let created_at = now_millis();
         transaction.execute(
@@ -764,6 +767,43 @@ impl Store {
             })
             .collect::<StoreResult<Vec<_>>>()?;
         Ok(TaskPage { tasks, next_cursor })
+    }
+
+    pub fn list_task_window(&self, query: &TaskWindowQuery) -> StoreResult<Vec<TaskRecord>> {
+        if query.agent_id.is_none() && query.workspace_path.is_none() {
+            return Err(StoreError::InvalidState(
+                "agent_id or workspace_path query scope is required".into(),
+            ));
+        }
+        if let (Some(start), Some(end)) = (query.start_ms, query.end_ms) {
+            if start > end {
+                return Err(StoreError::InvalidState(
+                    "query start_ms must be less than or equal to end_ms".into(),
+                ));
+            }
+        }
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT agent_id FROM tasks
+             WHERE (?1 IS NULL OR agent_id=?1)
+               AND (?2 IS NULL OR workspace_path=?2)
+               AND (?3 IS NULL OR created_at>=?3)
+               AND (?4 IS NULL OR (completed_at IS NOT NULL AND completed_at<=?4))
+             ORDER BY created_at, agent_id",
+        )?;
+        let ids = statement
+            .query_map(
+                params![query.agent_id, query.workspace_path, query.start_ms, query.end_ms],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| {
+                query_task(&connection, &id)?.ok_or_else(|| {
+                    StoreError::InvalidState("task disappeared during query".into())
+                })
+            })
+            .collect()
     }
 
     pub fn claim_next(
