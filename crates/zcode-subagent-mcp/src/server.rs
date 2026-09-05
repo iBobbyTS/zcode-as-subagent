@@ -12,7 +12,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use zcode_agent_preparation::{
     AttachmentInput, BudgetLimits, GeneralTaskManifest, PermissionMode, GENERAL_TASK_SCHEMA,
@@ -725,6 +725,14 @@ fn attachment(value: &PublicAttachmentInput) -> Result<AttachmentInput, String> 
     })
 }
 
+fn request_identity(counter: u64) -> String {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("mcp-request-{}-{}-{}", std::process::id(), nonce, counter)
+}
+
 fn general_manifest(input: &AgentSpawnInput, request_identity: &str) -> Result<GeneralTaskManifest, String> {
     for (field, value, max) in [
         ("repository", input.repository.as_str(), MAX_PATH_BYTES),
@@ -862,7 +870,7 @@ impl SubagentMcp {
         &self,
         Parameters(input): Parameters<AgentSpawnInput>,
     ) -> Result<Json<AgentSpawnOutput>, String> {
-        let request_identity = format!("mcp-request-{}", self.next_request.fetch_add(1, Ordering::Relaxed));
+        let request_identity = request_identity(self.next_request.fetch_add(1, Ordering::Relaxed));
         let manifest = general_manifest(&input, &request_identity)?;
         let (task, disposition) = match self.rpc(RpcMethod::SubmitGeneral {
             input: GeneralSubmitInput {
@@ -1228,6 +1236,15 @@ mod generic_tests {
         let running = serde_json::json!({"result":null,"instruction":"Use poll for progress"});
         assert_eq!(running["result"], serde_json::Value::Null);
         assert_eq!(running["instruction"], "Use poll for progress");
+    }
+
+    #[test]
+    fn request_identity_is_unique_across_facade_instances() {
+        let first = request_identity(1);
+        std::thread::sleep(std::time::Duration::from_nanos(1));
+        let second = request_identity(1);
+        assert_ne!(first, second);
+        assert!(first.starts_with("mcp-request-"));
     }
 
     #[test]
