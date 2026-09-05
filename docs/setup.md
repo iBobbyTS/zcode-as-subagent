@@ -49,11 +49,8 @@ Review is a normal read-only Agent invocation. Put review instructions in `promp
   "repository": "/absolute/repository",
   "prompt": "Review base..HEAD and report concrete findings.",
   "permission_mode": "build",
-  "group_id": "feature",
-  "idempotency_key": "fresh-agent-key",
-  "allowed_command_ids": [],
-  "required_command_ids": []
+  "write_manifest": ["src", "tests"]
 }
 ```
 
-`allowed_command_ids` controls which daemon-owned named checks may run. `required_command_ids` separately binds mandatory checks to the finalized tree. Callers cannot submit programs, arguments, cwd, shell, or environment.
+`permission_mode` defaults to `build`. For write modes, `write_manifest` is a caller-provided list of relative paths inside `repository`; the daemon never expands an omitted list to the whole workspace. Plan mode is read-only. Callers cannot submit programs, arguments, cwd, shell, or environment.
