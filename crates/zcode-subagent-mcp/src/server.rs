@@ -777,7 +777,7 @@ fn general_manifest(input: &AgentSpawnInput, request_identity: &str) -> Result<G
         prompt: input.prompt.clone(),
         repo_context: Vec::new(),
         attachments: Vec::new(),
-        // Write manifests are daemon-owned policy, never caller-controlled.
+        // Validate caller scope before the daemon applies its execution policy.
         write_manifest,
         scratch_root: PathBuf::from(".agent-work/scratch/general"),
         artifact_root: PathBuf::from(".agent-work/artifacts").join(agent_id),

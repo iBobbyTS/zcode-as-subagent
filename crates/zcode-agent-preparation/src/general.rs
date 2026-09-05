@@ -524,9 +524,11 @@ impl GeneralTaskPreparer {
         for path in &write_manifest {
             reject_protected(path)?;
         }
-        require_private_root(&manifest.scratch_root, "scratch")?;
-        require_private_root(&manifest.artifact_root, "artifacts")?;
-        if manifest
+        if !direct_workspace {
+            require_private_root(&manifest.scratch_root, "scratch")?;
+            require_private_root(&manifest.artifact_root, "artifacts")?;
+        }
+        if !direct_workspace && manifest
             .artifact_root
             .file_name()
             .and_then(|name| name.to_str())
@@ -537,8 +539,20 @@ impl GeneralTaskPreparer {
                 reason: "artifact root must be bound to agent_id".into(),
             });
         }
-        let scratch_parent = canonical_existing_parent(&repository, &manifest.scratch_root)?;
-        let artifact_root = canonical_directory(&repository, &manifest.artifact_root)?;
+        let direct_private_root = std::env::temp_dir().join("zcode-agentd");
+        let scratch_parent = if direct_workspace {
+            fs::create_dir_all(&direct_private_root)?;
+            fs::canonicalize(direct_private_root.join("scratch"))
+                .or_else(|_| { fs::create_dir_all(direct_private_root.join("scratch"))?; fs::canonicalize(direct_private_root.join("scratch")) })?
+        } else {
+            canonical_existing_parent(&repository, &manifest.scratch_root)?
+        };
+        let artifact_root = if direct_workspace {
+            fs::create_dir_all(direct_private_root.join("artifacts"))?;
+            fs::canonicalize(direct_private_root.join("artifacts"))?
+        } else {
+            canonical_directory(&repository, &manifest.artifact_root)?
+        };
         let legacy_manifest_sha256 = match named_commands {
             Some(named_commands) if !named_commands.is_empty() => {
                 hash(&serde_json::to_vec(&(manifest, named_commands))?)
@@ -1179,16 +1193,14 @@ impl GeneralFinalizer {
         // detached-worktree or Git commit path. They still publish a
         // read-only patch of the caller-owned workspace for result evidence.
         if prepared.direct_workspace {
-            ensure_directory_empty(&prepared.artifact_root, "ARTIFACT_ROOT_NOT_EMPTY")?;
             validate_direct_workspace_identity(prepared)?;
-            let changes_patch = finalize_direct_patch(prepared)?;
             return Ok(GeneralCompletion {
                 outcome: requested,
                 reason_code: None,
                 summary,
                 checks,
                 residual_gaps,
-                changes_patch,
+                changes_patch: None,
                 cleaned: false,
             });
         }
