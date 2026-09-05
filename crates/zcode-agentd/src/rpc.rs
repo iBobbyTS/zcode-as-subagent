@@ -630,12 +630,6 @@ impl RpcService {
                 RpcError::new(RpcErrorCode::Validation, "request fields are invalid"),
             );
         }
-        if contains_legacy_field(&value) {
-            return RpcResponse::error(
-                request_id,
-                RpcError::new(RpcErrorCode::Validation, "legacy fields are not supported"),
-            );
-        }
         let method = value.get("method").and_then(Value::as_str);
         if let Some(method) = method {
             if !RpcMethod::is_known(method) {
@@ -1017,23 +1011,6 @@ impl RpcService {
             }
             thread::sleep((deadline - now).min(Duration::from_millis(10)));
         }
-    }
-}
-
-fn contains_legacy_field(value: &Value) -> bool {
-    const LEGACY: &[&str] = &[
-        "base_ref", "worktree", "head", "head_commit", "base_commit", "patch",
-        "changes_patch", "artifact", "artifacts", "repo_context", "attachments",
-        "retain_partial", "group_id", "idempotency_key", "allowed_command_ids",
-        "required_command_ids", "validation_commands", "budget", "max_turns",
-        "max_tool_calls", "max_context_bytes", "max_artifact_bytes", "named_checks",
-    ];
-    match value {
-        Value::Object(map) => map.iter().any(|(key, value)| {
-            LEGACY.contains(&key.as_str()) || contains_legacy_field(value)
-        }),
-        Value::Array(values) => values.iter().any(contains_legacy_field),
-        _ => false,
     }
 }
 
