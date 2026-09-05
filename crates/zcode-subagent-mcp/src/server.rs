@@ -269,21 +269,6 @@ pub struct AgentSpawnInput {
     pub repository: String,
     pub permission_mode: PublicPermissionMode,
     pub prompt: String,
-    #[serde(default, deserialize_with = "optional_non_null")]
-    pub group_id: Option<String>,
-    pub idempotency_key: String,
-    #[serde(default)]
-    pub repo_context: Vec<String>,
-    #[serde(default)]
-    pub attachments: Vec<PublicAttachmentInput>,
-    #[serde(default, deserialize_with = "optional_non_null")]
-    pub budget: Option<PublicBudget>,
-    #[serde(default)]
-    pub retain_partial: bool,
-    #[serde(default)]
-    pub allowed_command_ids: Vec<String>,
-    #[serde(default)]
-    pub required_command_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
@@ -439,8 +424,6 @@ impl TryFrom<TaskResultView> for PublicResult {
 pub struct AgentListInput {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub repository: Option<String>,
-    #[serde(default, deserialize_with = "optional_non_null")]
-    pub group_id: Option<String>,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub phase: Option<PublicTaskPhase>,
     #[serde(default, deserialize_with = "optional_non_null")]
@@ -652,6 +635,9 @@ pub struct AgentPollOutput {
     pub pending_requests: Vec<PublicPendingRequest>,
     pub result_available: bool,
     pub activity: PublicActivity,
+    pub latest_progress: Option<String>,
+    pub result: Option<PublicResult>,
+    pub instruction: Option<String>,
     pub timed_out: bool,
 }
 
@@ -820,23 +806,13 @@ fn general_manifest(input: &AgentSpawnInput) -> Result<GeneralTaskManifest, Stri
     for (field, value, max) in [
         ("repository", input.repository.as_str(), MAX_PATH_BYTES),
         ("prompt", input.prompt.as_str(), MAX_PROMPT_BYTES),
-        (
-            "idempotency_key",
-            input.idempotency_key.as_str(),
-            MAX_ID_BYTES,
-        ),
     ] {
         validate_text(value, field, max)?;
-    }
-    if let Some(group_id) = input.group_id.as_deref() {
-        validate_text(group_id, "group_id", 256)?;
     }
     let repository = PathBuf::from(&input.repository);
     if !repository.is_absolute() {
         return Err("validation: repository must be absolute".into());
     }
-    validate_public_command_ids(&input.allowed_command_ids, "allowed_command_ids")?;
-    validate_public_command_ids(&input.required_command_ids, "required_command_ids")?;
     let agent_id = "daemon-prepared".to_owned();
     let write_manifest = match input.permission_mode {
         PublicPermissionMode::Build | PublicPermissionMode::Edit | PublicPermissionMode::Yolo => {
@@ -852,24 +828,20 @@ fn general_manifest(input: &AgentSpawnInput) -> Result<GeneralTaskManifest, Stri
         access_mode: PermissionMode::from(input.permission_mode).access_mode(),
         permission_mode: input.permission_mode.into(),
         prompt: input.prompt.clone(),
-        repo_context: input.repo_context.iter().map(PathBuf::from).collect(),
-        attachments: input
-            .attachments
-            .iter()
-            .map(attachment)
-            .collect::<Result<Vec<_>, _>>()?,
+        repo_context: Vec::new(),
+        attachments: Vec::new(),
         // Write manifests are daemon-owned policy, never caller-controlled.
         write_manifest,
         scratch_root: PathBuf::from(".agent-work/scratch/general"),
         artifact_root: PathBuf::from(".agent-work/artifacts").join(agent_id),
-        budget: Some(input.budget.clone().map(Into::into).unwrap_or_else(|| {
+        budget: Some({
             PermissionMode::from(input.permission_mode)
                 .access_mode()
                 .default_budget()
-        })),
+        }),
         validation_commands: BTreeMap::new(),
-        retain_partial: input.retain_partial,
-        idempotency_key: input.idempotency_key.clone(),
+        retain_partial: false,
+        idempotency_key: "mcp-generated".into(),
     })
 }
 
@@ -971,9 +943,9 @@ impl SubagentMcp {
         let (task, disposition) = match self.rpc(RpcMethod::SubmitGeneral {
             input: GeneralSubmitInput {
                 manifest,
-                group_id: input.group_id,
-                allowed_command_ids: input.allowed_command_ids,
-                required_command_ids: input.required_command_ids,
+                group_id: None,
+                allowed_command_ids: Vec::new(),
+                required_command_ids: Vec::new(),
             },
         })? {
             RpcSuccess::GeneralSubmitted { task, disposition } => (task, disposition),
@@ -1025,6 +997,9 @@ impl SubagentMcp {
                 pending_requests,
                 result_available,
                 activity,
+                latest_progress,
+                result,
+                instruction,
                 timed_out,
             } => Ok(Json(AgentPollOutput {
                 task: task.into(),
@@ -1033,6 +1008,9 @@ impl SubagentMcp {
                 pending_requests: pending_requests.into_iter().map(Into::into).collect(),
                 result_available,
                 activity: activity.into(),
+                latest_progress,
+                result: result.map(TryInto::try_into).transpose()?,
+                instruction,
                 timed_out,
             })),
             _ => Err(protocol_error()),
@@ -1056,12 +1034,12 @@ impl SubagentMcp {
         if !(1..=100).contains(&input.limit) {
             return Err("validation: limit must be between 1 and 100".into());
         }
-        if input.repository.is_none() && input.group_id.is_none() {
+        if input.repository.is_none() {
             return Err("validation: at least one list scope is required".into());
         }
         match self.rpc(RpcMethod::TaskList(TaskListQuery {
             repository: input.repository,
-            group_id: input.group_id,
+            group_id: None,
             phase: input.phase.map(Into::into),
             outcome: input.outcome.map(Into::into),
             cursor: input.cursor,
@@ -1411,8 +1389,8 @@ mod generic_tests {
     }
 
     #[test]
-    fn generic_spawn_rejects_duplicate_command_ids() {
-        let mut input = serde_json::from_value::<AgentSpawnInput>(serde_json::json!({
+    fn generic_spawn_rejects_legacy_command_ids() {
+        let input = serde_json::from_value::<AgentSpawnInput>(serde_json::json!({
             "repository": "/tmp/repository",
             "permission_mode": "build",
             "prompt": "run checks",
@@ -1420,10 +1398,8 @@ mod generic_tests {
             "idempotency_key": "key",
             "allowed_command_ids": ["unit"],
             "required_command_ids": ["lint"]
-        }))
-        .unwrap();
-        input.allowed_command_ids.push("unit".into());
-        assert!(general_manifest(&input).is_err());
+        })) ;
+        assert!(input.is_err());
     }
 
     #[test]
