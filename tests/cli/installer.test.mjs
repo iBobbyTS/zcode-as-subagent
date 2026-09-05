@@ -18,6 +18,30 @@ test('dry-run reports the entire plan and creates nothing', () => {
   assert.equal(fs.readdirSync(home).length, 0);
 });
 
+test('init excludes hooks by default and includes them only when requested', () => {
+  const paths = productPaths('/tmp/isolated-home');
+  assert.equal(installPlan(paths).some((step) => step.id === 'install-hooks'), false);
+  assert.equal(installPlan(paths, { installHooks: true }).some((step) => step.id === 'install-hooks'), true);
+});
+
+test('explicit hook installation is available as an independent dry-run', async () => {
+  const { installHooks } = await import('../../cli/installer.mjs');
+  const paths = productPaths(fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-as-subagent-hooks-')));
+  const result = installHooks(paths, { dryRun: true });
+  assert.equal(result.dry_run, true);
+  assert.equal(result.plan[0].id, 'install-hooks');
+  assert.equal(fs.existsSync(paths.zcodeConfig), false);
+});
+
+test('init installs hooks only with the explicit opt-in', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-as-subagent-init-hooks-'));
+  const paths = productPaths(home);
+  const result = runInit({ paths, installHooks: true, skipRuntimeProbe: true, skipNativeProbe: true });
+  assert.ok(result.completed.includes('install-hooks'));
+  assert.equal(JSON.parse(fs.readFileSync(paths.zcodeConfig, 'utf8')).hooks.enabled, true);
+  assert.equal(fs.existsSync(paths.hookProvenance), true);
+});
+
 test('resume skips completed steps', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-as-subagent-resume-'));
   const paths = productPaths(home);

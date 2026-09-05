@@ -11,6 +11,10 @@ tools; there is no compatibility alias or migration layer.
 npm install -g zcode-as-subagent
 zcode-as-subagent help
 zcode-as-subagent init --dry-run
+# Hooks are opt-in:
+zcode-as-subagent init --install-hooks
+# Or install them independently:
+zcode-as-subagent hooks install
 zcode-as-subagent status
 ```
 
@@ -38,6 +42,9 @@ only destructive data operation. `cleanup-legacy --yes` removes an old,
 unpublished installation without importing or aliasing its data. Hook
 PreToolUse remains an independent deny-first boundary in every permission
 mode, including `yolo`; PostToolUse records metadata-only hashes.
+
+The default `init` does not modify ZCode hook configuration. Hook installation
+is explicit via `init --install-hooks` or `hooks install`.
 
 See [docs/setup.md](docs/setup.md), [docs/operations.md](docs/operations.md),
 [docs/recovery.md](docs/recovery.md), and the

@@ -2,12 +2,12 @@ import fs from 'node:fs';
 import { BUSINESS_COMMANDS, PRODUCT_NAME, VERSION, ZCODE_RUNTIME } from './constants.mjs';
 import { CliError } from './errors.mjs';
 import { patchCatalog, restoreCatalog, verifyCatalog } from './catalog.mjs';
-import { runInit, installPlan, nativeBinary } from './installer.mjs';
+import { runInit, installHooks, installPlan, nativeBinary } from './installer.mjs';
 import { backupData, cleanupLegacy, purge, restoreData, uninstall } from './maintenance.mjs';
 import { platform, productPaths } from './paths.mjs';
 import { startService, stopService } from './service.mjs';
 
-const HELP = `zcode-as-subagent ${VERSION}\n\nUsage: zcode-as-subagent <command> [options]\n\nCommands:\n  help, version               Show basic product information\n  init [--dry-run] [--resume] Install and configure the local service\n  config models               Install or restore the ZCode model catalog\n  status, diagnose            Inspect local service and runtime state\n  backup --output <dir>       Back up retained product data\n  restore --input <dir>       Verify and restore product data\n  uninstall                   Remove service registration; retain data\n  purge --yes                 Explicitly delete new product data\n  cleanup-legacy --yes        Delete old unpublished installation (no migration)\n`;
+const HELP = `zcode-as-subagent ${VERSION}\n\nUsage: zcode-as-subagent <command> [options]\n\nCommands:\n  help, version               Show basic product information\n  init [--dry-run] [--resume] [--install-hooks] Install and configure the local service\n  hooks install [--dry-run]  Install ZCode policy hooks explicitly\n  config models               Install or restore the ZCode model catalog\n  status, diagnose            Inspect local service and runtime state\n  backup --output <dir>       Back up retained product data\n  restore --input <dir>       Verify and restore product data\n  uninstall                   Remove service registration; retain data\n  purge --yes                 Explicitly delete new product data\n  cleanup-legacy --yes        Delete old unpublished installation (no migration)\n`;
 
 function value(args, name) {
   const index = args.indexOf(name);
@@ -39,7 +39,11 @@ export async function main(args) {
   const paths = productPaths();
   const models = modelOptions(args);
   if (command === 'init') {
-    output(runInit({ paths, dryRun: args.includes('--dry-run'), resume: args.includes('--resume'), ...models })); return;
+    output(runInit({ paths, dryRun: args.includes('--dry-run'), resume: args.includes('--resume'), installHooks: args.includes('--install-hooks'), ...models })); return;
+  }
+  if (command === 'hooks') {
+    if (args[1] !== 'install') throw new CliError('INVALID_ARGUMENT', 'usage: hooks install [--dry-run]', 2);
+    output(installHooks(paths, { dryRun: args.includes('--dry-run') })); return;
   }
   if (command === 'config') {
     if (args[1] !== 'models') throw new CliError('INVALID_ARGUMENT', 'usage: config models [--restore] [--main-model ID] [--lite-model ID]', 2);

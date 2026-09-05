@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LAUNCH_AGENT_LABEL, ZCODE_RUNTIME } from './constants.mjs';
 import { CliError } from './errors.mjs';
@@ -8,19 +9,30 @@ import { patchCatalog } from './catalog.mjs';
 import { productPaths } from './paths.mjs';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const hookInstaller = path.join(packageRoot, 'plugins', 'zcode-subagent-mcp', 'scripts', 'install-agent-hooks.mjs');
 
 export function nativeBinary(name) {
   return path.join(packageRoot, 'npm', 'native', 'darwin-arm64', name);
 }
 
 export function installPlan(paths = productPaths(), options = {}) {
-  return [
+  const plan = [
     { id: 'probe-runtime', action: 'verify fixed ZCode runtime', path: ZCODE_RUNTIME },
     { id: 'create-data', action: 'create private product data and log directories', paths: [paths.data, paths.logs] },
     { id: 'configure-models', action: 'patch ZCode model catalog atomically', path: paths.zcodeConfig, main_model: options.mainModel, lite_model: options.liteModel },
     { id: 'write-product-config', action: 'write product paths and fixed runtime', path: paths.config },
     { id: 'install-launch-agent', action: 'install daemon LaunchAgent', path: paths.launchAgent, label: LAUNCH_AGENT_LABEL },
   ];
+  if (options.installHooks) plan.push({ id: 'install-hooks', action: 'install ZCode policy hooks', path: paths.zcodeConfig, provenance: paths.hookProvenance });
+  return plan;
+}
+
+export function installHooks(paths = productPaths(), options = {}) {
+  if (options.dryRun) return { dry_run: true, plan: [{ id: 'install-hooks', action: 'install ZCode policy hooks', path: paths.zcodeConfig, provenance: paths.hookProvenance }] };
+  const result = spawnSync(process.execPath, [hookInstaller, '--config', paths.zcodeConfig, '--provenance', paths.hookProvenance], { encoding: 'utf8' });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new CliError('HOOK_INSTALL_FAILED', (result.stderr || 'hook installation failed').trim());
+  try { return JSON.parse(result.stdout); } catch { throw new CliError('HOOK_INSTALL_FAILED', 'hook installer returned invalid JSON'); }
 }
 
 function plist(paths) {
@@ -66,6 +78,7 @@ export function runInit(options = {}) {
     files: {
       zcodeConfig: snapshotFile(paths.zcodeConfig),
       provenance: snapshotFile(paths.provenance),
+      hookProvenance: snapshotFile(paths.hookProvenance),
       state: snapshotFile(paths.state),
       config: snapshotFile(paths.config),
       launchAgent: snapshotFile(paths.launchAgent),
@@ -105,11 +118,16 @@ export function runInit(options = {}) {
       failAt('install-launch-agent');
       mark('install-launch-agent');
     }
+    if (options.installHooks && !completed.has('install-hooks')) {
+      installHooks(paths);
+      mark('install-hooks');
+    }
   } catch (error) {
     const rollbackErrors = [];
     for (const [name, file] of Object.entries({
       zcodeConfig: paths.zcodeConfig,
       provenance: paths.provenance,
+      hookProvenance: paths.hookProvenance,
       state: paths.state,
       config: paths.config,
       launchAgent: paths.launchAgent,
