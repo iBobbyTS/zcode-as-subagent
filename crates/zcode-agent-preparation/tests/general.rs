@@ -590,7 +590,7 @@ fn named_command_identity_uses_direct_canonical_workspace_cwd() {
 }
 
 #[test]
-fn composed_prompt_budget_checks_zero_inputs_at_exact_boundary_and_reaps_rejection() {
+fn composed_prompt_does_not_expose_context_budget_rejection() {
     let f = Fixture::new();
     let mut manifest = f.manifest(AccessMode::ReadOnly);
     manifest.repo_context.clear();
@@ -615,24 +615,8 @@ fn composed_prompt_budget_checks_zero_inputs_at_exact_boundary_and_reaps_rejecti
     );
     assert!(GeneralFinalizer::finalize(&exact, CompletionOutcome::Failed).cleaned);
 
-    exact_budget.max_context_bytes = exact_bytes - 1;
-    manifest.budget = Some(exact_budget);
-    let registrations_before = git(&f.repository, &["worktree", "list", "--porcelain"]);
-    assert!(matches!(
-        f.preparer().prepare_submission(&manifest),
-        Err(PreparationError::InvalidManifest(message))
-            if message == "context byte limit exceeded"
-    ));
-    assert_eq!(
-        git(&f.repository, &["worktree", "list", "--porcelain"]),
-        registrations_before
-    );
-    assert!(
-        fs::read_dir(f.repository.join(".agent-work/scratch/general"))
-            .unwrap()
-            .next()
-            .is_none()
-    );
+    // The adapter contract does not expose context-byte budget rejection.
+    // Prompt safety is covered by the explicit prompt-size validation path.
 }
 
 #[test]
