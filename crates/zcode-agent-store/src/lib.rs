@@ -2696,6 +2696,82 @@ mod tests {
     }
 
     #[test]
+    fn terminal_workspace_can_be_reused_but_active_non_direct_cannot() {
+        let (_directory, _path, store) = store();
+        let mut first = task("first", "/repo-a", None);
+        first.workspace_path = "/shared".into();
+        store.enqueue_task_authoritative(&first).unwrap();
+
+        let mut blocked = task("blocked", "/repo-b", None);
+        blocked.workspace_path = "/shared".into();
+        let error = store.enqueue_task_authoritative(&blocked).unwrap_err();
+        assert!(matches!(error, StoreError::Conflict(message) if message.contains("active_agent_id=first")));
+
+        let connection = store.connection.lock().unwrap();
+        connection
+            .execute(
+                "UPDATE tasks SET phase='TERMINAL', outcome='COMPLETED', completed_at=?1 WHERE agent_id='first'",
+                [now_millis()],
+            )
+            .unwrap();
+        drop(connection);
+
+        store.enqueue_task_authoritative(&blocked).unwrap();
+    }
+
+    #[test]
+    fn window_query_scopes_and_boundaries_are_inclusive() {
+        let (_directory, _path, store) = store();
+        let mut first = task("first", "/repo", None);
+        first.workspace_path = "/shared".into();
+        store.enqueue_task_authoritative(&first).unwrap();
+        let created_at: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row("SELECT created_at FROM tasks WHERE agent_id='first'", [], |row| row.get(0))
+            .unwrap();
+        let completed_at = created_at + 10;
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE tasks SET phase='TERMINAL', outcome='COMPLETED', completed_at=?1 WHERE agent_id='first'",
+                [completed_at],
+            )
+            .unwrap();
+
+        let exact = store
+            .list_task_window(&TaskWindowQuery {
+                agent_id: Some("first".into()),
+                workspace_path: Some("/shared".into()),
+                start_ms: Some(created_at),
+                end_ms: Some(completed_at),
+            })
+            .unwrap();
+        assert_eq!(exact.len(), 1);
+        assert!(store
+            .list_task_window(&TaskWindowQuery {
+                workspace_path: Some("/shared".into()),
+                start_ms: Some(created_at + 1),
+                end_ms: None,
+                ..Default::default()
+            })
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            store.list_task_window(&TaskWindowQuery {
+                workspace_path: Some("/shared".into()),
+                start_ms: Some(completed_at),
+                end_ms: Some(created_at),
+                ..Default::default()
+            }),
+            Err(StoreError::InvalidState(message)) if message.contains("start_ms")
+        ));
+    }
+
+    #[test]
     fn list_filters_repository_and_group_before_limit() {
         let (_directory, _path, store) = store();
         for (id, repository, group) in [
