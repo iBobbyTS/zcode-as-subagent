@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{Implementation, ServerCapabilities, ServerInfo},
@@ -23,9 +22,9 @@ use zcode_agentd::rpc::{
     AgentCapabilitiesView, CapabilityMaturityView, ComponentStateView, GeneralSubmitInput,
     MessageInput, RespondInput, ResponseDecision, ResponseOutcomeView, RpcClient, RpcMethod,
     RpcOutcome, RpcRequest, RpcSuccess, SubmissionDispositionView, SystemStatusView,
-    TaskActivityStateView, TaskActivityView, TaskArtifactMetadataView, TaskArtifactQuery,
+    TaskActivityStateView, TaskActivityView,
     TaskListQuery, TaskPhaseFilter, TaskPollQuery, TaskResultView, TaskView, TelemetryStatusView,
-    MAX_ARTIFACT_CHUNK_BYTES, RPC_VERSION,
+    RPC_VERSION,
 };
 
 use crate::{
@@ -202,11 +201,11 @@ impl From<ComponentStateView> for PublicComponentState {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct PublicAgentCapabilities {
+    #[serde(skip)]
+    #[schemars(skip)]
     pub hard_budget_caps: PublicBudget,
     pub max_rpc_frame_bytes: usize,
     pub max_wait_ms: u64,
-    pub max_artifact_chunk_bytes: usize,
-    pub named_checks: bool,
     pub maturity: BTreeMap<String, PublicCapabilityMaturity>,
 }
 
@@ -221,8 +220,6 @@ impl From<AgentCapabilitiesView> for PublicAgentCapabilities {
             hard_budget_caps: value.hard_budget_caps.into(),
             max_rpc_frame_bytes: value.max_rpc_frame_bytes,
             max_wait_ms: value.max_wait_ms,
-            max_artifact_chunk_bytes: MAX_ARTIFACT_CHUNK_BYTES,
-            named_checks: value.named_checks,
             maturity,
         }
     }
@@ -284,6 +281,8 @@ pub struct AgentSpawnOutput {
     pub agent_id: String,
     pub submission_disposition: SubmissionDisposition,
     pub phase: String,
+    #[serde(skip)]
+    #[schemars(skip)]
     pub effective_budget: PublicBudget,
     pub capabilities: PublicAgentCapabilities,
 }
@@ -300,6 +299,8 @@ pub struct PublicTask {
     pub agent_id: String,
     pub phase: String,
     pub outcome: Option<PublicOutcome>,
+    #[serde(skip)]
+    #[schemars(skip)]
     pub effective_budget: PublicBudget,
     pub cancel_requested: bool,
     pub close_requested: bool,
@@ -348,75 +349,12 @@ impl From<TaskOutcome> for PublicOutcome {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PublicArtifactKind {
-    ChangesPatch,
-}
-
-fn artifact_kind(value: &str) -> Result<PublicArtifactKind, String> {
-    match value {
-        "changes_patch" => Ok(PublicArtifactKind::ChangesPatch),
-        _ => Err(protocol_error()),
-    }
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct PublicArtifact {
-    pub artifact_id: String,
-    pub kind: PublicArtifactKind,
-    pub sha256: String,
-    pub size_bytes: u64,
-}
-
-impl TryFrom<TaskArtifactMetadataView> for PublicArtifact {
-    type Error = String;
-
-    fn try_from(value: TaskArtifactMetadataView) -> Result<Self, Self::Error> {
-        Ok(Self {
-            artifact_id: value.artifact_id,
-            kind: artifact_kind(&value.kind)?,
-            sha256: value.sha256,
-            size_bytes: value.size_bytes,
-        })
-    }
-}
-
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct PublicResult {
-    #[schemars(skip)]
-    #[serde(skip)]
     pub outcome: PublicOutcome,
     pub final_text: String,
-    #[schemars(skip)]
-    #[serde(skip)]
     pub partial: bool,
-    #[schemars(skip)]
-    #[serde(skip)]
-    pub retained: bool,
-    #[schemars(skip)]
-    #[serde(skip)]
-    pub base_commit: Option<String>,
-    #[schemars(skip)]
-    #[serde(skip)]
-    pub head_commit: Option<String>,
-    #[schemars(skip)]
-    #[serde(skip)]
-    pub changed_files: Vec<String>,
-    #[schemars(skip)]
-    #[serde(skip)]
-    pub diff_stat: Option<String>,
-    #[schemars(skip)]
-    #[serde(skip)]
-    pub checks: Vec<String>,
-    #[schemars(skip)]
-    #[serde(skip)]
-    pub residual_gaps: Vec<String>,
-    #[schemars(skip)]
-    #[serde(skip)]
-    pub result_sha256: String,
 }
 
 impl TryFrom<TaskResultView> for PublicResult {
@@ -427,14 +365,6 @@ impl TryFrom<TaskResultView> for PublicResult {
             outcome: value.outcome.into(),
             final_text: value.final_text,
             partial: value.partial,
-            retained: value.retained,
-            base_commit: value.base_commit,
-            head_commit: value.head_commit,
-            changed_files: value.changed_files,
-            diff_stat: value.diff_stat,
-            checks: value.checks,
-            residual_gaps: value.residual_gaps,
-            result_sha256: value.result_sha256,
         })
     }
 }
@@ -714,30 +644,6 @@ pub struct AgentStateOutput {
 #[serde(deny_unknown_fields)]
 pub struct AgentResultInput {
     pub agent_id: String,
-    #[serde(default, deserialize_with = "optional_non_null")]
-    #[schemars(skip)]
-    #[serde(skip)]
-    pub artifact_id: Option<String>,
-    #[serde(default, deserialize_with = "optional_non_null")]
-    #[schemars(skip)]
-    #[serde(skip)]
-    pub offset_bytes: Option<u64>,
-    #[serde(default, deserialize_with = "optional_non_null")]
-    #[schemars(skip)]
-    #[serde(skip)]
-    pub limit_bytes: Option<usize>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct PublicArtifactChunk {
-    pub artifact_id: String,
-    pub offset_bytes: u64,
-    pub returned_bytes: usize,
-    pub eof: bool,
-    pub sha256: String,
-    pub size_bytes: u64,
-    pub bytes_base64: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -745,12 +651,6 @@ pub struct PublicArtifactChunk {
 pub struct AgentResultOutput {
     pub task: PublicTask,
     pub result: Option<PublicResult>,
-    #[schemars(skip)]
-    #[serde(skip)]
-    pub artifacts: Vec<PublicArtifact>,
-    #[schemars(skip)]
-    #[serde(skip)]
-    pub artifact_chunk: Option<PublicArtifactChunk>,
 }
 
 #[derive(Debug, Clone)]
@@ -795,20 +695,13 @@ impl SubagentMcp {
     fn result(
         &self,
         agent_id: String,
-    ) -> Result<(PublicTask, Option<PublicResult>, Vec<PublicArtifact>), String> {
+    ) -> Result<(PublicTask, Option<PublicResult>), String> {
         match self.rpc(RpcMethod::TaskResult { agent_id })? {
             RpcSuccess::TaskResult {
                 task,
                 result,
-                artifacts,
-            } => Ok((
-                task.into(),
-                result.map(TryInto::try_into).transpose()?,
-                artifacts
-                    .into_iter()
-                    .map(TryInto::try_into)
-                    .collect::<Result<Vec<_>, _>>()?,
-            )),
+                ..
+            } => Ok((task.into(), result.map(TryInto::try_into).transpose()?)),
             _ => Err(protocol_error()),
         }
     }
@@ -1183,7 +1076,7 @@ impl SubagentMcp {
 
     #[tool(
         name = "zcode_subagent_result",
-        description = "Read verified task results and an optional bounded artifact chunk",
+        description = "Read the task final text and terminal result",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1195,80 +1088,10 @@ impl SubagentMcp {
         &self,
         Parameters(input): Parameters<AgentResultInput>,
     ) -> Result<Json<AgentResultOutput>, String> {
-        let selector_count = [
-            input.artifact_id.is_some(),
-            input.offset_bytes.is_some(),
-            input.limit_bytes.is_some(),
-        ]
-        .into_iter()
-        .filter(|value| *value)
-        .count();
-        if selector_count != 0 && selector_count != 3 {
-            return Err(
-                "validation: artifact_id, offset_bytes, and limit_bytes must be supplied together"
-                    .into(),
-            );
-        }
-        let (task, result, artifacts) = self.result(input.agent_id.clone())?;
-        let artifact_chunk = if let (Some(artifact_id), Some(offset_bytes), Some(limit_bytes)) =
-            (input.artifact_id, input.offset_bytes, input.limit_bytes)
-        {
-            if limit_bytes == 0 || limit_bytes > MAX_ARTIFACT_CHUNK_BYTES {
-                return Err("validation: limit_bytes is outside the allowed range".into());
-            }
-            let expected = artifacts
-                .iter()
-                .find(|artifact| artifact.artifact_id == artifact_id)
-                .ok_or_else(|| {
-                    "validation: artifact_id is not in the authoritative result".to_owned()
-                })?;
-            if offset_bytes >= expected.size_bytes {
-                return Err("validation: offset_bytes does not permit non-empty progress".into());
-            }
-            match self.rpc(RpcMethod::TaskArtifact(TaskArtifactQuery {
-                agent_id: input.agent_id,
-                artifact_id: artifact_id.clone(),
-                offset_bytes,
-                limit_bytes,
-            }))? {
-                RpcSuccess::TaskArtifact { chunk } => {
-                    let returned_bytes = chunk.bytes.len();
-                    let next_offset = offset_bytes
-                        .checked_add(u64::try_from(returned_bytes).map_err(|_| protocol_error())?)
-                        .ok_or_else(protocol_error)?;
-                    if chunk.artifact_id != artifact_id
-                        || chunk.sha256 != expected.sha256
-                        || chunk.size_bytes != expected.size_bytes
-                        || chunk.offset_bytes != offset_bytes
-                        || returned_bytes == 0
-                        || returned_bytes > limit_bytes
-                        || next_offset > expected.size_bytes
-                        || chunk.eof != (next_offset == expected.size_bytes)
-                    {
-                        return Err(
-                            "protocol_error: artifact chunk violated authoritative metadata".into(),
-                        );
-                    }
-                    Some(PublicArtifactChunk {
-                        artifact_id: chunk.artifact_id,
-                        offset_bytes: chunk.offset_bytes,
-                        returned_bytes,
-                        eof: chunk.eof,
-                        sha256: chunk.sha256,
-                        size_bytes: chunk.size_bytes,
-                        bytes_base64: BASE64.encode(chunk.bytes),
-                    })
-                }
-                _ => return Err(protocol_error()),
-            }
-        } else {
-            None
-        };
+        let (task, result) = self.result(input.agent_id.clone())?;
         Ok(Json(AgentResultOutput {
             task,
             result,
-            artifacts,
-            artifact_chunk,
         }))
     }
 
@@ -1386,6 +1209,25 @@ mod generic_tests {
                 "public schema leaked {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn public_result_and_poll_schema_have_only_text_progress_surface() {
+        let completed = PublicResult {
+            outcome: PublicOutcome::Completed,
+            final_text: "done".into(),
+            partial: false,
+        };
+        let encoded = serde_json::to_value(&completed).unwrap();
+        assert_eq!(encoded["final_text"], "done");
+        assert!(encoded.get("artifact_chunk").is_none());
+        let schema = serde_json::to_string(&schemars::schema_for!(AgentPollOutput)).unwrap();
+        for forbidden in ["artifact", "chunk", "base_commit", "head_commit", "repo_context", "worktree"] {
+            assert!(!schema.contains(forbidden), "schema leaked {forbidden}");
+        }
+        let running = serde_json::json!({"result":null,"instruction":"Use poll for progress"});
+        assert_eq!(running["result"], serde_json::Value::Null);
+        assert_eq!(running["instruction"], "Use poll for progress");
     }
 
     #[test]
@@ -1558,18 +1400,14 @@ mod generic_tests {
         let service = Arc::new(RpcService::new(scheduler, Arc::clone(&store)).unwrap());
         let server = RpcServer::bind(&socket, service, ServerOptions::default()).unwrap();
         let first = SubagentMcp::new(socket.clone(), Duration::from_secs(1));
-        let (_, first_result, first_artifacts) = first.result(agent_id.clone()).unwrap();
+        let (_, first_result) = first.result(agent_id.clone()).unwrap();
         assert_eq!(first_result.unwrap().final_text, "persisted terminal text");
-        assert_eq!(first_artifacts.len(), 1);
         drop(first);
 
         let reconstructed = SubagentMcp::new(socket, Duration::from_secs(1));
         let Json(output) = reconstructed
             .agent_result(Parameters(AgentResultInput {
                 agent_id,
-                artifact_id: Some("changes-patch".into()),
-                offset_bytes: Some(0),
-                limit_bytes: Some(patch_bytes.len()),
             }))
             .await
             .unwrap();
@@ -1577,16 +1415,6 @@ mod generic_tests {
         let persisted = output.result.unwrap();
         assert!(matches!(persisted.outcome, PublicOutcome::Completed));
         assert_eq!(persisted.final_text, "persisted terminal text");
-        assert_eq!(persisted.changed_files, ["src/lib.rs"]);
-        assert_eq!(output.artifacts.len(), 1);
-        assert!(matches!(
-            output.artifacts[0].kind,
-            PublicArtifactKind::ChangesPatch
-        ));
-        let chunk = output.artifact_chunk.unwrap();
-        assert!(chunk.eof);
-        assert_eq!(chunk.sha256, patch_sha256);
-        assert_eq!(BASE64.decode(chunk.bytes_base64).unwrap(), patch_bytes);
         server.shutdown();
     }
 }
