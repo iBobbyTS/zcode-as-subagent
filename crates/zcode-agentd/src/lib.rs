@@ -197,6 +197,7 @@ struct ParsedActivity {
     telemetry_known: bool,
     assistant_message_id: Option<String>,
     message_finished: bool,
+    terminal_response: Option<String>,
 }
 
 impl ParsedActivity {
@@ -214,6 +215,7 @@ impl ParsedActivity {
             telemetry_known: true,
             assistant_message_id: None,
             message_finished: false,
+            terminal_response: None,
         }
     }
 }
@@ -320,7 +322,10 @@ impl PassiveActivityTracker {
                     let buffer = state.assistant_buffers.entry(message_id.to_owned()).or_default();
                     buffer.push_str(delta);
                     if buffer.len() > MAX_LATEST_TEXT_BYTES {
-                        let keep_from = buffer.len().saturating_sub(MAX_LATEST_TEXT_BYTES);
+                        let mut keep_from = buffer.len().saturating_sub(MAX_LATEST_TEXT_BYTES);
+                        while keep_from < buffer.len() && !buffer.is_char_boundary(keep_from) {
+                            keep_from += 1;
+                        }
                         *buffer = buffer[keep_from..].to_owned();
                     }
                 }
@@ -330,6 +335,15 @@ impl PassiveActivityTracker {
                     if let Some(buffer) = state.assistant_buffers.remove(message_id) {
                         state.latest_progress = Some(buffer);
                     }
+                }
+            }
+            if let Some(response) = parsed.terminal_response.as_deref() {
+                if response.len() as u64 <= state.terminal_text_limit {
+                    state.terminal_text = response.to_owned();
+                    state.terminal_text_oversized = false;
+                } else {
+                    state.terminal_text.clear();
+                    state.terminal_text_oversized = true;
                 }
             }
         }
@@ -473,6 +487,7 @@ impl PassiveActivityTracker {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum TerminalText {
     Visible(String),
     Missing,
@@ -610,6 +625,10 @@ fn parse_activity_message(
             }
             (Some("turn.completed"), _, _) => {
                 parsed.transition = Some(ActivityTransition::TurnCompleted);
+                parsed.terminal_response = payload
+                    .get("response")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
                 parsed.identity = event_id
                     .or(turn_id)
                     .map(|id| format!("turn:{id}:completed"));
@@ -6110,6 +6129,41 @@ mod tests {
         ] {
             assert!(!public_shape.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn assistant_progress_respects_message_boundary_utf8_and_terminal_response() {
+        let tracker = PassiveActivityTracker::new(128);
+        let event = |payload: serde_json::Value| {
+            RuntimeEvent::Driver(Inbound::Message(WireMessage::Event(EventEnvelope {
+                method: "session/event".into(),
+                params: payload,
+            })))
+        };
+        let base = Instant::now();
+        tracker.observe_at(&event(serde_json::json!({
+            "type":"model.streaming", "payload":{"kind":"text_delta", "assistantMessageId":"m1", "delta":"你好😀"}
+        })), base, 1);
+        assert!(tracker.snapshot_at(base).latest_progress.is_none());
+        tracker.observe_at(&event(serde_json::json!({
+            "type":"model.streaming", "payload":{"kind":"message_done", "assistantMessageId":"m1"}
+        })), base, 2);
+        assert_eq!(tracker.snapshot_at(base).latest_progress.as_deref(), Some("你好😀"));
+        tracker.observe_at(&event(serde_json::json!({
+            "type":"model.streaming", "payload":{"kind":"text_delta", "assistantMessageId":"m2", "delta":"x"}
+        })), base, 3);
+        assert_eq!(tracker.snapshot_at(base).latest_progress.as_deref(), Some("你好😀"));
+        tracker.observe_at(&event(serde_json::json!({
+            "type":"turn.completed", "payload":{"response":"authoritative response"}
+        })), base, 4);
+        assert_eq!(tracker.take_terminal_text(), TerminalText::Visible("authoritative response".into()));
+        let long = "😀".repeat(MAX_LATEST_TEXT_BYTES);
+        tracker.observe_at(&event(serde_json::json!({
+            "type":"model.streaming", "payload":{"kind":"text_delta", "assistantMessageId":"m3", "delta":long}
+        })), base, 5);
+        let snapshot = tracker.snapshot_at(base);
+        assert!(snapshot.latest_text_tail.is_char_boundary(0));
+        assert!(snapshot.latest_text_tail.is_char_boundary(snapshot.latest_text_tail.len()));
     }
 
     fn timeout_test_activity() -> PassiveActivitySnapshot {
