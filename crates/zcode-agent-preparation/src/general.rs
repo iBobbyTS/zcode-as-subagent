@@ -236,6 +236,8 @@ pub struct PreparedGeneralTask {
     /// Filesystem-only integrity proof for a direct read-only workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_read_only_snapshot_sha256: Option<String>,
+    #[serde(default)]
+    pub direct_workspace_snapshot: BTreeMap<PathBuf, String>,
     pub worktree: PreparedWorktree,
     pub scratch_root: PathBuf,
     pub artifact_root: PathBuf,
@@ -728,6 +730,11 @@ impl GeneralTaskPreparer {
                 } else {
                     None
                 },
+                direct_workspace_snapshot: if direct_workspace {
+                    direct_workspace_snapshot_map(&repository).map_err(|reason| PreparationError::InvalidPath { path: repository.clone(), reason })?
+                } else {
+                    BTreeMap::new()
+                },
                 worktree: worktree.clone(),
                 scratch_root,
                 artifact_root,
@@ -1194,11 +1201,17 @@ impl GeneralFinalizer {
         // read-only patch of the caller-owned workspace for result evidence.
         if prepared.direct_workspace {
             validate_direct_workspace_identity(prepared)?;
-            if prepared.write_manifest.is_empty()
-                && prepared.direct_read_only_snapshot_sha256.as_deref()
-                    != Some(direct_workspace_snapshot(&prepared.repository)?.as_str())
+            let after = direct_workspace_snapshot_map(&prepared.repository)
+                .map_err(|_| "DIRECT_SNAPSHOT_FAILED".to_owned())?;
+            for path in prepared
+                .direct_workspace_snapshot
+                .keys()
+                .chain(after.keys())
             {
-                return Err("CHANGED_PATH_NOT_ALLOWLISTED".into());
+                let changed = prepared.direct_workspace_snapshot.get(path) != after.get(path);
+                if changed && !prepared.write_manifest.iter().any(|root| path.starts_with(root)) {
+                    return Err("CHANGED_PATH_NOT_ALLOWLISTED".into());
+                }
             }
             return Ok(GeneralCompletion {
                 outcome: requested,
@@ -1434,6 +1447,25 @@ fn direct_workspace_snapshot(root: &Path) -> Result<String, String> {
     let mut bytes = 0;
     visit(root, root, &mut hasher, &mut entries, &mut bytes)?;
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn direct_workspace_snapshot_map(root: &Path) -> Result<BTreeMap<PathBuf, String>, String> {
+    fn visit(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, String>) -> Result<(), String> {
+        for entry in fs::read_dir(dir).map_err(|_| "DIRECT_SNAPSHOT_FAILED".to_owned())? {
+            let entry = entry.map_err(|_| "DIRECT_SNAPSHOT_FAILED".to_owned())?;
+            let path = entry.path();
+            let relative = path.strip_prefix(root).map_err(|_| "DIRECT_SNAPSHOT_FAILED".to_owned())?.to_path_buf();
+            if relative.components().next().is_some_and(|c| matches!(c, Component::Normal(name) if name == ".git" || name == ".agent-work")) { continue; }
+            let metadata = fs::symlink_metadata(&path).map_err(|_| "DIRECT_SNAPSHOT_FAILED".to_owned())?;
+            let digest = if metadata.is_file() { hash(&fs::read(&path).map_err(|_| "DIRECT_SNAPSHOT_FAILED".to_owned())?) } else if metadata.file_type().is_symlink() { hash(fs::read_link(&path).map_err(|_| "DIRECT_SNAPSHOT_FAILED".to_owned())?.as_os_str().as_encoded_bytes()) } else { "directory".into() };
+            out.insert(relative.clone(), digest);
+            if metadata.is_dir() { visit(root, &path, out)?; }
+        }
+        Ok(())
+    }
+    let mut result = BTreeMap::new();
+    visit(root, root, &mut result)?;
+    Ok(result)
 }
 
 fn cleanup_failed_artifact_outputs(prepared: &PreparedGeneralTask) {
