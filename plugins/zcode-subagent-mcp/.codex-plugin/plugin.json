@@ -1,5 +1,5 @@
 {
-  "name": "zcode-subagent-mcp",
+  "name": "zcode-as-subagent-mcp",
   "version": "0.1.0",
   "description": "Local bounded ZCode subagent MCP facade with fail-closed policy hooks",
   "author": {
@@ -8,7 +8,7 @@
   "interface": {
     "displayName": "ZCode Subagent MCP",
     "shortDescription": "Run bounded local ZCode agents.",
-    "longDescription": "Connects Codex to the local stateless facade while the separately managed zcode-agentd daemon owns durable task lifecycle state.",
+    "longDescription": "Connects Codex to the local stateless facade while the separately managed zcode-as-subagentd daemon owns durable task lifecycle state.",
     "developerName": "zcode-mcp maintainers",
     "category": "Productivity",
     "capabilities": ["Local MCP", "Durable tasks", "Agent tasks"],

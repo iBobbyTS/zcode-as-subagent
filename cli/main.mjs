@@ -55,7 +55,7 @@ export async function main(args) {
   if (command === 'diagnose') {
     let catalog = false;
     try { catalog = verifyCatalog(JSON.parse(fs.readFileSync(paths.zcodeConfig, 'utf8')), models); } catch {}
-    output({ platform: platform(), runtime: ZCODE_RUNTIME, runtime_exists: fs.existsSync(ZCODE_RUNTIME), daemon_binary: nativeBinary('zcode-agentd'), daemon_binary_exists: fs.existsSync(nativeBinary('zcode-agentd')), catalog }); return;
+    output({ platform: platform(), runtime: ZCODE_RUNTIME, runtime_exists: fs.existsSync(ZCODE_RUNTIME), daemon_binary: nativeBinary('zcode-as-subagentd'), daemon_binary_exists: fs.existsSync(nativeBinary('zcode-as-subagentd')), catalog }); return;
   }
   if (command === 'backup') { output(backupData(value(args, '--output'), paths)); return; }
   if (command === 'restore') { output(restoreData(value(args, '--input'), paths)); return; }

@@ -12,8 +12,8 @@ HOME="$test_home" "$prefix/bin/zcode-as-subagent" status > .agent-work/evidence/
 HOME="$test_home" "$prefix/bin/zcode-as-subagent" init --dry-run > .agent-work/evidence/npm-tarball/dry-run.json
 HOME="$test_home" "$prefix/bin/zcode-as-subagent" init > .agent-work/evidence/npm-tarball/init.json
 
-daemon="$prefix/lib/node_modules/zcode-as-subagent/npm/native/darwin-arm64/zcode-agentd"
-facade="$prefix/lib/node_modules/zcode-as-subagent/npm/native/darwin-arm64/zcode-subagent-mcp"
+daemon="$prefix/lib/node_modules/zcode-as-subagent/npm/native/darwin-arm64/zcode-as-subagentd"
+facade="$prefix/lib/node_modules/zcode-as-subagent/npm/native/darwin-arm64/zcode-as-subagent-mcp"
 plist="$test_home/Library/LaunchAgents/com.zcode-as-subagent.daemon.plist"
 test -x "$daemon"
 test -x "$facade"

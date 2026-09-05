@@ -5,7 +5,7 @@ use std::{
 };
 
 fn discover() -> Vec<Value> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_zcode-subagent-mcp"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zcode-as-subagent-mcp"))
         .env(
             "ZCODE_AGENTD_SOCKET",
             "/tmp/zcode-subagent-mcp-test-unused.sock",

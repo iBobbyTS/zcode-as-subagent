@@ -108,7 +108,7 @@ fn daemon_starts_without_hooks_or_service_generation() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("no-hooks.sqlite3");
     let socket = directory.path().join("private").join("no-hooks.sock");
-    let daemon_executable = env!("CARGO_BIN_EXE_zcode-agentd");
+    let daemon_executable = env!("CARGO_BIN_EXE_zcode-as-subagentd");
     let mut daemon = Command::new(daemon_executable)
         .env("ZCODE_AGENTD_STORE", &database)
         .env("ZCODE_AGENTD_SOCKET", &socket)
@@ -139,7 +139,7 @@ fn daemon_auto_claims_is_single_instance_reconnects_and_handles_sigterm() {
         runtime.is_file(),
         "workspace fake runtime binary is required"
     );
-    let daemon_executable = env!("CARGO_BIN_EXE_zcode-agentd");
+    let daemon_executable = env!("CARGO_BIN_EXE_zcode-as-subagentd");
     let (hook_file, service_generation) = hook_provenance(directory.path());
     let repository = create_repository(directory.path());
     let head = git_text(&repository, &["rev-parse", "HEAD"]);
@@ -450,7 +450,7 @@ fn signal_before_daemon_start_exits_without_socket_runtime_or_durable_activation
         .unwrap();
     drop(store);
 
-    let daemon_executable = env!("CARGO_BIN_EXE_zcode-agentd");
+    let daemon_executable = env!("CARGO_BIN_EXE_zcode-as-subagentd");
     let mut daemon = Command::new(daemon_executable)
         .env("ZCODE_AGENTD_STORE", &database)
         .env("ZCODE_AGENTD_SOCKET", &socket)

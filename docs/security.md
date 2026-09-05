@@ -1,7 +1,7 @@
 # Security boundary
 
-`zcode-agentd` owns durable task identity, scope, budgets, pending requests,
-runtime processes, cleanup, and artifact locators. `zcode-subagent-mcp` is a
+`zcode-as-subagentd` owns durable task identity, scope, budgets, pending requests,
+runtime processes, cleanup, and artifact locators. `zcode-as-subagent-mcp` is a
 stateless local projection: it validates bounded public inputs, calls the
 private Unix RPC, and returns only approved fields. Do not expose the private
 socket to untrusted local users; keep its directory and the SQLite database
