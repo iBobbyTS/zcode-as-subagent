@@ -13,6 +13,8 @@
     "cli/",
     "npm/",
     "launchd/",
+    "plugins/",
+    "crates/zcode-agent-preparation/src/policy.rs",
     "scripts/install/",
     "LICENSE"
   ],

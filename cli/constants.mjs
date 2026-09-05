@@ -7,7 +7,7 @@ export const DEFAULT_MAIN_MODEL = 'glm-5.3';
 export const DEFAULT_LITE_MODEL = 'glm-5.3-flash';
 
 export const BUSINESS_COMMANDS = new Set([
-  'init', 'config', 'status', 'diagnose', 'backup', 'restore', 'start', 'stop',
+  'init', 'hooks', 'config', 'status', 'diagnose', 'backup', 'restore', 'start', 'stop',
   'uninstall', 'purge', 'cleanup-legacy', 'create', 'get', 'list', 'send',
   'respond', 'cancel', 'result', 'close',
 ]);
