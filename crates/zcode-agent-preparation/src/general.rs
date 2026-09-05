@@ -541,7 +541,9 @@ impl GeneralTaskPreparer {
                 reason: "artifact root must be bound to agent_id".into(),
             });
         }
-        let direct_private_root = std::env::temp_dir().join("zcode-agentd");
+        let direct_private_root = std::env::temp_dir()
+            .join("zcode-agentd")
+            .join(hash(format!("{}:{}", manifest.agent_id, manifest.idempotency_key).as_bytes()));
         let scratch_parent = if direct_workspace {
             fs::create_dir_all(&direct_private_root)?;
             fs::canonicalize(direct_private_root.join("scratch"))
