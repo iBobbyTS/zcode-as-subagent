@@ -47,3 +47,4 @@ model during local tests.
 | No remote daemon/multi-tenant/second supervisor | command surface and process fixture |
 | No Windows daemon/GUI/Rosetta | Windows isolated HOME unsupported matrix |
 | No Git/worktree/base_ref/access_mode | public schema and live runner grep |
+| Real-call budget is fail-closed | ledger reserve/finalize test verifies refusal after call 50 |

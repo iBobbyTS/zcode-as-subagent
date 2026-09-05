@@ -46,6 +46,12 @@ mode, including `yolo`; PostToolUse records metadata-only hashes.
 The default `init` does not modify ZCode hook configuration. Hook installation
 is explicit via `init --install-hooks` or `hooks install`.
 
+The distributable public request catalog is versioned at
+[`schema/zcode-subagent-public-api.json`](schema/zcode-subagent-public-api.json).
+Real ZCode validation is fail-closed at 50 counted calls; the release ledger
+(`scripts/release/zcode-call-ledger.mjs`) retains completed, failed, timed-out,
+cancelled, and abandoned reservations for auditability.
+
 See [docs/setup.md](docs/setup.md), [docs/operations.md](docs/operations.md),
 [docs/recovery.md](docs/recovery.md), and the
 [plugin validation guide](plugins/zcode-subagent-mcp/docs/VALIDATION.md).

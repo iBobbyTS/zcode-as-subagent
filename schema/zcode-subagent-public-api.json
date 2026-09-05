@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zcode-as-subagent.invalid/schema/public-api.json",
+  "title": "zcode-as-subagent MCP public API",
+  "description": "The intentionally small zcode_subagent_* wire catalog.",
+  "type": "object",
+  "required": ["tools"],
+  "properties": {
+    "tools": {
+      "type": "array",
+      "const": ["zcode_subagent_cancel", "zcode_subagent_close", "zcode_subagent_list", "zcode_subagent_poll", "zcode_subagent_respond", "zcode_subagent_result", "zcode_subagent_send", "zcode_subagent_spawn", "zcode_subagent_status"]
+    },
+    "permission_mode": { "enum": ["build", "edit", "plan", "yolo"] },
+    "spawn": {
+      "type": "object",
+      "required": ["repository", "permission_mode", "prompt"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "permission_mode": { "$ref": "#/properties/permission_mode" },
+        "prompt": { "type": "string", "minLength": 1 },
+        "write_manifest": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
