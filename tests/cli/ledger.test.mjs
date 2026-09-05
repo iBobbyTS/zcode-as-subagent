@@ -38,3 +38,15 @@ test('finalization is one-shot and invalid outcomes fail closed', () => {
   calls.finalize('call-1', 'failed');
   assert.throws(() => calls.finalize('call-1', 'completed'), /already finalized/);
 });
+
+test('stale lock fails closed, then a later reservation can retry', () => {
+  const calls = ledger();
+  fs.writeFileSync(calls.lockFile, 'stale');
+  assert.throws(() => calls.reserve({ call_id: 'blocked', scenario_id: 'lock' }), /ledger is busy/);
+  fs.unlinkSync(calls.lockFile);
+  calls.reserve({ call_id: 'retry', scenario_id: 'lock' });
+  calls.finalize('retry', 'failed');
+  assert.equal(calls.counted(), 1);
+  calls.reserve({ call_id: 'next', scenario_id: 'retry' });
+  assert.equal(calls.counted(), 2);
+});

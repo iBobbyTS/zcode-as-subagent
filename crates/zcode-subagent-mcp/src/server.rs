@@ -41,6 +41,10 @@ pub enum PublicPermissionMode {
     Yolo,
 }
 
+impl Default for PublicPermissionMode {
+    fn default() -> Self { Self::Build }
+}
+
 impl From<PublicPermissionMode> for PermissionMode {
     fn from(value: PublicPermissionMode) -> Self {
         match value {
@@ -259,13 +263,16 @@ pub struct PublicAttachmentInput {
     pub source_path: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct AgentSpawnInput {
     pub repository: String,
+    #[serde(default)]
     pub permission_mode: PublicPermissionMode,
     pub prompt: String,
+    #[serde(default)]
+    pub write_manifest: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
@@ -745,12 +752,21 @@ fn general_manifest(input: &AgentSpawnInput, request_identity: &str) -> Result<G
         return Err("validation: repository must be absolute".into());
     }
     let agent_id = "daemon-prepared".to_owned();
-    let write_manifest = match input.permission_mode {
-        PublicPermissionMode::Build | PublicPermissionMode::Edit | PublicPermissionMode::Yolo => {
-            vec![PathBuf::from(".")]
+    let mut write_manifest = Vec::with_capacity(input.write_manifest.len());
+    for value in &input.write_manifest {
+        validate_path(value, "write_manifest")?;
+        let path = PathBuf::from(value);
+        if path.is_absolute() || path.components().any(|component| {
+            matches!(component, std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                | std::path::Component::RootDir)
+        }) {
+            return Err("validation: write_manifest paths must be relative to repository".into());
         }
-        PublicPermissionMode::Plan => Vec::new(),
-    };
+        write_manifest.push(path);
+    }
+    if matches!(input.permission_mode, PublicPermissionMode::Plan) && !write_manifest.is_empty() {
+        return Err("validation: write_manifest is only valid for write permission modes".into());
+    }
     Ok(GeneralTaskManifest {
         schema: GENERAL_TASK_SCHEMA.into(),
         agent_id: agent_id.clone(),
@@ -1186,7 +1202,7 @@ mod generic_tests {
             .collect::<Vec<_>>();
         assert_eq!(names, PUBLIC_TOOLS);
         let encoded = serde_json::to_string(&tools).unwrap();
-        assert!(!encoded.contains("write_manifest"));
+        assert!(encoded.contains("write_manifest"));
         for forbidden in [
             concat!("zcode_", "review_spawn"),
             concat!("zcode_", "review_continue"),
@@ -1248,15 +1264,19 @@ mod generic_tests {
     }
 
     #[test]
-    fn public_spawn_rejects_caller_write_manifest() {
-        let result = serde_json::from_value::<AgentSpawnInput>(serde_json::json!({
+    fn public_spawn_accepts_caller_write_manifest_and_defaults_build() {
+        let input = serde_json::from_value::<AgentSpawnInput>(serde_json::json!({
             "repository": "/tmp/repository",
-            "permission_mode": "build",
             "prompt": "run checks",
-            "idempotency_key": "key",
             "write_manifest": ["src"]
-        }));
-        assert!(result.is_err(), "write_manifest must not be a public input");
+        })).unwrap();
+        assert_eq!(input.permission_mode, PublicPermissionMode::Build);
+        assert_eq!(general_manifest(&input, "test-request").unwrap().write_manifest, [PathBuf::from("src")]);
+        for path in ["../outside", "/absolute", "src/../../outside"] {
+            let mut value = input.clone();
+            value.write_manifest = vec![path.into()];
+            assert!(general_manifest(&value, "test-request").is_err(), "accepted {path}");
+        }
     }
 
     #[test]
@@ -1293,17 +1313,18 @@ mod generic_tests {
     }
 
     #[test]
-    fn public_write_modes_bind_the_canonical_workspace_write_scope() {
+    fn public_write_modes_do_not_default_to_the_entire_workspace() {
         for mode in ["build", "edit", "yolo"] {
             let input = serde_json::from_value::<AgentSpawnInput>(serde_json::json!({
                 "repository": "/tmp/repository",
                 "permission_mode": mode,
-                "prompt": "write a file"
+                "prompt": "write a file",
+                "write_manifest": ["src"]
             }))
             .unwrap();
             assert_eq!(
                 general_manifest(&input, "test-request").unwrap().write_manifest,
-                [PathBuf::from(".")]
+                [PathBuf::from("src")]
             );
         }
         let input = serde_json::from_value::<AgentSpawnInput>(serde_json::json!({
