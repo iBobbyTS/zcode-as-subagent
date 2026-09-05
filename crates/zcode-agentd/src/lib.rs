@@ -5944,22 +5944,9 @@ impl Daemon {
                 "claim interval must be positive",
             ));
         }
-        let service_generation = std::env::var("ZCODE_AGENT_SERVICE_GENERATION").map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "ZCODE_AGENT_SERVICE_GENERATION is required",
-            )
-        })?;
-        if !zcode_agent_preparation::agent_bash_hook_provenance_for_service_generation(Some(
-            &service_generation,
-        ))
-        .hook_activation_verified
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "agent hook provenance is missing, stale, or mismatched",
-            ));
-        }
+        let service_generation = std::env::var("ZCODE_AGENT_SERVICE_GENERATION")
+            .ok()
+            .filter(|value| !value.is_empty() && value.len() <= 128);
         check_startup_shutdown(&shutdown_requested)?;
         let singleton_lock = SingletonLock::acquire(scheduler.store().database_path())?;
         check_startup_shutdown(&shutdown_requested)?;
@@ -5970,11 +5957,14 @@ impl Daemon {
             .map_err(|error| io::Error::other(error.to_string()))?;
         check_startup_shutdown(&shutdown_requested)?;
         let service = Arc::new(
-            rpc::RpcService::new_with_service_generation(
-                scheduler.clone(),
-                scheduler.store(),
-                service_generation,
-            )
+            match service_generation {
+                Some(service_generation) => rpc::RpcService::new_with_service_generation(
+                    scheduler.clone(),
+                    scheduler.store(),
+                    service_generation,
+                ),
+                None => rpc::RpcService::new(scheduler.clone(), scheduler.store()),
+            }
             .map_err(|_| io::Error::other("RPC service initialization failed"))?,
         );
         let server = rpc::RpcServer::bind(socket, service, server_options)?;

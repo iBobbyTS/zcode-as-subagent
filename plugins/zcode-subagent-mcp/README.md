@@ -49,10 +49,10 @@ node scripts/check-agent-hooks.mjs --config /absolute/config.json \
 The installer is idempotent and preserves unrelated hook matchers. It refuses
 to replace an unknown managed Bash or file hook. Preflight invokes a safe read,
 denies a destructive canary, and records the installed artifact identity.
-`ZCODE_AGENT_HOOK_PROVENANCE` is the only provenance path consumed by the
-daemon. Export the installer's `service_generation` result as
-`ZCODE_AGENT_SERVICE_GENERATION` for the daemon. A missing, stale, tampered,
-or generation-mismatched record prevents daemon startup.
+`ZCODE_AGENT_HOOK_PROVENANCE` is consumed only by explicit hook checks. Hooks
+are optional and a missing, stale, tampered, or generation-mismatched record
+does not prevent daemon startup. `ZCODE_AGENT_SERVICE_GENERATION` may still be
+provided when a caller wants the daemon status generation to be stable.
 
 ## Security contract
 
