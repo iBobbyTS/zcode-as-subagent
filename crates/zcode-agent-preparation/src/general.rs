@@ -2,7 +2,6 @@ use crate::{PolicyCapabilities, PolicyLauncher, PreparationError, PreparationRes
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -172,7 +171,6 @@ impl PreparedGeneralTask {
             self.workspace.scratch_root.clone(),
             self.workspace.scratch_root.join("result.json"),
             inputs,
-            BTreeMap::new(),
             PolicyCapabilities::default(),
             self.permission_mode.access_mode(),
             self.write_manifest.clone(),

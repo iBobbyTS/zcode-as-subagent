@@ -35,7 +35,7 @@ use timeouts::RuntimeDeadline;
 use zcode_agent_preparation::{
     general_launch_prompt, CompletionOutcome, GeneralCompletion, GeneralFinalizer,
     GeneralTaskManifest, GeneralTaskPreparer, PolicyLauncher, PreparedGeneralTask, RuntimeTimeouts,
-    ValidatedPermissionDenial, ValidationOutput,
+    ValidatedPermissionDenial,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2489,13 +2489,6 @@ pub struct ResponseOutcome {
     pub effective_decision: String,
     pub policy_overrode: bool,
     pub policy_reason_code: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GeneralCheckResult {
-    pub command_id: String,
-    pub succeeded: bool,
-    pub output: ValidationOutput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
