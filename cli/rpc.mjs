@@ -34,7 +34,11 @@ function methodFor(command, input) {
   switch (command) {
     case 'create': case 'spawn': return { method: 'submit_general', params: { input: { manifest: manifest(input), group_id: input.group_id ?? null, allowed_command_ids: input.allowed_command_ids || [], required_command_ids: input.required_command_ids || [] } } };
     case 'get': case 'poll': return { method: 'task_poll', params: { agent_id: input.agent_id, after_revision: input.after_revision || 0, timeout_ms: input.timeout_ms ?? 0 } };
-    case 'list': return { method: 'task_list', params: { repository: input.repository ?? null, group_id: input.group_id ?? null, phase: input.phase ?? null, outcome: input.outcome ?? null, cursor: input.cursor ?? null, limit: input.limit ?? 100 } };
+    case 'list': {
+      const repository = input.repository ?? input.workspace;
+      if (!repository) throw new CliError('INVALID_ARGUMENT', 'list requires repository or workspace scope', 2);
+      return { method: 'task_list', params: { repository, group_id: input.group_id ?? null, phase: input.phase ?? null, outcome: input.outcome ?? null, cursor: input.cursor ?? null, limit: input.limit ?? 100 } };
+    }
     case 'send': return { method: 'task_message', params: { agent_id: input.agent_id, message_id: input.message_id || requestId(), mode: input.mode || 'queue', content: input.content } };
     case 'respond': return { method: 'task_respond', params: { agent_id: input.agent_id, request_id: input.request_id, decision: input.decision, content: input.reason ?? input.content ?? null } };
     case 'cancel': return { method: 'task_cancel', params: { agent_id: input.agent_id } };
@@ -46,7 +50,8 @@ function methodFor(command, input) {
 
 export function callDaemon(socketPath, command, input, timeoutMs = 6000) {
   const { method, params } = methodFor(command, input);
-  const request = JSON.stringify({ version: RPC_VERSION, request_id: requestId(), method, params }) + '\n';
+  const request_id = requestId();
+  const request = JSON.stringify({ version: RPC_VERSION, request_id, method, params }) + '\n';
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath); let data = ''; let settled = false;
     const finish = (fn, value) => { if (!settled) { settled = true; socket.destroy(); fn(value); } };
@@ -57,7 +62,8 @@ export function callDaemon(socketPath, command, input, timeoutMs = 6000) {
       data += chunk; const line = data.split('\n')[0]; if (!line) return; clearTimeout(timer);
       try {
         const response = JSON.parse(line);
-        if (response.outcome === 'error') { const daemon = response.error || {}; const error = new CliError(daemon.code || 'DAEMON_ERROR', daemon.message || 'daemon request failed'); error.agentId = daemon.active_agent_id; finish(reject, error); }
+        if (response.version !== RPC_VERSION || response.request_id !== request_id) finish(reject, new CliError('PROTOCOL_ERROR', 'daemon returned an RPC response for a different version or request'));
+        else if (response.outcome === 'error') { const daemon = response.error || {}; const error = new CliError(daemon.code || 'DAEMON_ERROR', daemon.message || 'daemon request failed'); error.agentId = daemon.active_agent_id; finish(reject, error); }
         else if (response.outcome === 'success') finish(resolve, response.result);
         else finish(reject, new CliError('PROTOCOL_ERROR', 'daemon returned an invalid RPC response'));
       } catch { finish(reject, new CliError('PROTOCOL_ERROR', 'daemon returned invalid JSON')); }
