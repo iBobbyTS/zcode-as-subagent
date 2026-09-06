@@ -1274,7 +1274,7 @@ mod generic_tests {
             input_wait_timeout_ms: 5,
         };
         let value = serde_json::to_value(budget).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 10);
+        assert_eq!(value.as_object().unwrap().len(), 5);
         assert!(!value.to_string().contains("semantic"));
     }
 
