@@ -30,7 +30,7 @@ function ask() {
 
 function envRequired(env) {
   if (env?.ZCODE_AGENT_POLICY !== '1') return deny('policy_marker_missing');
-  const rawRoot = env?.ZCODE_AGENT_WORKTREE_ROOT;
+  const rawRoot = env?.ZCODE_AGENT_WORKSPACE_ROOT;
   if (typeof rawRoot !== 'string' || rawRoot.length === 0 || !path.isAbsolute(rawRoot)) {
     return deny('worktree_root_missing');
   }

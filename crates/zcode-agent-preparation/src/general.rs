@@ -71,10 +71,15 @@ pub struct BudgetLimits {
     pub model_stream_idle_timeout_ms: u64,
     pub tool_call_timeout_ms: u64,
     pub input_wait_timeout_ms: u64,
+    #[deprecated(note = "legacy field retained only for source compatibility; ignored")]
     pub max_turns: u64,
+    #[deprecated(note = "legacy field retained only for source compatibility; ignored")]
     pub max_tool_calls: u64,
+    #[deprecated(note = "legacy field retained only for source compatibility; ignored")]
     pub max_context_bytes: u64,
+    #[deprecated(note = "legacy field retained only for source compatibility; ignored")]
     pub max_result_bytes: u64,
+    #[deprecated(note = "legacy field retained only for source compatibility; ignored")]
     pub max_artifact_bytes: u64,
 }
 
@@ -87,11 +92,7 @@ impl AccessMode {
                 model_stream_idle_timeout_ms: 90_000,
                 tool_call_timeout_ms: 120_000,
                 input_wait_timeout_ms: 300_000,
-                max_turns: 12,
-                max_tool_calls: 80,
-                max_context_bytes: 2_000_000,
-                max_result_bytes: 256_000,
-                max_artifact_bytes: 2_000_000,
+                max_turns: u64::MAX, max_tool_calls: u64::MAX, max_context_bytes: u64::MAX, max_result_bytes: u64::MAX, max_artifact_bytes: u64::MAX,
             },
             Self::WorkspaceWrite => BudgetLimits {
                 absolute_wall_time_ms: 1_800_000,
@@ -99,11 +100,7 @@ impl AccessMode {
                 model_stream_idle_timeout_ms: 90_000,
                 tool_call_timeout_ms: 300_000,
                 input_wait_timeout_ms: 300_000,
-                max_turns: 32,
-                max_tool_calls: 240,
-                max_context_bytes: 4_000_000,
-                max_result_bytes: 512_000,
-                max_artifact_bytes: 16_000_000,
+                max_turns: u64::MAX, max_tool_calls: u64::MAX, max_context_bytes: u64::MAX, max_result_bytes: u64::MAX, max_artifact_bytes: u64::MAX,
             },
         }
     }
@@ -116,11 +113,7 @@ fn hard_budget_cap() -> BudgetLimits {
         model_stream_idle_timeout_ms: 86_400_000,
         tool_call_timeout_ms: 86_400_000,
         input_wait_timeout_ms: 86_400_000,
-        max_turns: 1_024,
-        max_tool_calls: 4_096,
-        max_context_bytes: 16_777_216,
-        max_result_bytes: 16_777_216,
-        max_artifact_bytes: 268_435_456,
+        max_turns: u64::MAX, max_tool_calls: u64::MAX, max_context_bytes: u64::MAX, max_result_bytes: u64::MAX, max_artifact_bytes: u64::MAX,
     }
 }
 
@@ -689,7 +682,6 @@ impl GeneralTaskPreparer {
                 &worktree.path,
                 &context_paths,
                 launch_prompt_bytes,
-                effective_budget.max_context_bytes,
             )?;
             let private_root = create_dir(&task_root, "private-inputs")?;
             let prompt_path = private_root.join("prompt.txt");
@@ -817,7 +809,7 @@ impl GeneralTaskPreparer {
         let mut canonical = manifest.clone();
         canonical.repository = repository;
         canonical.agent_id = agent_id.clone();
-        canonical.artifact_root = PathBuf::from(".agent-work/artifacts").join(agent_id);
+        canonical.artifact_root = std::env::temp_dir().join("zcode-as-subagent").join(&agent_id);
         self.prepare_internal(&canonical, named_commands, true)
     }
 }
@@ -1338,9 +1330,6 @@ fn finalize_direct_patch(prepared: &PreparedGeneralTask) -> Result<Option<Change
     if patch.is_empty() {
         return Err("PATCH_EMPTY_FOR_CHANGED_WORKSPACE".into());
     }
-    if patch.len() as u64 > prepared.effective_budget.max_artifact_bytes {
-        return Err("ARTIFACT_LIMIT_EXCEEDED".into());
-    }
     let path = prepared.artifact_root.join("changes.patch");
     atomic_write(&path, &patch).map_err(|_| "ARTIFACT_WRITE_FAILED")?;
     let digest = hash(&patch);
@@ -1685,9 +1674,6 @@ fn finalize_patch(prepared: &PreparedGeneralTask) -> Result<Option<ChangesPatch>
     if patch != repeated {
         return Err("PATCH_NOT_DETERMINISTIC".into());
     }
-    if patch.len() as u64 > prepared.effective_budget.max_artifact_bytes {
-        return Err("ARTIFACT_LIMIT_EXCEEDED".into());
-    }
     let path = prepared.artifact_root.join("changes.patch");
     atomic_write(&path, &patch).map_err(|_| "ARTIFACT_WRITE_FAILED".to_owned())?;
     let digest = hash(&patch);
@@ -1789,11 +1775,6 @@ fn validate_budget(v: &BudgetLimits) -> PreparationResult<()> {
         ),
         (v.tool_call_timeout_ms, cap.tool_call_timeout_ms),
         (v.input_wait_timeout_ms, cap.input_wait_timeout_ms),
-        (v.max_turns, cap.max_turns),
-        (v.max_tool_calls, cap.max_tool_calls),
-        (v.max_context_bytes, cap.max_context_bytes),
-        (v.max_result_bytes, cap.max_result_bytes),
-        (v.max_artifact_bytes, cap.max_artifact_bytes),
     ];
     if vals.iter().any(|(v, c)| *v == 0 || v > c) {
         return Err(PreparationError::InvalidManifest(
@@ -1928,14 +1909,8 @@ fn prepare_context(
     worktree: &Path,
     paths: &[PathBuf],
     prompt_bytes: u64,
-    max_context_bytes: u64,
 ) -> PreparationResult<(Vec<PreparedContext>, u64)> {
     let mut total = prompt_bytes;
-    if total > max_context_bytes {
-        return Err(PreparationError::InvalidManifest(
-            "context byte limit exceeded".into(),
-        ));
-    }
     let context = paths
         .iter()
         .map(|relative| {
@@ -1949,11 +1924,6 @@ fn prepare_context(
             }
             let bytes = fs::read(&path)?;
             total = total.saturating_add(bytes.len() as u64);
-            if total > max_context_bytes {
-                return Err(PreparationError::InvalidManifest(
-                    "context byte limit exceeded".into(),
-                ));
-            }
             Ok(PreparedContext {
                 repository_relative: relative.clone(),
                 sha256: hash(&bytes),
@@ -2064,7 +2034,7 @@ fn snapshot_attachments(
             total += size;
             if size > MAX_ATTACHMENT_BYTES
                 || total > MAX_ATTACHMENTS_BYTES
-                || base_bytes.saturating_add(total) > budget.max_context_bytes
+                || base_bytes.saturating_add(total) > MAX_ATTACHMENTS_BYTES
             {
                 return Err(PreparationError::InvalidManifest(
                     "attachment byte limit exceeded".into(),

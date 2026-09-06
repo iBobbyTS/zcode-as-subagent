@@ -1,13 +1,13 @@
 # Security boundary
 
-`zcode-as-subagentd` owns durable task identity, scope, budgets, pending requests,
-runtime processes, cleanup, and artifact locators. `zcode-as-subagent-mcp` is a
+`zcode-as-subagentd` owns durable task identity, workspace occupancy, pending requests,
+runtime processes, and cleanup. `zcode-as-subagent-mcp` is a
 stateless local projection: it validates bounded public inputs, calls the
 private Unix RPC, and returns only approved fields. Do not expose the private
 socket to untrusted local users; keep its directory and the SQLite database
 outside target repositories with owner-only permissions.
 
-The generic facade never publishes prompts, context contents, host/workspace/artifact
+The generic facade never publishes prompts or private workspace contents.
 paths, raw pending payloads, private correlation/runtime/process identities,
 environment, credentials, or reasoning. Event payloads are reduced to stable
 activity categories and counters. Permission responses are
