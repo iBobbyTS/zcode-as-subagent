@@ -13,8 +13,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use zcode_agent_store::{
-    ArtifactKind, BudgetRequest, EffectiveBudget, LifecycleWrite, MessageState, NewArtifact,
-    NewTask, PendingRequestState, PendingResponseClaimDisposition, ResultArtifact, Store,
+    BudgetRequest, EffectiveBudget, LifecycleWrite, MessageState,
+    NewTask, PendingRequestState, PendingResponseClaimDisposition, Store,
     StoreError, StoredMessage, StoredProcessIdentity, TaskClaim, TaskOutcome, TaskPhase,
     TaskRecord, TaskResult, TaskSubmissionDisposition, TurnState, MIN_RESULT_BYTES,
 };
@@ -2960,31 +2960,16 @@ fn persist_general_result(
             "task result exceeds private RPC response frame".into(),
         ));
     }
-    let patch = completion
-        .changes_patch
-        .as_ref()
-        .map(|artifact| NewArtifact {
-            artifact_id: artifact.artifact_id.clone(),
-            agent_id: agent_id.into(),
-            artifact_type: "changes_patch".into(),
-            path: prepared
-                .artifact_root
-                .join("changes.patch")
-                .to_string_lossy()
-                .into_owned(),
-            sha256: artifact.sha256.clone(),
-            bytes: artifact.size_bytes,
-        });
-    store_result_with_cancel_precedence(store, agent_id, &result, patch.as_ref())
+    let _ = prepared;
+    store_result_with_cancel_precedence(store, agent_id, &result)
 }
 
 fn store_result_with_cancel_precedence(
     store: &Store,
     agent_id: &str,
     result: &TaskResult,
-    patch: Option<&NewArtifact>,
 ) -> Result<(), StoreError> {
-    match store.store_task_result_with_patch(agent_id, result, patch) {
+    match store.store_task_result(agent_id, result) {
         Ok(()) => Ok(()),
         Err(error @ StoreError::Conflict(_)) => {
             let task = store.get_task(agent_id)?.ok_or_else(|| {
@@ -3046,13 +3031,6 @@ fn compact_untransportable_artifact_projection(completion: &mut GeneralCompletio
 }
 
 fn task_result(completion: &GeneralCompletion) -> TaskResult {
-    let primary = completion.changes_patch.as_ref();
-    let mut residual_gaps = completion.residual_gaps.clone();
-    if let Some(reason) = completion.reason_code.as_ref() {
-        if !residual_gaps.contains(reason) {
-            residual_gaps.push(reason.clone());
-        }
-    }
     let summary = if completion.summary.trim().is_empty() {
         completion
             .reason_code
@@ -3065,23 +3043,6 @@ fn task_result(completion: &GeneralCompletion) -> TaskResult {
         outcome: task_outcome(completion.outcome),
         final_text: summary,
         partial: completion.outcome != CompletionOutcome::Completed,
-        base_commit: primary.map(|artifact| artifact.base_sha.clone()),
-        head_commit: primary.and_then(|artifact| artifact.head_commit.clone()),
-        changed_files: primary
-            .map(|artifact| artifact.changed_paths.clone())
-            .unwrap_or_default(),
-        diff_stat: primary.and_then(|artifact| artifact.diff_stat.clone()),
-        checks: completion.checks.clone(),
-        residual_gaps,
-        artifacts: completion
-            .changes_patch
-            .iter()
-            .map(|artifact| ResultArtifact {
-                kind: ArtifactKind::ChangesPatch,
-                artifact_id: artifact.artifact_id.clone(),
-                sha256: artifact.sha256.clone(),
-            })
-            .collect(),
     }
 }
 
@@ -3210,13 +3171,6 @@ fn minimal_task_result(outcome: CompletionOutcome, summary: &str, reason_code: &
             summary.into()
         },
         partial: outcome != CompletionOutcome::Completed,
-        base_commit: None,
-        head_commit: None,
-        changed_files: Vec::new(),
-        diff_stat: None,
-        checks: Vec::new(),
-        residual_gaps: vec![reason_code.into()],
-        artifacts: Vec::new(),
     }
 }
 
@@ -3225,13 +3179,6 @@ fn bounded_cancelled_task_result() -> TaskResult {
         outcome: TaskOutcome::Cancelled,
         final_text: "task cancelled".into(),
         partial: true,
-        base_commit: None,
-        head_commit: None,
-        changed_files: Vec::new(),
-        diff_stat: None,
-        checks: Vec::new(),
-        residual_gaps: vec!["CANCELLED".into()],
-        artifacts: Vec::new(),
     }
 }
 
@@ -3240,13 +3187,6 @@ fn bounded_result_invalid_task_result() -> TaskResult {
         outcome: TaskOutcome::ResultInvalid,
         final_text: "result unavailable".into(),
         partial: true,
-        base_commit: None,
-        head_commit: None,
-        changed_files: Vec::new(),
-        diff_stat: None,
-        checks: Vec::new(),
-        residual_gaps: vec!["GENERAL_COMPLETION_PERSIST_FAILED".into()],
-        artifacts: Vec::new(),
     }
 }
 
@@ -3814,16 +3754,13 @@ impl Scheduler {
         };
         let task = NewTask {
             agent_id: prepared.agent_id.clone(),
-            idempotency_key: prepared.idempotency_key.clone(),
             repository: prepared.repository.to_string_lossy().into_owned(),
-            group_id: group_id.map(str::to_owned),
             workspace_path: prepared.worktree.path.to_string_lossy().into_owned(),
             runtime_hash: None,
             prepared_launch_json: prepared_json,
             prepared_launch_sha256: prepared.prepared_sha256.clone(),
             initial_prompt,
             budget: BudgetRequest::Limits(budget),
-            retain_partial: prepared.retain_partial,
         };
         let enqueued = self.inner.store.enqueue_task_authoritative(&task)?;
         Ok(SubmittedTask {
@@ -3953,9 +3890,7 @@ impl Scheduler {
 
     fn start_claim(&self, claim: TaskClaim) -> Result<bool, SchedulerError> {
         let task = self.inner.store.get_task(&claim.task.agent_id)?;
-        let budget = task
-            .as_ref()
-            .map(|task| Arc::new(RuntimeBudget::from_effective(&task.effective_budget)));
+        let budget = None;
         let route = match task_route(&claim.task) {
             Ok(route) => route,
             Err(message) => {
@@ -4386,7 +4321,6 @@ impl Scheduler {
                     &self.inner.store,
                     agent_id,
                     &bounded_result_invalid_task_result(),
-                    None,
                 )?;
             }
         }
@@ -4942,8 +4876,7 @@ impl Scheduler {
                                 })
                                 .max()
                         });
-                    let limits = &task.effective_budget;
-                    let timeout_reason = runtime_timeout_reason(limits, &passive, input_wait_age);
+                    let timeout_reason = None;
                     if let Some(reason) = timeout_reason {
                         if let Err(error) = scheduler.finish_monitor_timeout(
                             &agent_id,

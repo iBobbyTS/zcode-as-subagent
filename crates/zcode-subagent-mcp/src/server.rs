@@ -331,8 +331,6 @@ pub struct PublicResult {
     pub outcome: PublicOutcome,
     pub final_text: String,
     pub partial: bool,
-    /// Machine-readable daemon failure or completion diagnostics.
-    pub residual_gaps: Vec<String>,
 }
 
 impl TryFrom<TaskResultView> for PublicResult {
@@ -343,7 +341,6 @@ impl TryFrom<TaskResultView> for PublicResult {
             outcome: value.outcome.into(),
             final_text: value.final_text,
             partial: value.partial,
-            residual_gaps: value.residual_gaps,
         })
     }
 }
@@ -867,7 +864,6 @@ impl SubagentMcp {
         let (task, disposition) = match self.rpc(RpcMethod::SubmitGeneral {
             input: GeneralSubmitInput {
                 manifest,
-                group_id: None,
                 allowed_command_ids: Vec::new(),
                 required_command_ids: Vec::new(),
             },
@@ -964,7 +960,6 @@ impl SubagentMcp {
         }
         match self.rpc(RpcMethod::TaskList(TaskListQuery {
             repository: input.repository,
-            group_id: None,
             phase: input.phase.map(Into::into),
             outcome: input.outcome.map(Into::into),
             cursor: input.cursor,
