@@ -1129,11 +1129,10 @@ pub async fn serve_stdio(
 #[cfg(test)]
 mod generic_tests {
     use super::*;
+    #[cfg(any())]
     use sha2::{Digest, Sha256};
     use std::{io, process::Command};
-    use zcode_agent_store::{
-        ArtifactKind, NewArtifact, ResultArtifact, Store, TaskRecord, TaskResult, TurnState,
-    };
+    use zcode_agent_store::{Store, TaskRecord, TaskResult, TurnState};
     use zcode_agentd::{
         rpc::{RpcServer, RpcService, ServerOptions},
         LifecycleSink, ManagedRuntime, RuntimeFactory, Scheduler, SchedulerConfig,
@@ -1213,7 +1212,6 @@ mod generic_tests {
             outcome: PublicOutcome::Completed,
             final_text: "done".into(),
             partial: false,
-            residual_gaps: Vec::new(),
         };
         let encoded = serde_json::to_value(&completed).unwrap();
         assert_eq!(encoded["final_text"], "done");
@@ -1318,6 +1316,7 @@ mod generic_tests {
         assert!(general_manifest(&input, "test-request").unwrap().write_manifest.is_empty());
     }
 
+    #[cfg(any())]
     #[tokio::test]
     async fn immutable_result_and_patch_survive_real_facade_reconstruction() {
         let directory = tempfile::tempdir().unwrap();

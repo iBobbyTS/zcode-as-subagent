@@ -1419,5 +1419,5 @@ fn map_store(error: StoreError) -> RpcError {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests;

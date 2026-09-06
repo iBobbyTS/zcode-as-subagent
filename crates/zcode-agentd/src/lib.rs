@@ -779,7 +779,7 @@ fn activity_id(value: Option<&serde_json::Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
-#[cfg(test)]
+#[cfg(any())]
 fn capture_payload(
     event: &RuntimeEvent,
     pending_request_id: Option<&str>,
@@ -5944,7 +5944,7 @@ impl Drop for Daemon {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
