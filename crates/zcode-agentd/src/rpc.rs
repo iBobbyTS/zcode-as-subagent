@@ -1165,30 +1165,6 @@ fn validate_text(value: &str, field: &str, max: usize) -> Result<(), RpcError> {
     Ok(())
 }
 
-fn validate_command_ids(values: &[String], field: &str) -> Result<(), RpcError> {
-    if values.len() > 128 {
-        return Err(RpcError::new(
-            RpcErrorCode::Validation,
-            format!("{field} exceeds the selection cap"),
-        ));
-    }
-    let mut seen = std::collections::HashSet::new();
-    for value in values {
-        if value.is_empty()
-            || value.len() > 256
-            || !value.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
-            })
-            || !seen.insert(value)
-        {
-            return Err(RpcError::new(
-                RpcErrorCode::Validation,
-                format!("{field} must contain exact unique command ids"),
-            ));
-        }
-    }
-    Ok(())
-}
 
 fn map_scheduler(error: SchedulerError) -> RpcError {
     match error {

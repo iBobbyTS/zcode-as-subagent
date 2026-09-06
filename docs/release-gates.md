@@ -28,11 +28,10 @@ as workspace preservation and resource cleanup; they must
 not turn one missing expected file or an inapplicable replay check into an
 automatic failure when the goal was otherwise achieved.
 
-The 50-call ledger is `.agent-work/audit/zcode-as-subagent-productization/TRACE.jsonl`.
 Each `real_model_call` records `event_id`, `scenario_id`, `phase`, requested
 and observed model, start/end timestamps, outcome, counted flag, and
 `attempt_id`. Reservation is atomic and fail-closed at 50; successful,
-failed, timed-out, and cancelled model calls count once, while dispatch
+failed, timed-out, and cancelled model calls are recorded once, while dispatch
 infrastructure failures before model invocation do not. Verify 49→50→51,
 concurrent reservation, and retry-after-failure cases without invoking a real
 model during local tests.

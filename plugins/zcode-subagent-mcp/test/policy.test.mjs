@@ -163,7 +163,7 @@ test('policy metadata is stable and nonempty', () => {
     'split_once',
     'simplify_once',
     'use_read',
-    'use_named_check',
+    'use_prepared_inputs',
     'do_not_retry_equivalent',
   ]);
 });

@@ -64,12 +64,6 @@ test('install/check/preflight are idempotent, isolated, and provenance-aware', (
   assert.equal(activated.effective_file_policy_sha256.length, 64);
   assert.equal(activated.effective_file_wrapper_path.endsWith('/hooks/check-agent-files.mjs'), true);
   assert.equal(run(checkScript, ['--config', config, '--provenance', provenance]).status, 0);
-  assert.equal(run(checkScript, ['--config', config, '--provenance', provenance], {
-    ZCODE_AGENT_SERVICE_GENERATION: activated.service_generation,
-  }).status, 0);
-  assert.equal(run(checkScript, ['--config', config, '--provenance', provenance], {
-    ZCODE_AGENT_SERVICE_GENERATION: 'different-daemon',
-  }).status, 1);
 
   const driftedConfig = JSON.parse(fs.readFileSync(config, 'utf8'));
   for (const event of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']) {

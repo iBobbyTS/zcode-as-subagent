@@ -18,10 +18,10 @@ export ZCODE_AGENTD_SOCKET=/absolute/private/zcode-agent.sock
 ./target/release/zcode-as-subagentd
 ```
 
-The daemon and Store are the sole durable lifecycle owner. The runtime owner keeps child process, stdio, session, turn, stop, and reap authority. `--database`, `--socket`, `--runtime`, and `--command-catalog` are equivalent CLI options. The MCP facade executable is `./target/release/zcode-as-subagent-mcp`.
+The daemon and Store are the sole durable lifecycle owner. The runtime owner keeps child process, stdio, session, turn, stop, and reap authority. `--database`, `--socket`, and `--runtime` are the daemon options. The MCP facade executable is `./target/release/zcode-as-subagent-mcp`.
 Hooks are optional. The daemon starts without hook configuration or provenance;
-`ZCODE_AGENT_HOOK_PROVENANCE` and `ZCODE_AGENT_SERVICE_GENERATION` are only
-used by explicit hook installation/checking workflows.
+`ZCODE_AGENT_HOOK_PROVENANCE` is only used by explicit hook
+installation/checking workflows.
 The npm product always uses `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`; it does not search PATH or expose a runtime override.
 
 ## Codex MCP

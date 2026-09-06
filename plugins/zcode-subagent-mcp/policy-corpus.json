@@ -84,8 +84,8 @@
     {
       "command": "cargo test",
       "reason_class": "stdin",
-      "retry_class": "use_named_check",
-      "recommended_action": "use_named_check",
+      "retry_class": "use_prepared_inputs",
+      "recommended_action": "use_prepared_inputs",
       "semantic_fingerprint": "family=cargo;category=cargo;reason=program_not_allowlisted;operand=program",
       "rust_semantic_fingerprint": "family=cargo;category=program;reason=command_not_allowlisted;operand=program"
     },

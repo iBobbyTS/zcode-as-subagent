@@ -1777,10 +1777,10 @@ fn permission_denial_semantics(
             "mutation".into(),
         ),
         _ if tool.starts_with("mcp__") => (
-            "named_check".into(),
-            "named_check".into(),
+            "mcp_tool".into(),
+            "mcp_tool".into(),
             "permission_request_unrecognized".into(),
-            "named_check".into(),
+            "unknown".into(),
         ),
         _ => (
             tool.clone(),
@@ -2058,7 +2058,7 @@ fn denial_recovery(
                 | "python3"
                 | "go"
         ) {
-            return ("use_named_check", "use_named_check");
+            return ("use_prepared_inputs", "use_prepared_inputs");
         }
         return ("use_read", "use_read_or_prepared_inputs");
     }

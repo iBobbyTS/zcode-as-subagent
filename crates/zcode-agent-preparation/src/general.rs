@@ -578,20 +578,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn removed_manifest_fields_are_rejected() {
-        for field in [
-            "base_ref",
-            "repo_context",
-            "attachments",
-            "artifact_root",
-            "validation_commands",
-            "retain_partial",
-            "idempotency_key",
-            "group_id",
-            "budget",
-            "scratch_root",
-            "access_mode",
-        ] {
+    fn unknown_manifest_fields_are_rejected() {
+        for field in ["legacy_field", "unsupported_option"] {
             let mut value = json!({
                 "schema": "zcode-general-task/v1",
                 "agent_id": "test",
