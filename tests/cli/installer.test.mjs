@@ -3,8 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { installPlan, runInit } from '../../cli/installer.mjs';
-import { productPaths } from '../../cli/paths.mjs';
+import { installMcp, installPlan, runInit } from '../../cli/installer.mjs';
+import { codexConfigPath, productPaths } from '../../cli/paths.mjs';
 import { ZCODE_RUNTIME } from '../../cli/constants.mjs';
 
 test('dry-run reports the entire plan and creates nothing', () => {
@@ -69,6 +69,65 @@ test('plan uses no PATH lookup and points only at fixed bundle runtime', () => {
   const rendered = JSON.stringify(installPlan(productPaths('/tmp/isolated-home')));
   assert.match(rendered, /\/Applications\/ZCode\.app\/Contents\/Resources\/glm\/zcode\.cjs/);
   assert.doesNotMatch(rendered, /which|\/usr\/bin\/env|ZCODE_RUNTIME_PATH/);
+});
+
+test('install-mcp writes an idempotent Codex config under CODEX_HOME', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-as-subagent-codex-'));
+  const codexHome = path.join(home, 'codex-home');
+  process.env.CODEX_HOME = codexHome;
+  try {
+    const paths = productPaths(home);
+    fs.mkdirSync(codexHome, { recursive: true });
+    fs.writeFileSync(codexConfigPath(home), '[general]\nfoo = true\n\n[mcp_servers.other]\ncommand = "other"\n');
+
+    const first = installMcp(paths, { skipNativeProbe: true });
+    const once = fs.readFileSync(first.config, 'utf8');
+    const second = installMcp(paths, { skipNativeProbe: true });
+    const twice = fs.readFileSync(second.config, 'utf8');
+
+    assert.equal(twice, once);
+    assert.match(twice, /\[general\]/);
+    assert.match(twice, /\[mcp_servers\.other\]/);
+    assert.equal((twice.match(/\[mcp_servers\.zcode_as_subagent\]/g) || []).length, 1);
+    assert.match(twice, /zcode-as-subagent-mcp/);
+    assert.match(twice, /"zcode_subagent_status"/);
+    assert.doesNotMatch(twice, /zcode_subagent_system_status/);
+    assert.match(twice, new RegExp(paths.socket.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')));
+  } finally {
+    delete process.env.CODEX_HOME;
+  }
+});
+
+test('install-mcp falls back to ~/.codex and dry-run creates nothing', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-as-subagent-codex-dry-'));
+  const paths = productPaths(home);
+  const original = process.env.CODEX_HOME;
+  delete process.env.CODEX_HOME;
+  try {
+    const result = installMcp(paths, { dryRun: true });
+    assert.equal(result.dry_run, true);
+    assert.equal(result.config, path.join(home, '.codex', 'config.toml'));
+    assert.equal(fs.existsSync(result.config), false);
+  } finally {
+    if (original === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = original;
+  }
+});
+
+test('install-mcp --uninstall removes only the managed Codex section', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-as-subagent-codex-uninstall-'));
+  const paths = productPaths(home);
+  const config = path.join(home, 'codex', 'config.toml');
+  fs.mkdirSync(path.dirname(config), { recursive: true });
+  fs.writeFileSync(config, '[general]\nfoo = true\n\n[mcp_servers.zcode_as_subagent]\ncommand = "managed"\n\n[mcp_servers.zcode_as_subagent.env]\nZCODE_AGENTD_SOCKET = "old"\n\n[mcp_servers.other]\ncommand = "other"\n');
+
+  const result = installMcp(paths, { configPath: config, uninstall: true });
+  const content = fs.readFileSync(config, 'utf8');
+  assert.equal(result.uninstalled, true);
+  assert.match(content, /\[general\]/);
+  assert.match(content, /\[mcp_servers\.other\]/);
+  assert.doesNotMatch(content, /zcode_as_subagent/);
+  assert.equal(installMcp(paths, { configPath: config, uninstall: true }).uninstalled, true);
 });
 
 for (const failStep of ['write-product-config', 'install-launch-agent']) {

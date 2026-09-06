@@ -23,6 +23,11 @@ export function productPaths(home = os.homedir()) {
   };
 }
 
+export function codexConfigPath(home = os.homedir()) {
+  const codexHome = process.env.CODEX_HOME || path.join(home, '.codex');
+  return path.join(codexHome, 'config.toml');
+}
+
 export function legacyPaths(home = os.homedir()) {
   return [
     path.join(home, 'Library', 'LaunchAgents', 'com.zcode-reviewd.plist'),

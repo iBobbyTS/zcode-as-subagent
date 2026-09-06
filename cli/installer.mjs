@@ -6,13 +6,56 @@ import { LAUNCH_AGENT_LABEL, ZCODE_RUNTIME } from './constants.mjs';
 import { CliError } from './errors.mjs';
 import { atomicWrite, jsonBytes, readOptional, restoreOptional, sha256 } from './fs-atomic.mjs';
 import { patchCatalog } from './catalog.mjs';
-import { productPaths } from './paths.mjs';
+import { codexConfigPath, productPaths } from './paths.mjs';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const hookInstaller = path.join(packageRoot, 'plugins', 'zcode-subagent-mcp', 'scripts', 'install-agent-hooks.mjs');
 
 export function nativeBinary(name) {
   return path.join(packageRoot, 'npm', 'native', 'darwin-arm64', name);
+}
+
+const CODEX_MCP_SECTION = 'mcp_servers.zcode_as_subagent';
+
+function codexMcpConfig(paths) {
+  const command = nativeBinary('zcode-as-subagent-mcp');
+  return `[${CODEX_MCP_SECTION}]\ncommand = ${JSON.stringify(command)}\nenabled = true\nrequired = true\nstartup_timeout_sec = 10\ntool_timeout_sec = 10\nenabled_tools = [\n  "zcode_subagent_cancel",\n  "zcode_subagent_close",\n  "zcode_subagent_list",\n  "zcode_subagent_poll",\n  "zcode_subagent_respond",\n  "zcode_subagent_result",\n  "zcode_subagent_send",\n  "zcode_subagent_spawn",\n  "zcode_subagent_status",\n]\ndefault_tools_approval_mode = "prompt"\n\n[${CODEX_MCP_SECTION}.env]\nZCODE_AGENTD_SOCKET = ${JSON.stringify(paths.socket)}\n\n[${CODEX_MCP_SECTION}.tools.zcode_subagent_status]\napproval_mode = "auto"\n\n[${CODEX_MCP_SECTION}.tools.zcode_subagent_list]\napproval_mode = "auto"\n\n[${CODEX_MCP_SECTION}.tools.zcode_subagent_poll]\napproval_mode = "auto"\n\n[${CODEX_MCP_SECTION}.tools.zcode_subagent_result]\napproval_mode = "auto"\n`;
+}
+
+function removeTomlSection(text, section) {
+  const lines = text.split(/(?<=\n)/u);
+  let removing = false;
+  const kept = [];
+  for (const line of lines) {
+    const match = line.match(/^\s*\[([^\]]+)\]\s*\r?\n?$/u);
+    if (match) removing = match[1] === section || match[1].startsWith(`${section}.`);
+    if (!removing) kept.push(line);
+  }
+  return kept.join('').replace(/\n{3,}$/u, '\n\n');
+}
+
+export function installMcp(paths = productPaths(), options = {}) {
+  const config = options.configPath || codexConfigPath(paths.home);
+  const command = nativeBinary('zcode-as-subagent-mcp');
+  if (options.dryRun) {
+    return { dry_run: true, operation: options.uninstall ? 'uninstall' : 'install', platform: 'codex', config, command, socket: paths.socket };
+  }
+  if (options.uninstall) {
+    const prior = readOptional(config);
+    if (prior === null) return { uninstalled: false, platform: 'codex', config };
+    const preserved = removeTomlSection(prior.toString('utf8'), CODEX_MCP_SECTION).replace(/^\n+|\n+$/gu, '');
+    atomicWrite(config, Buffer.from(preserved ? `${preserved}\n` : ''));
+    return { uninstalled: true, platform: 'codex', config };
+  }
+  if (!fs.existsSync(command) && !options.skipNativeProbe) {
+    throw new CliError('NATIVE_BINARY_NOT_FOUND', 'npm package does not contain the macOS MCP binary');
+  }
+  const prior = readOptional(config);
+  const base = prior === null ? '' : prior.toString('utf8');
+  const preserved = removeTomlSection(base, CODEX_MCP_SECTION).replace(/\s*$/u, '');
+  const next = `${preserved ? `${preserved}\n\n` : ''}${codexMcpConfig(paths)}`;
+  atomicWrite(config, Buffer.from(next));
+  return { installed: true, platform: 'codex', config, command, socket: paths.socket };
 }
 
 export function installPlan(paths = productPaths(), options = {}) {

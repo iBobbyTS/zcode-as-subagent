@@ -2,13 +2,13 @@ import fs from 'node:fs';
 import { BUSINESS_COMMANDS, PRODUCT_NAME, VERSION, ZCODE_RUNTIME } from './constants.mjs';
 import { CliError } from './errors.mjs';
 import { patchCatalog, restoreCatalog, verifyCatalog } from './catalog.mjs';
-import { runInit, installHooks, installPlan, nativeBinary } from './installer.mjs';
+import { runInit, installHooks, installMcp, installPlan, nativeBinary } from './installer.mjs';
 import { backupData, cleanupLegacy, purge, restoreData, uninstall } from './maintenance.mjs';
 import { platform, productPaths } from './paths.mjs';
 import { startService, stopService } from './service.mjs';
 import { callDaemon, parseDaemonInput } from './rpc.mjs';
 
-const HELP = `zcode-as-subagent ${VERSION}\n\nUsage: zcode-as-subagent <command> [options]\n\nCommands:\n  help, version               Show basic product information\n  init [--dry-run] [--resume] [--install-hooks] Install and configure the local service\n  hooks install [--dry-run]  Install ZCode policy hooks explicitly\n  config models               Install or restore the ZCode model catalog\n  status, diagnose            Inspect local service and runtime state\n  backup --output <dir>       Back up retained product data\n  restore --input <dir>       Verify and restore product data\n  uninstall                   Remove service registration; retain data\n  purge --yes                 Explicitly delete new product data\n  cleanup-legacy --yes        Delete old unpublished installation (no migration)\n`;
+const HELP = `zcode-as-subagent ${VERSION}\n\nUsage: zcode-as-subagent <command> [options]\n\nCommands:\n  help, version               Show basic product information\n  init [--dry-run] [--resume] [--install-hooks] Install and configure the local service\n  hooks install [--dry-run]  Install ZCode policy hooks explicitly\n  install-mcp [codex] [--dry-run|--uninstall] Install or remove the Codex MCP configuration\n  config models               Install or restore the ZCode model catalog\n  status, diagnose            Inspect local service and runtime state\n  backup --output <dir>       Back up retained product data\n  restore --input <dir>       Verify and restore product data\n  uninstall                   Remove service registration; retain data\n  purge --yes                 Explicitly delete new product data\n  cleanup-legacy --yes        Delete old unpublished installation (no migration)\n`;
 const DAEMON_HELP = `  create/spawn, get/poll, list (requires --repository/--workspace scope), send, respond, cancel, result, close\n                             Daemon calls accept --json '<object>' or JSON stdin\n`;
 
 function value(args, name) {
@@ -46,6 +46,11 @@ export async function main(args) {
   if (command === 'hooks') {
     if (args[1] !== 'install') throw new CliError('INVALID_ARGUMENT', 'usage: hooks install [--dry-run]', 2);
     output(installHooks(paths, { dryRun: args.includes('--dry-run') })); return;
+  }
+  if (command === 'install-mcp') {
+    const target = args.slice(1).find((arg) => !arg.startsWith('--')) || 'codex';
+    if (target !== 'codex') throw new CliError('INVALID_ARGUMENT', `unsupported MCP target: ${target}`, 2);
+    output(installMcp(paths, { dryRun: args.includes('--dry-run'), uninstall: args.includes('--uninstall') })); return;
   }
   if (command === 'config') {
     if (args[1] !== 'models') throw new CliError('INVALID_ARGUMENT', 'usage: config models [--restore] [--main-model ID] [--lite-model ID]', 2);
