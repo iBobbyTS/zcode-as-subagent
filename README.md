@@ -39,8 +39,11 @@ The nine tools are `zcode_subagent_status`, `zcode_subagent_spawn`,
 `zcode_subagent_poll`, `zcode_subagent_list`, `zcode_subagent_send`,
 `zcode_subagent_respond`, `zcode_subagent_cancel`, `zcode_subagent_result`,
 and `zcode_subagent_close`. Spawn accepts only `build`, `edit`, `plan`, or
-`yolo` permission modes (default `build`). A canonical workspace has one
-active Agent; a collision is reported as `WORKSPACE_BUSY` with the active id.
+`yolo` permission modes (default `build`). `build`, `edit`, and `yolo` require
+`write_manifest`, a non-empty list of repository-relative paths used by the
+runtime Hook policy; `plan` must omit it. A canonical workspace has one active
+Agent; a collision is reported as `WORKSPACE_BUSY` with the active id. Terminal
+results expose `residual_gaps` so callers can act on daemon diagnostics.
 
 ## Data, cleanup, and safety
 

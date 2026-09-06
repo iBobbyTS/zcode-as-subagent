@@ -362,6 +362,8 @@ pub struct PublicResult {
     pub outcome: PublicOutcome,
     pub final_text: String,
     pub partial: bool,
+    /// Machine-readable daemon failure or completion diagnostics.
+    pub residual_gaps: Vec<String>,
 }
 
 impl TryFrom<TaskResultView> for PublicResult {
@@ -372,6 +374,7 @@ impl TryFrom<TaskResultView> for PublicResult {
             outcome: value.outcome.into(),
             final_text: value.final_text,
             partial: value.partial,
+            residual_gaps: value.residual_gaps,
         })
     }
 }
@@ -767,6 +770,9 @@ fn general_manifest(input: &AgentSpawnInput, request_identity: &str) -> Result<G
     if matches!(input.permission_mode, PublicPermissionMode::Plan) && !write_manifest.is_empty() {
         return Err("validation: write_manifest is only valid for write permission modes".into());
     }
+    if !matches!(input.permission_mode, PublicPermissionMode::Plan) && write_manifest.is_empty() {
+        return Err("validation: write permission modes require a non-empty write_manifest".into());
+    }
     Ok(GeneralTaskManifest {
         schema: GENERAL_TASK_SCHEMA.into(),
         agent_id: agent_id.clone(),
@@ -854,7 +860,7 @@ impl ServerHandler for SubagentMcp {
 impl SubagentMcp {
     #[tool(
         name = "zcode_subagent_status",
-        description = "Read bounded daemon and runtime readiness status",
+        description = "Read daemon/runtime readiness, protocol version, component states, and capability limits. Read-only.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -874,7 +880,7 @@ impl SubagentMcp {
 
     #[tool(
         name = "zcode_subagent_spawn",
-        description = "Submit a durable bounded general subagent task",
+        description = "Start one durable Agent in an absolute repository workspace. permission_mode defaults to build; build/edit/yolo require a non-empty relative write_manifest, while plan is read-only. Poll the returned agent_id for progress and terminal diagnostics.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1100,7 +1106,7 @@ impl SubagentMcp {
 
     #[tool(
         name = "zcode_subagent_result",
-        description = "Read the task final text and terminal result",
+        description = "Read a terminal task result, including outcome, partial status, final text, and daemon residual_gaps diagnostics. Returns null result while the task is non-terminal.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1241,6 +1247,7 @@ mod generic_tests {
             outcome: PublicOutcome::Completed,
             final_text: "done".into(),
             partial: false,
+            residual_gaps: Vec::new(),
         };
         let encoded = serde_json::to_value(&completed).unwrap();
         assert_eq!(encoded["final_text"], "done");
@@ -1276,6 +1283,20 @@ mod generic_tests {
             let mut value = input.clone();
             value.write_manifest = vec![path.into()];
             assert!(general_manifest(&value, "test-request").is_err(), "accepted {path}");
+        }
+    }
+
+    #[test]
+    fn public_spawn_rejects_missing_write_manifest_before_daemon_submission() {
+        for mode in ["build", "edit", "yolo"] {
+            let input = serde_json::from_value::<AgentSpawnInput>(serde_json::json!({
+                "repository": "/tmp/repository",
+                "permission_mode": mode,
+                "prompt": "run checks"
+            }))
+            .unwrap();
+            let error = general_manifest(&input, "test-request").unwrap_err();
+            assert!(error.contains("require a non-empty write_manifest"));
         }
     }
 
