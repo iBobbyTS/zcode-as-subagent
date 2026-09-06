@@ -54,6 +54,17 @@ test('resume skips completed steps', () => {
   assert.equal(fs.existsSync(paths.launchAgent), true);
 });
 
+test('LaunchAgent provides a stable PATH for the Node runtime', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-as-subagent-launch-agent-'));
+  const paths = productPaths(home);
+  runInit({ paths, skipRuntimeProbe: true, skipNativeProbe: true });
+  const launchAgent = fs.readFileSync(paths.launchAgent, 'utf8');
+  assert.match(launchAgent, /<key>EnvironmentVariables<\/key><dict>/);
+  assert.match(launchAgent, /<key>PATH<\/key><string>\/opt\/homebrew\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin<\/string>/);
+  assert.match(launchAgent, /<key>ProgramArguments<\/key><array>/);
+  assert.match(launchAgent, /zcode-as-subagentd<\/string>/);
+});
+
 test('plan uses no PATH lookup and points only at fixed bundle runtime', () => {
   const rendered = JSON.stringify(installPlan(productPaths('/tmp/isolated-home')));
   assert.match(rendered, /\/Applications\/ZCode\.app\/Contents\/Resources\/glm\/zcode\.cjs/);
