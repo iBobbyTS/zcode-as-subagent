@@ -193,7 +193,7 @@ make
 repository scripts
 ```
 
-They execute repository code, write caches/build outputs, or start processes. Use daemon-owned named checks with exact program/args/cwd/environment, timeout, output cap, and process-group cleanup.
+They execute repository code, write caches/build outputs, or start processes. The daemon owns process-group cleanup and runtime timeouts.
 
 ## Residual risks
 
