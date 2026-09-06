@@ -1235,6 +1235,3 @@ fn map_store(error: StoreError) -> RpcError {
         ),
     }
 }
-
-#[cfg(any())]
-mod tests;
