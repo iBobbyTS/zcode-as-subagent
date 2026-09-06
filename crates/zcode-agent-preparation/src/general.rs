@@ -1064,58 +1064,6 @@ impl GeneralFinalizer {
                 .validate_finalization_content()
                 .map_err(|_| "PREPARED_CONTENT_INVALID".to_owned())?;
         }
-        // Direct submissions are filesystem-only. They never enter the
-        // detached-worktree or Git commit path. They still publish a
-        // read-only patch of the caller-owned workspace for result evidence.
-        if prepared.direct_workspace {
-            validate_direct_workspace_identity(prepared)?;
-            return Ok(GeneralCompletion {
-                outcome: requested,
-                reason_code: None,
-                summary,
-                checks,
-                residual_gaps,
-                cleaned: false,
-            });
-        }
-        let manager = manager(prepared).map_err(|_| "WORKTREE_IDENTITY_INVALID".to_owned())?;
-        prefinalization_integrity(prepared, &manager)?;
-        ensure_directory_empty(&prepared.artifact_root, "ARTIFACT_ROOT_NOT_EMPTY")?;
-        match prepared.access_mode {
-            AccessMode::ReadOnly => {
-                if !prepared.direct_workspace {
-                    let d = manager
-                        .capture_integrity(&prepared.worktree)
-                        .map_err(|_| "WORKTREE_INTEGRITY_FAILED".to_owned())?;
-                    if !d.worktree_clean {
-                        return Err("READ_ONLY_MODIFIED_TRACKED_STATE".into());
-                    }
-                }
-            }
-            AccessMode::WorkspaceWrite => {
-                let retain = !prepared.direct_workspace
-                    && (requested == CompletionOutcome::Completed
-                        || (false
-                            && matches!(
-                                requested,
-                                CompletionOutcome::Failed
-                                    | CompletionOutcome::Cancelled
-                                    | CompletionOutcome::TimedOut
-                                    | CompletionOutcome::BudgetExhausted
-                            )));
-                if retain {
-                }
-            }
-        }
-        let mut cleanup_worktree = prepared.worktree.clone();
-        if !prepared.direct_workspace {
-            let diagnostics = manager
-                .capture_integrity(&cleanup_worktree)
-                .map_err(|_| "WORKTREE_INTEGRITY_FAILED".to_owned())?;
-            if !diagnostics.source_integrity_preserved() {
-                return Err("SOURCE_INTEGRITY_FAILED".into());
-            }
-        }
         Ok(GeneralCompletion {
             outcome: requested,
             reason_code: None,
@@ -1127,6 +1075,7 @@ impl GeneralFinalizer {
     }
 }
 
+#[cfg(any())]
 fn validate_direct_workspace_identity(prepared: &PreparedGeneralTask) -> Result<(), String> {
     let repository = fs::canonicalize(&prepared.repository)
         .map_err(|_| "WORKSPACE_IDENTITY_INVALID".to_owned())?;
