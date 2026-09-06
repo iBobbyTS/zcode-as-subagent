@@ -11,12 +11,19 @@ tools; there is no compatibility alias or migration layer.
 npm install -g zcode-as-subagent
 zcode-as-subagent help
 zcode-as-subagent init --dry-run
+zcode-as-subagent install-mcp
 # Hooks are opt-in:
 zcode-as-subagent init --install-hooks
 # Or install them independently:
 zcode-as-subagent hooks install
 zcode-as-subagent status
 ```
+
+`install-mcp` installs the `zcode_as_subagent` MCP server into
+`$CODEX_HOME/config.toml`, or `~/.codex/config.toml` when `CODEX_HOME` is not
+set. It preserves unrelated Codex configuration and can be run repeatedly.
+Use `zcode-as-subagent install-mcp --uninstall` to remove only this managed
+MCP entry.
 
 The macOS runtime is probed only at the fixed bundle location
 `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`. Windows supports

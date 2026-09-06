@@ -26,7 +26,18 @@ The npm product always uses `/Applications/ZCode.app/Contents/Resources/glm/zcod
 
 ## Codex MCP
 
-Merge values from `config/codex-zcode-subagent-mcp.toml` into Codex configuration only when explicitly requested. The binary has one startup-static catalog:
+Install the MCP entry into `$CODEX_HOME/config.toml`, falling back to
+`~/.codex/config.toml`, with:
+
+```text
+zcode-as-subagent install-mcp
+```
+
+The command preserves unrelated configuration and replaces only its managed
+`mcp_servers.zcode_as_subagent` tables. Use `install-mcp codex --dry-run` to
+inspect the resolved paths without writing. Use `install-mcp --uninstall` to
+remove only the managed tables while retaining the Codex config file and all
+unrelated settings. The binary has one startup-static catalog:
 
 ```text
 zcode_subagent_status
