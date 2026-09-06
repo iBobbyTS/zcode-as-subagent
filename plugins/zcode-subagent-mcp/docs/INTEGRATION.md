@@ -33,8 +33,8 @@ for isolated test configurations.
 
 ## Bash policy
 
-`lib/bash-policy.mjs` and `crates/zcode-agent-preparation/src/policy.rs` are the
-two decision owners. Both consume `policy-corpus.json`; the daemon source hash
+The official runtime and caller own Bash permission decisions. The file hook
+only enforces the declared workspace boundary; the daemon source hash
 and JavaScript source hash are recorded in provenance. Shell composition,
 redirection, command substitution, caller environment assignments, unknown
 executables, path escapes, secret paths, symlink escapes, and Git ref mutation

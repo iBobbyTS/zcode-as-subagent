@@ -51,12 +51,11 @@ impl PermissionMode {
     }
 }
 
-/// Runtime timeouts retained as safety and liveness boundaries. They are
-/// daemon-selected and are not caller-configurable task budgets.
+/// Runtime timeouts retained as connection, control and liveness boundaries.
+/// The adapter never imposes a total task wall-clock budget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeTimeouts {
-    pub absolute_wall_time_ms: u64,
     pub runtime_activity_idle_timeout_ms: u64,
     pub model_stream_idle_timeout_ms: u64,
     pub tool_call_timeout_ms: u64,
@@ -67,14 +66,12 @@ impl AccessMode {
     pub fn default_timeouts(self) -> RuntimeTimeouts {
         match self {
             Self::ReadOnly => RuntimeTimeouts {
-                absolute_wall_time_ms: 600_000,
                 runtime_activity_idle_timeout_ms: 90_000,
                 model_stream_idle_timeout_ms: 90_000,
                 tool_call_timeout_ms: 120_000,
                 input_wait_timeout_ms: 300_000,
             },
             Self::WorkspaceWrite => RuntimeTimeouts {
-                absolute_wall_time_ms: 1_800_000,
                 runtime_activity_idle_timeout_ms: 90_000,
                 model_stream_idle_timeout_ms: 90_000,
                 tool_call_timeout_ms: 300_000,

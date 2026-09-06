@@ -21,8 +21,7 @@
   "mcpServers": "./.mcp.json",
   "hooks": "./hooks/hooks.json",
   "hookPolicy": {
-    "version": "zcode-agent-bash/v1.0.0",
-    "bashPolicy": "./lib/bash-policy.mjs",
+    "version": "zcode-agent-file-policy/v1.0.0",
     "filePolicy": "./lib/agent-file-policy.mjs",
     "postToolUseAudit": true,
     "activation": "./hooks/hooks.json"

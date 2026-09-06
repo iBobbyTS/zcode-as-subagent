@@ -47,7 +47,7 @@ codex exec --dangerously-bypass-approvals-and-sandbox --json \
 | `zcode_subagent_send` | `send`，已存在 agent、唯一 `message_id`、非空 content | 同名工具 | 首次 queued/delivered，重复 message_id 为 already_delivered |
 | `zcode_subagent_respond` | `respond`，真实 pending request 的 `request_id` 与 allow/deny | 同名工具 | 首次 responded，重复请求幂等，策略覆盖字段准确 |
 | `zcode_subagent_cancel` | `cancel`，运行中的 `agent_id` | 同名工具 | 返回 cancel_requested，随后 poll/result 为 CANCELLED 或既定终态 |
-| `zcode_subagent_result` | `result`，已终态 agent | 同名工具 | 返回 outcome、final_text、partial；未终态应明确失败 |
+| `zcode_subagent_result` | `result`，已终态 agent，可带 `offset`/`limit` | 同名工具 | 返回 outcome、分段 `final_text`、partial、边界；未终态应明确失败 |
 | `zcode_subagent_close` | `close`，已完成或取消的 agent | 同名工具 | 返回 closed/resources_reaped；重复调用保持幂等 |
 
 ## Case 3 长运行探测流程

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { CliError } from './errors.mjs';
 
 export const RPC_VERSION = 12;
+export const MAX_FRAME_BYTES = 512 * 1024;
 
 function readJsonInput(args) {
   const inline = args.find((arg) => arg.startsWith('--json='));
@@ -40,7 +41,7 @@ function methodFor(command, input) {
     case 'send': return { method: 'task_message', params: { agent_id: input.agent_id, message_id: input.message_id || requestId(), mode: input.mode || 'queue', content: input.content } };
     case 'respond': return { method: 'task_respond', params: { agent_id: input.agent_id, request_id: input.request_id, decision: input.decision, content: input.reason ?? input.content ?? null } };
     case 'cancel': return { method: 'task_cancel', params: { agent_id: input.agent_id } };
-    case 'result': return { method: 'task_result', params: { agent_id: input.agent_id } };
+    case 'result': return { method: 'task_result', params: { agent_id: input.agent_id, offset: input.offset ?? 0, limit: input.limit ?? 128 * 1024 } };
     case 'close': return { method: 'task_close', params: { agent_id: input.agent_id } };
     default: throw new CliError('UNKNOWN_COMMAND', `unsupported daemon command: ${command}`, 2);
   }
@@ -50,6 +51,9 @@ export function callDaemon(socketPath, command, input, timeoutMs = 6000) {
   const { method, params } = methodFor(command, input);
   const request_id = requestId();
   const request = JSON.stringify({ version: RPC_VERSION, request_id, method, params }) + '\n';
+  if (Buffer.byteLength(request, 'utf8') > MAX_FRAME_BYTES) {
+    throw new CliError('OVERSIZED', 'encoded RPC request exceeds frame cap', 2);
+  }
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath); let data = ''; let settled = false;
     const finish = (fn, value) => { if (!settled) { settled = true; socket.destroy(); fn(value); } };

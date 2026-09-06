@@ -21,7 +21,7 @@
         "write_manifest": { "type": "array", "items": { "type": "string", "minLength": 1 } }
       },
       "allOf": [
-        { "if": { "properties": { "permission_mode": { "const": "plan" } } },
+        { "if": { "required": ["permission_mode"], "properties": { "permission_mode": { "const": "plan" } } },
           "then": { "properties": { "write_manifest": { "maxItems": 0 } } } }
       ],
       "additionalProperties": false
@@ -37,7 +37,7 @@
         "zcode_subagent_send": { "input": ["agent_id", "message_id", "content"], "output": ["disposition"] },
         "zcode_subagent_respond": { "input": ["agent_id", "request_id", "decision", "reason"], "output": ["disposition", "requested_decision", "effective_decision", "policy_overrode", "policy_reason_code"] },
         "zcode_subagent_cancel": { "input": ["agent_id"], "output": ["task"] },
-        "zcode_subagent_result": { "input": ["agent_id"], "output": ["result", "instruction"] },
+        "zcode_subagent_result": { "input": ["agent_id", "offset", "limit"], "output": ["result", "instruction"] },
         "zcode_subagent_close": { "input": ["agent_id"], "output": ["task"] }
       }
     }

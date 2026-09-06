@@ -31,9 +31,9 @@ test('supports snake_case and camelCase hook payloads while redacting paths', ()
   assert.equal(denied.reason.includes(root), false);
 });
 
-test('requires marker and canonical root, and rejects traversal/symlink escape', () => {
+test('skips unmanaged sessions and rejects traversal/symlink escape when managed', () => {
   const root = fixture();
-  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: 'src/ok.txt' } }, {}).code, 'policy_marker_missing');
+  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: 'src/ok.txt' } }, {}).code, 'policy_not_managed');
   assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: 'src/ok.txt' } }, { ZCODE_AGENT_POLICY: '1' }).code, 'workspace_root_missing');
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-agent-outside-'));
   fs.writeFileSync(path.join(outside, 'secret.txt'), 'secret');
@@ -83,15 +83,15 @@ test('rejects protected metadata and secrets for reads and manifests', () => {
   assert.equal(evaluateAgentFileInput({ tool_name: 'Write', tool_input: { path: 'src/api_key.txt' }, cwd: root }, env(root, ['src'])).code, 'path_outside_root');
 });
 
-test('standalone process hook fails closed without echoing malformed input', () => {
+test('standalone process hook skips malformed unmanaged input without echoing it', () => {
   const script = path.resolve(new URL('../hooks/check-agent-files.mjs', import.meta.url).pathname);
   const proc = spawnSync(process.execPath, [script], { input: '{"tool_name":"Read","tool_input":{"path":"/private/secret"}', encoding: 'utf8' });
   assert.equal(proc.status, 0);
-  assert.match(proc.stdout, /"permissionDecision":"deny"/u);
+  assert.equal(proc.stdout, '');
   assert.equal(proc.stdout.includes('/private/secret'), false);
 });
 
-test('installer adds recognized matcher while preserving Bash and Post hooks', () => {
+test('installer adds recognized file matcher while preserving Post hooks', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-agent-install-'));
   const config = path.join(directory, 'config.json');
   const provenance = path.join(directory, 'provenance.json');
@@ -100,7 +100,7 @@ test('installer adds recognized matcher while preserving Bash and Post hooks', (
     hooks: {
       enabled: true,
       events: {
-        PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'process', command: 'node', args: [path.resolve(new URL('../hooks/check-bash-readonly.mjs', import.meta.url).pathname)] }] }],
+        PreToolUse: [],
         PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'process', command: 'node', args: [path.resolve(new URL('../hooks/audit-bash-result.mjs', import.meta.url).pathname)] }] }],
       },
     },
@@ -110,7 +110,7 @@ test('installer adds recognized matcher while preserving Bash and Post hooks', (
   assert.equal(proc.status, 0, proc.stderr);
   const installed = JSON.parse(fs.readFileSync(config, 'utf8'));
   assert.deepEqual(installed.unrelated, { keep: true });
-  assert.equal(installed.hooks.events.PreToolUse.some((entry) => entry.matcher === 'Bash'), true);
+  assert.equal(installed.hooks.events.PreToolUse.some((entry) => entry.matcher === 'Bash'), false);
   const policy = installed.hooks.events.PreToolUse.find((entry) => entry.matcher === '^(Read|Grep|Glob|Write|Edit|Delete|Move)$');
   assert.equal(policy.matcher, '^(Read|Grep|Glob|Write|Edit|Delete|Move)$');
   assert.equal(policy.hooks[0].args[0].endsWith('/hooks/check-agent-files.mjs'), true);

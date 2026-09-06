@@ -29,9 +29,6 @@ use zcode_protocol::{
 };
 
 pub mod rpc;
-mod timeouts;
-
-use timeouts::RuntimeDeadline;
 use zcode_agent_preparation::{
     general_launch_prompt, CompletionOutcome, GeneralCompletion, GeneralFinalizer,
     GeneralTaskManifest, GeneralTaskPreparer, PolicyLauncher, PreparedGeneralTask, RuntimeTimeouts,
@@ -2413,7 +2410,6 @@ struct ActiveRuntime {
     runtime_lifecycle: Arc<RuntimeLifecycle>,
     route: TaskRoute,
     task: Option<TaskRecord>,
-    policy: Option<Arc<PolicyLauncher>>,
     check: Arc<ActiveCheck>,
 }
 
@@ -2455,7 +2451,6 @@ struct MonitorContext {
     runtime_lifecycle: Arc<RuntimeLifecycle>,
     route: TaskRoute,
     task: Option<TaskRecord>,
-    budget: Option<Arc<RuntimeDeadline>>,
     check: Arc<ActiveCheck>,
 }
 
@@ -2502,7 +2497,6 @@ struct StoreLifecycleSink {
     agent_id: String,
     runtime_agent_id: String,
     owner_epoch: u64,
-    budget: Option<Arc<RuntimeDeadline>>,
     runtime_lifecycle: Arc<RuntimeLifecycle>,
     activity: Arc<PassiveActivityTracker>,
     write_state: Mutex<SinkWriteState>,
@@ -2541,7 +2535,6 @@ impl StoreLifecycleSink {
         agent_id: String,
         runtime_agent_id: String,
         owner_epoch: u64,
-        budget: Option<Arc<RuntimeDeadline>>,
         runtime_lifecycle: Arc<RuntimeLifecycle>,
         activity: Arc<PassiveActivityTracker>,
     ) -> Self {
@@ -2550,7 +2543,6 @@ impl StoreLifecycleSink {
             agent_id,
             runtime_agent_id,
             owner_epoch,
-            budget,
             runtime_lifecycle,
             activity,
             write_state: Mutex::new(SinkWriteState::default()),
@@ -2821,11 +2813,6 @@ impl LifecycleSink for StoreLifecycleSink {
         #[cfg(test)]
         if let Some(hook) = self.after_admission_hook.lock().unwrap().clone() {
             hook();
-        }
-        if let RuntimeEvent::Driver(inbound) = &record.event {
-            if let Some(budget) = &self.budget {
-                budget.observe(inbound);
-            }
         }
         self.activity.observe(&record.event);
         let mut state = self.write_state.lock().unwrap();
@@ -3399,11 +3386,6 @@ impl Scheduler {
                 return Err(SchedulerError::InvalidConfig(message));
             }
         };
-        let budget = match &route {
-            TaskRoute::General(prepared) => {
-                Some(Arc::new(RuntimeDeadline::from_timeouts(&prepared.timeouts)))
-            }
-        };
         if let Err(message) = validate_task_route(task.as_ref(), &route) {
             if task.is_some() {
                 self.inner.store.store_task_result(
@@ -3431,7 +3413,7 @@ impl Scheduler {
             }
         }
         let resumed = claim.task.zcode_session_id.is_some();
-        let policy = match route_policy(&route, resumed) {
+        let _policy = match route_policy(&route, resumed) {
             Ok(policy) => policy.map(Arc::new),
             Err(error) => {
                 let message = error.to_string();
@@ -3458,32 +3440,10 @@ impl Scheduler {
             claim.task.agent_id.clone(),
             runtime_agent_id.clone(),
             claim.owner_epoch,
-            budget.as_ref().map(Arc::clone),
             Arc::clone(&runtime_lifecycle),
             Arc::clone(&activity),
         ));
         let lifecycle_sink: Arc<dyn LifecycleSink> = sink.clone();
-        if budget
-            .as_ref()
-            .is_some_and(|budget| budget.remaining().is_none())
-        {
-            self.finish_unstarted_route(
-                &claim.task.agent_id,
-                claim.owner_epoch,
-                &route,
-                task.as_ref(),
-                UnstartedTerminal {
-                    outcome: CompletionOutcome::TimedOut,
-                    reason_code: "WALL_TIME_DEADLINE_EXCEEDED",
-                    message: "runtime_lifecycle wall deadline elapsed before runtime spawn",
-                },
-                true,
-            )?;
-            return Err(SchedulerError::RuntimeCommand {
-                agent_id: claim.task.agent_id,
-                message: "runtime_lifecycle wall deadline elapsed before runtime spawn".into(),
-            });
-        }
         let runtime = match self.inner.factory.spawn(&claim.task, lifecycle_sink) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -3509,36 +3469,7 @@ impl Scheduler {
             }
         };
         let mcp_servers = Vec::new();
-        let (bootstrap_timeout, wall_bounded_bootstrap) =
-            match budget.as_ref().and_then(|budget| budget.remaining()) {
-                Some(remaining) => (
-                    remaining.min(self.inner.config.bootstrap_timeout),
-                    remaining <= self.inner.config.bootstrap_timeout,
-                ),
-                None if budget.is_some() => {
-                    let terminal = runtime.stop(self.inner.config.stop_grace);
-                    let resources_reaped = terminal_proves_process_group_reaped(&terminal);
-                    self.finish_unstarted_route(
-                        &claim.task.agent_id,
-                        claim.owner_epoch,
-                        &route,
-                        task.as_ref(),
-                        UnstartedTerminal {
-                            outcome: CompletionOutcome::TimedOut,
-                            reason_code: "WALL_TIME_DEADLINE_EXCEEDED",
-                            message:
-                                "runtime_lifecycle wall deadline elapsed before session bootstrap",
-                        },
-                        resources_reaped,
-                    )?;
-                    return Err(SchedulerError::RuntimeCommand {
-                        agent_id: claim.task.agent_id,
-                        message: "runtime_lifecycle wall deadline elapsed before session bootstrap"
-                            .into(),
-                    });
-                }
-                None => (self.inner.config.bootstrap_timeout, false),
-            };
+        let bootstrap_timeout = self.inner.config.bootstrap_timeout;
         let session = match if claim.task.zcode_session_id.is_some() {
             runtime.resume_session_with_mcp(&claim.task, &mcp_servers, bootstrap_timeout)
         } else {
@@ -3549,15 +3480,7 @@ impl Scheduler {
                 let message = error.to_string();
                 let terminal = runtime.stop(self.inner.config.stop_grace);
                 let resources_reaped = terminal_proves_process_group_reaped(&terminal);
-                let wall_timed_out = budget.as_ref().is_some_and(|budget| {
-                    budget.violation() == Some(timeouts::TimeoutViolation::WallTime)
-                }) || (wall_bounded_bootstrap
-                    && matches!(error, RuntimeCommandError::Timeout));
-                let (outcome, code) = if wall_timed_out {
-                    (CompletionOutcome::TimedOut, "WALL_TIME_DEADLINE_EXCEEDED")
-                } else {
-                    (CompletionOutcome::Failed, "SESSION_START_FAILED")
-                };
+                let (outcome, code) = (CompletionOutcome::Failed, "SESSION_START_FAILED");
                 if let Err(store_error) = self.finish_unstarted_route(
                     &claim.task.agent_id,
                     claim.owner_epoch,
@@ -3638,7 +3561,6 @@ impl Scheduler {
                     runtime_lifecycle: Arc::clone(&runtime_lifecycle),
                     route: route.clone(),
                     task: task.clone(),
-                    policy: policy.clone(),
                     check: Arc::clone(&check),
                 },
             );
@@ -3758,7 +3680,6 @@ impl Scheduler {
             runtime_lifecycle,
             route,
             task,
-            budget,
             check,
         });
         Ok(true)
@@ -3908,7 +3829,6 @@ impl Scheduler {
                         natural_completion: false,
                         forced_outcome: forced,
                     },
-                    None,
                 )
             } else {
                 let (code, message) = failure.unwrap_or((
@@ -3982,7 +3902,6 @@ impl Scheduler {
         &self,
         target: TerminalTarget<'_>,
         decision: TerminalDecision,
-        _required_check_control: Option<(&ActiveCheck, Instant)>,
     ) -> Result<TaskPhase, SchedulerError> {
         let TerminalTarget {
             agent_id,
@@ -4118,8 +4037,6 @@ impl Scheduler {
         sink: &StoreLifecycleSink,
         route: &TaskRoute,
         _task: Option<&TaskRecord>,
-        check: &ActiveCheck,
-        budget: Option<&RuntimeDeadline>,
         terminal: RuntimeTerminal,
         natural_completion: bool,
         forced_outcome: Option<(CompletionOutcome, String)>,
@@ -4166,11 +4083,6 @@ impl Scheduler {
                 natural_completion,
                 forced_outcome,
             },
-            if natural_completion {
-                budget.map(|budget| (check, budget.deadline()))
-            } else {
-                None
-            },
         )
     }
 
@@ -4187,7 +4099,6 @@ impl Scheduler {
         route: &TaskRoute,
         task: Option<&TaskRecord>,
         check: &Arc<ActiveCheck>,
-        budget: Option<&RuntimeDeadline>,
         reason_code: &str,
     ) -> Result<(), SchedulerError> {
         let stop = self.inner.store.request_runtime_stop(agent_id)?;
@@ -4215,8 +4126,6 @@ impl Scheduler {
             sink,
             route,
             task,
-            check,
-            budget,
             terminal,
             false,
             Some(forced),
@@ -4239,73 +4148,12 @@ impl Scheduler {
             runtime_lifecycle,
             route,
             task,
-            budget,
             check,
         } = context;
         let scheduler = self.clone();
         thread::spawn(move || {
             let mut handled_generation = 0;
             loop {
-                if let Some(violation) = budget.as_ref().and_then(|budget| budget.violation()) {
-                    if violation == timeouts::TimeoutViolation::WallTime {
-                        if let Err(error) = scheduler.finish_monitor_timeout(
-                            &agent_id,
-                            owner_epoch,
-                            &runtime,
-                            &sink,
-                            &session_id,
-                            &operation,
-                            &runtime_lifecycle,
-                            &route,
-                            task.as_ref(),
-                            &check,
-                            budget.as_deref(),
-                            violation.reason_code(),
-                        ) {
-                            scheduler.record_failure(&agent_id, error.to_string());
-                        }
-                        return;
-                    }
-                    if let Err(error) = scheduler.inner.store.request_runtime_stop(&agent_id) {
-                        scheduler.record_failure(&agent_id, error.to_string());
-                    }
-                    check.cancel();
-                    runtime_lifecycle.request_stop(&runtime.turn_snapshot());
-                    let _guard = operation.lock().unwrap();
-                    if budget.as_ref().and_then(|budget| budget.violation()) != Some(violation) {
-                        continue;
-                    }
-                    if let Some(error) = Self::request_cooperative_stop(
-                        &runtime,
-                        &session_id,
-                        &runtime_lifecycle,
-                        scheduler.inner.config.stop_grace,
-                    ) {
-                        scheduler.record_failure(&agent_id, error);
-                    }
-                    let terminal = runtime.stop(scheduler.inner.config.stop_grace);
-                    if let Err(error) = scheduler.finish_locked_monitor_terminal(
-                        &agent_id,
-                        owner_epoch,
-                        &runtime,
-                        &sink,
-                        &route,
-                        task.as_ref(),
-                        &check,
-                        budget.as_deref(),
-                        terminal,
-                        false,
-                        Some((CompletionOutcome::TimedOut, violation.reason_code().into())),
-                    ) {
-                        scheduler.record_failure(&agent_id, error.to_string());
-                    }
-                    check.cancel();
-                    scheduler.release_active(&agent_id, owner_epoch);
-                    if let Err(error) = scheduler.start_ready() {
-                        scheduler.record_failure(&agent_id, error.to_string());
-                    }
-                    return;
-                }
                 if let Some(task) = task.as_ref() {
                     let passive = sink.activity.snapshot();
                     let now_ms = activity_wall_now_millis();
@@ -4328,7 +4176,10 @@ impl Scheduler {
                                 })
                                 .max()
                         });
-                    let timeout_reason = None;
+                    let limits = match &route {
+                        TaskRoute::General(prepared) => &prepared.timeouts,
+                    };
+                    let timeout_reason = runtime_timeout_reason(limits, &passive, input_wait_age);
                     if let Some(reason) = timeout_reason {
                         if let Err(error) = scheduler.finish_monitor_timeout(
                             &agent_id,
@@ -4341,7 +4192,6 @@ impl Scheduler {
                             &route,
                             Some(task),
                             &check,
-                            budget.as_deref(),
                             reason,
                         ) {
                             scheduler.record_failure(&agent_id, error.to_string());
@@ -4407,8 +4257,6 @@ impl Scheduler {
                         &sink,
                         &route,
                         task.as_ref(),
-                        &check,
-                        budget.as_deref(),
                         terminal,
                         natural,
                         None,
@@ -4438,8 +4286,6 @@ impl Scheduler {
                         &sink,
                         &route,
                         task.as_ref(),
-                        &check,
-                        budget.as_deref(),
                         terminal,
                         false,
                         Some((
@@ -4518,8 +4364,6 @@ impl Scheduler {
                                 &sink,
                                 &route,
                                 task.as_ref(),
-                                &check,
-                                budget.as_deref(),
                                 terminal,
                                 boundary == TurnBoundary::Completed,
                                 None,
@@ -4547,8 +4391,6 @@ impl Scheduler {
                                 &sink,
                                 &route,
                                 task.as_ref(),
-                                &check,
-                                budget.as_deref(),
                                 terminal,
                                 false,
                                 Some((CompletionOutcome::Failed, "MESSAGE_DELIVERY_FAILED".into())),
@@ -4805,41 +4647,13 @@ impl Scheduler {
         deadline
             .remaining()
             .ok_or_else(|| Self::control_timeout_error(agent_id))?;
-        let mut effective_decision = decision;
-        let mut policy_reason = None;
-        let mut validated_denial = None;
-        if request.request_type == "permission" {
-            if let Some(launcher) = self.active_policy(agent_id) {
-                let params: serde_json::Value = serde_json::from_str(&request.payload_json)
-                    .map_err(|error| {
-                        SchedulerError::InvalidConfig(format!(
-                            "permission request payload is invalid: {error}"
-                        ))
-                    })?;
-                let external = if decision == "allow" {
-                    zcode_agent_preparation::ExternalDecision::Allow
-                } else {
-                    zcode_agent_preparation::ExternalDecision::Deny
-                };
-                let (policy, denial) =
-                    launcher.decide_zcode_permission_validated(&params, external);
-                if external == zcode_agent_preparation::ExternalDecision::Allow && !policy.allowed {
-                    effective_decision = "deny";
-                    policy_reason = Some(policy.reason.to_owned());
-                }
-                if effective_decision == "deny" {
-                    validated_denial = denial;
-                }
-            }
-        }
-        let effective_content = policy_reason.as_deref().or(content);
         #[cfg(test)]
         self.run_response_claim_hook(ResponseClaimHookStage::BeforeClaim, agent_id);
         let existing_disposition = match self.inner.store.claim_pending_response_if_accepting(
             agent_id,
             request_id,
-            effective_decision,
-            effective_content,
+            decision,
+            content,
         )? {
             PendingResponseClaimDisposition::Claimed => None,
             PendingResponseClaimDisposition::TaskStopping => {
@@ -4866,9 +4680,9 @@ impl Scheduler {
             return Ok(ResponseOutcome {
                 disposition,
                 requested_decision: decision.to_owned(),
-                effective_decision: effective_decision.to_owned(),
-                policy_overrode: effective_decision != decision,
-                policy_reason_code: policy_reason,
+                effective_decision: decision.to_owned(),
+                policy_overrode: false,
+                policy_reason_code: None,
             });
         }
         #[cfg(test)]
@@ -4902,9 +4716,9 @@ impl Scheduler {
         };
         if let Err(error) = runtime.respond_request(
             &request.correlation_id,
-            effective_decision,
-            effective_content,
-            validated_denial.as_ref(),
+            decision,
+            content,
+            None,
             response_deadline,
         ) {
             self.inner
@@ -4951,9 +4765,9 @@ impl Scheduler {
         Ok(ResponseOutcome {
             disposition: ResponseDisposition::Responded,
             requested_decision: decision.to_owned(),
-            effective_decision: effective_decision.to_owned(),
-            policy_overrode: effective_decision != decision,
-            policy_reason_code: policy_reason,
+            effective_decision: decision.to_owned(),
+            policy_overrode: false,
+            policy_reason_code: None,
         })
     }
 
@@ -5110,7 +4924,6 @@ impl Scheduler {
                 natural_completion: false,
                 forced_outcome: Some((CompletionOutcome::Cancelled, "CANCELLED".into())),
             },
-            None,
         );
         self.release_active(agent_id, decision.owner_epoch);
         if let Some(error) = close_error {
@@ -5133,14 +4946,6 @@ impl Scheduler {
                 Arc::clone(&active.runtime_lifecycle),
             )
         })
-    }
-
-    pub(crate) fn active_policy(&self, agent_id: &str) -> Option<Arc<PolicyLauncher>> {
-        let state = self.inner.state.lock().unwrap();
-        state
-            .active
-            .get(agent_id)
-            .and_then(|active| active.policy.as_ref().map(Arc::clone))
     }
 
     pub fn active_count(&self) -> usize {
