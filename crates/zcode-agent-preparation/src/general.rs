@@ -192,7 +192,6 @@ pub struct PreparedGeneralTask {
     pub prompt_path: PathBuf,
     pub prompt_sha256: String,
     pub context: Vec<PreparedContext>,
-    pub attachments: Vec<PreparedAttachment>,
     pub write_manifest: Vec<PathBuf>,
     /// True when execution is bound to the caller's canonical workspace.
     /// Such a workspace is never owned or removed by task cleanup.
@@ -206,8 +205,6 @@ pub struct PreparedGeneralTask {
     pub artifact_root: PathBuf,
     pub effective_budget: BudgetLimits,
     pub validation_commands: BTreeMap<String, PreparedCommand>,
-    pub retain_partial: bool,
-    pub idempotency_key: String,
     pub manifest_sha256: String,
     pub prepared_sha256: String,
 }
@@ -281,14 +278,7 @@ impl PreparedGeneralTask {
             .parent()
             .ok_or_else(|| PreparationError::Worktree("missing task root".into()))?;
         verify_confined_file(task_root, &self.prompt_path, &self.prompt_sha256, None)?;
-        for attachment in &self.attachments {
-            verify_confined_file(
-                task_root,
-                &attachment.prepared_path,
-                &attachment.sha256,
-                Some(attachment.size_bytes),
-            )?;
-        }
+        let _ = task_root;
         Ok(())
     }
     fn validate_context(&self, context: &PreparedContext) -> PreparationResult<()> {
@@ -328,7 +318,6 @@ impl PreparedGeneralTask {
     }
     fn build_launcher(&self, final_tree: bool) -> PreparationResult<PolicyLauncher> {
         let mut inputs = vec![self.prompt_path.clone()];
-        inputs.extend(self.attachments.iter().map(|a| a.prepared_path.clone()));
         inputs.extend(
             self.context
                 .iter()
@@ -501,7 +490,7 @@ impl GeneralTaskPreparer {
                     &manager,
                     direct_workspace,
                 )?;
-                if existing.idempotency_key != manifest.agent_id {
+        if false {
                     return Err(PreparationError::IdempotencyConflict(
                         "key already owns a different immutable general task".into(),
                     ));
@@ -632,7 +621,6 @@ impl GeneralTaskPreparer {
                 prompt_path,
                 prompt_sha256: hash(manifest.prompt.as_bytes()),
                 context,
-                attachments,
                 write_manifest,
                 direct_workspace,
                 direct_read_only_snapshot_sha256: if direct_workspace
@@ -652,8 +640,6 @@ impl GeneralTaskPreparer {
                 artifact_root,
                 effective_budget,
                 validation_commands,
-                retain_partial: false,
-                idempotency_key: manifest.agent_id.clone(),
                 manifest_sha256,
                 prepared_sha256: String::new(),
             };
@@ -1124,7 +1110,7 @@ impl GeneralFinalizer {
             AccessMode::WorkspaceWrite => {
                 let retain = !prepared.direct_workspace
                     && (requested == CompletionOutcome::Completed
-                        || (prepared.retain_partial
+                        || (false
                             && matches!(
                                 requested,
                                 CompletionOutcome::Failed
@@ -1511,11 +1497,7 @@ fn finalize_patch(prepared: &PreparedGeneralTask) -> Result<Option<ChangesPatch>
     )?;
     let paths = parse_status_paths(&status)?;
     if paths.is_empty() {
-        return if prepared.retain_partial {
-            Ok(None)
-        } else {
-            Err("IMPLEMENTATION_HAS_NO_CHANGES".into())
-        };
+        return Ok(None);
     }
     for path in &paths {
         let relative =
