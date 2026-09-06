@@ -3000,34 +3000,13 @@ fn general_result_response_fits(
     // Terminal sizing must reserve the longest legal projection.  Reaping is
     // a separate cleanup transaction and must never make this preflight optimistic.
     task.reaped_at = None;
-    let artifacts = completion
-        .changes_patch
-        .iter()
-        .map(|artifact| rpc::TaskArtifactMetadataView {
-            artifact_id: artifact.artifact_id.clone(),
-            kind: "changes_patch".into(),
-            sha256: artifact.sha256.clone(),
-            size_bytes: artifact.size_bytes,
-        })
-        .collect::<Vec<_>>();
-    Ok(rpc::terminal_result_response_fits(
-        &task, result, &artifacts,
-    ))
+    Ok(rpc::terminal_result_response_fits(&task, result, &[]))
 }
 
 fn invalidate_untransportable_completion(completion: &mut GeneralCompletion) {
     completion.outcome = CompletionOutcome::ResultInvalid;
     completion.reason_code = Some("RESULT_RESPONSE_FRAME_EXCEEDED".into());
     completion.summary = "terminal result exceeds private RPC response frame".into();
-    completion.checks.clear();
-    completion.residual_gaps.clear();
-}
-
-fn compact_untransportable_artifact_projection(completion: &mut GeneralCompletion) {
-    if let Some(artifact) = completion.changes_patch.as_mut() {
-        artifact.changed_paths.clear();
-        artifact.diff_stat = None;
-    }
 }
 
 fn task_result(completion: &GeneralCompletion) -> TaskResult {
@@ -3232,7 +3211,6 @@ fn unreaped_general(
         },
         checks: Vec::new(),
         residual_gaps: Vec::new(),
-        changes_patch: None,
         cleaned: false,
     }
 }
@@ -4630,7 +4608,6 @@ impl Scheduler {
                         &completion,
                         &result,
                     )? {
-                        compact_untransportable_artifact_projection(&mut completion);
                     }
                 }
                 #[cfg(test)]

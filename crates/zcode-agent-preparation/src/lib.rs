@@ -347,7 +347,7 @@ pub fn agent_bash_policy_sha256() -> String {
 
 pub use general::{
     canonical_general_repository, general_control_header, general_launch_prompt,
-    validate_general_named_command, AccessMode, AttachmentInput, BudgetLimits, ChangesPatch,
+    validate_general_named_command, AccessMode, AttachmentInput, BudgetLimits,
     CompletionOutcome, GeneralCompletion, GeneralFinalizer, GeneralNamedCommand,
     GeneralTaskManifest, GeneralTaskPreparer, PreparedAttachment, PreparedContext,
     PreparedGeneralTask, PreparedWorkspace, PublicAttachment, GENERAL_CONTROL_SCHEMA,
