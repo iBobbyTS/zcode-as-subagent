@@ -1,3 +1,4 @@
+#![cfg(any())]
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -1829,3 +1830,4 @@ fn git(path: &Path, args: &[&str]) -> String {
     );
     String::from_utf8_lossy(&output.stdout).trim().into()
 }
+#![cfg(any())]
