@@ -267,11 +267,6 @@ pub struct EffectiveBudget {
     pub model_stream_idle_timeout_ms: u64,
     pub tool_call_timeout_ms: u64,
     pub input_wait_timeout_ms: u64,
-    pub max_turns: u64,
-    pub max_tool_calls: u64,
-    pub max_context_bytes: u64,
-    pub max_result_bytes: u64,
-    pub max_artifact_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -547,11 +542,6 @@ const DEFAULT_BUDGET: EffectiveBudget = EffectiveBudget {
     model_stream_idle_timeout_ms: 90_000,
     tool_call_timeout_ms: 300_000,
     input_wait_timeout_ms: 300_000,
-    max_turns: 32,
-    max_tool_calls: 128,
-    max_context_bytes: 1_048_576,
-    max_result_bytes: 1_048_576,
-    max_artifact_bytes: 16_777_216,
 };
 
 pub const MIN_RESULT_BYTES: u64 = 512;
@@ -562,11 +552,6 @@ const MAX_BUDGET: EffectiveBudget = EffectiveBudget {
     model_stream_idle_timeout_ms: 86_400_000,
     tool_call_timeout_ms: 86_400_000,
     input_wait_timeout_ms: 86_400_000,
-    max_turns: 1024,
-    max_tool_calls: 4096,
-    max_context_bytes: 16_777_216,
-    max_result_bytes: 16_777_216,
-    max_artifact_bytes: 268_435_456,
 };
 
 pub struct Store {
@@ -1378,11 +1363,6 @@ impl Store {
                 task.phase
             )));
         }
-        if canonical.len() as u64 > task.effective_budget.max_result_bytes {
-            return Err(StoreError::InvalidState(
-                "task result exceeds effective max_result_bytes".into(),
-            ));
-        }
         if result.outcome == TaskOutcome::Completed {
             let (pending, queued) = completion_blockers_tx(&transaction, agent_id)?;
             if pending || queued {
@@ -1826,21 +1806,11 @@ pub fn resolve_effective_budget(request: &BudgetRequest) -> StoreResult<Effectiv
             value.input_wait_timeout_ms,
             MAX_BUDGET.input_wait_timeout_ms,
         ),
-        (value.max_turns, MAX_BUDGET.max_turns),
-        (value.max_tool_calls, MAX_BUDGET.max_tool_calls),
-        (value.max_context_bytes, MAX_BUDGET.max_context_bytes),
-        (value.max_result_bytes, MAX_BUDGET.max_result_bytes),
-        (value.max_artifact_bytes, MAX_BUDGET.max_artifact_bytes),
     ];
     if pairs.iter().any(|(value, cap)| *value == 0 || value > cap) {
         return Err(StoreError::InvalidState(
             "budget limit is zero or above hard cap".into(),
         ));
-    }
-    if value.max_result_bytes < MIN_RESULT_BYTES {
-        return Err(StoreError::InvalidState(format!(
-            "max_result_bytes must be at least {MIN_RESULT_BYTES}"
-        )));
     }
     Ok(value)
 }

@@ -232,8 +232,6 @@ struct PassiveActivityState {
     assistant_buffers: HashMap<String, String>,
     latest_progress: Option<String>,
     terminal_text: String,
-    terminal_text_limit: u64,
-    terminal_text_oversized: bool,
     active_tools: HashMap<String, (PassiveToolKind, Instant)>,
     samples: HashMap<String, ActivitySample>,
     sample_order: VecDeque<String>,
@@ -246,11 +244,8 @@ struct PassiveActivityTracker {
 }
 
 impl PassiveActivityTracker {
-    fn new(terminal_text_limit: u64) -> Self {
-        let state = PassiveActivityState {
-            terminal_text_limit,
-            ..PassiveActivityState::default()
-        };
+    fn new() -> Self {
+        let state = PassiveActivityState::default();
         Self {
             state: Mutex::new(state),
             changed: Condvar::new(),
@@ -338,13 +333,7 @@ impl PassiveActivityTracker {
                 }
             }
             if let Some(response) = parsed.terminal_response.as_deref() {
-                if response.len() as u64 <= state.terminal_text_limit {
-                    state.terminal_text = response.to_owned();
-                    state.terminal_text_oversized = false;
-                } else {
-                    state.terminal_text.clear();
-                    state.terminal_text_oversized = true;
-                }
+                state.terminal_text = response.to_owned();
             }
         }
 
@@ -476,9 +465,7 @@ impl PassiveActivityTracker {
 
     fn take_terminal_text(&self) -> TerminalText {
         let mut state = self.state.lock().unwrap();
-        if state.terminal_text_oversized {
-            TerminalText::Oversized
-        } else if state.terminal_text.trim().is_empty() {
+        if state.terminal_text.trim().is_empty() {
             state.terminal_text.clear();
             TerminalText::Missing
         } else {
@@ -491,7 +478,6 @@ impl PassiveActivityTracker {
 enum TerminalText {
     Visible(String),
     Missing,
-    Oversized,
 }
 
 fn duration_millis(value: Duration) -> u64 {
@@ -508,15 +494,7 @@ fn activity_wall_now_millis() -> u64 {
 }
 
 fn append_latest_text(state: &mut PassiveActivityState, delta: &str, wall_now_ms: u64) {
-    if !state.terminal_text_oversized {
-        let next_len = (state.terminal_text.len() as u64).saturating_add(delta.len() as u64);
-        if next_len <= state.terminal_text_limit {
-            state.terminal_text.push_str(delta);
-        } else {
-            state.terminal_text.clear();
-            state.terminal_text_oversized = true;
-        }
-    }
+    state.terminal_text.push_str(delta);
     state.latest_text_tail.push_str(delta);
     if state.latest_text_tail.len() > MAX_LATEST_TEXT_BYTES {
         let mut split = state.latest_text_tail.len() - MAX_LATEST_TEXT_BYTES;
@@ -3833,11 +3811,6 @@ impl Scheduler {
             model_stream_idle_timeout_ms: prepared.effective_budget.model_stream_idle_timeout_ms,
             tool_call_timeout_ms: prepared.effective_budget.tool_call_timeout_ms,
             input_wait_timeout_ms: prepared.effective_budget.input_wait_timeout_ms,
-            max_turns: u64::MAX,
-            max_tool_calls: u64::MAX,
-            max_context_bytes: u64::MAX,
-            max_result_bytes: u64::MAX,
-            max_artifact_bytes: u64::MAX,
         };
         let task = NewTask {
             agent_id: prepared.agent_id.clone(),
@@ -4054,10 +4027,7 @@ impl Scheduler {
         };
         let runtime_agent_id = format!("{}:{}", claim.task.agent_id, claim.owner_epoch);
         let runtime_lifecycle = Arc::new(RuntimeLifecycle::new(claim.owner_epoch));
-        let terminal_text_limit = match &route {
-            TaskRoute::General(_, _) => usize::MAX,
-        };
-        let activity = Arc::new(PassiveActivityTracker::new(terminal_text_limit as u64));
+        let activity = Arc::new(PassiveActivityTracker::new());
         let sink = Arc::new(StoreLifecycleSink::new(
             Arc::clone(&self.inner.store),
             claim.task.agent_id.clone(),
@@ -4636,7 +4606,7 @@ impl Scheduler {
                         TerminalText::Visible(_) => {
                             GeneralFinalizer::finalize_completed_tree(prepared)
                         }
-                        TerminalText::Missing | TerminalText::Oversized => {
+                        TerminalText::Missing => {
                             if resumed {
                                 GeneralFinalizer::finalize_resumed(
                                     prepared,
@@ -4697,18 +4667,6 @@ impl Scheduler {
                                 completion.reason_code = Some("FINAL_TEXT_MISSING".into());
                             } else {
                                 completion.residual_gaps.push("FINAL_TEXT_MISSING".into());
-                            }
-                        }
-                        TerminalText::Oversized => {
-                            completion.summary =
-                                "terminal final text exceeds effective max_result_bytes".into();
-                            if completion.reason_code.is_none() {
-                                completion.reason_code =
-                                    Some("FINAL_TEXT_EXCEEDS_RESULT_LIMIT".into());
-                            } else {
-                                completion
-                                    .residual_gaps
-                                    .push("FINAL_TEXT_EXCEEDS_RESULT_LIMIT".into());
                             }
                         }
                     }
