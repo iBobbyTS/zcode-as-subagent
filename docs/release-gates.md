@@ -6,7 +6,6 @@ Run from the integrated feature head:
 cargo test --workspace -q
 npm test
 npm pack --dry-run
-python tests/live-agent/non-git-based/run_matrix.py --help
 git diff --check
 ```
 

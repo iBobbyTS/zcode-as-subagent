@@ -1838,6 +1838,9 @@ pub trait ManagedRuntime: Send + Sync + 'static {
     fn identity(&self) -> Option<ProcessIdentity>;
     fn stop(&self, grace: Duration) -> RuntimeTerminal;
     fn wait_terminal(&self, timeout: Duration) -> Option<RuntimeTerminal>;
+    fn diagnostic_tail(&self) -> String {
+        String::new()
+    }
     fn bootstrap_session(
         &self,
         _job: &TaskRecord,
@@ -1928,6 +1931,10 @@ impl ManagedRuntime for RuntimeOwner {
 
     fn wait_terminal(&self, timeout: Duration) -> Option<RuntimeTerminal> {
         self.wait_terminal(timeout)
+    }
+
+    fn diagnostic_tail(&self) -> String {
+        self.driver.diagnostic_tail()
     }
 
     fn bootstrap_session(
@@ -2429,6 +2436,7 @@ struct TerminalTarget<'a> {
     agent_id: &'a str,
     sink: &'a StoreLifecycleSink,
     route: &'a TaskRoute,
+    runtime: &'a Arc<dyn ManagedRuntime>,
 }
 
 struct TerminalDecision {
@@ -3900,6 +3908,7 @@ impl Scheduler {
                         agent_id,
                         sink,
                         route: &TaskRoute::General(prepared),
+                        runtime,
                     },
                     TerminalDecision {
                         terminal,
@@ -3986,6 +3995,7 @@ impl Scheduler {
             agent_id,
             sink,
             route,
+            runtime,
         } = target;
         let TerminalDecision {
             terminal,
@@ -4073,6 +4083,20 @@ impl Scheduler {
                 {
                     completion.reason_code = Some(reason);
                 }
+                if completion.outcome != CompletionOutcome::Completed {
+                    let diagnostics = runtime
+                        .diagnostic_tail()
+                        .chars()
+                        .filter(|character| {
+                            !character.is_control() || *character == '\n' || *character == '\t'
+                        })
+                        .take(4096)
+                        .collect::<String>();
+                    if !diagnostics.trim().is_empty() {
+                        completion.summary.push_str("\n[diagnostic] ");
+                        completion.summary.push_str(diagnostics.trim());
+                    }
+                }
                 let reap_after_persist = completion.cleaned && process_group_reaped;
                 #[cfg(test)]
                 self.run_result_persist_hook(agent_id);
@@ -4142,6 +4166,7 @@ impl Scheduler {
                 agent_id,
                 sink,
                 route,
+                runtime: &runtime,
             },
             TerminalDecision {
                 terminal,
@@ -5085,6 +5110,7 @@ impl Scheduler {
                 agent_id,
                 sink: &sink,
                 route: &route,
+                runtime: &runtime,
             },
             TerminalDecision {
                 terminal,
