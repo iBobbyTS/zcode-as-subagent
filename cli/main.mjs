@@ -6,8 +6,10 @@ import { runInit, installHooks, installPlan, nativeBinary } from './installer.mj
 import { backupData, cleanupLegacy, purge, restoreData, uninstall } from './maintenance.mjs';
 import { platform, productPaths } from './paths.mjs';
 import { startService, stopService } from './service.mjs';
+import { callDaemon, parseDaemonInput } from './rpc.mjs';
 
 const HELP = `zcode-as-subagent ${VERSION}\n\nUsage: zcode-as-subagent <command> [options]\n\nCommands:\n  help, version               Show basic product information\n  init [--dry-run] [--resume] [--install-hooks] Install and configure the local service\n  hooks install [--dry-run]  Install ZCode policy hooks explicitly\n  config models               Install or restore the ZCode model catalog\n  status, diagnose            Inspect local service and runtime state\n  backup --output <dir>       Back up retained product data\n  restore --input <dir>       Verify and restore product data\n  uninstall                   Remove service registration; retain data\n  purge --yes                 Explicitly delete new product data\n  cleanup-legacy --yes        Delete old unpublished installation (no migration)\n`;
+const DAEMON_HELP = `  create/spawn, get/poll, list, send, respond, cancel, result, close\n                             Daemon calls accept --json '<object>' or JSON stdin\n`;
 
 function value(args, name) {
   const index = args.indexOf(name);
@@ -28,7 +30,7 @@ function output(valueToWrite) {
 export async function main(args) {
   const command = args[0] || 'help';
   if (command === 'help' || command === '--help' || command === '-h') {
-    process.stdout.write(HELP); return;
+    process.stdout.write(HELP + DAEMON_HELP); return;
   }
   if (command === 'version' || command === '--version' || command === '-v') {
     process.stdout.write(`${VERSION}\n`); return;
@@ -70,7 +72,9 @@ export async function main(args) {
     if (!args.includes('--yes')) throw new CliError('CONFIRMATION_REQUIRED', 'cleanup-legacy requires --yes');
     output(cleanupLegacy(paths.home)); return;
   }
-  throw new CliError('NOT_IMPLEMENTED', `${command} is reserved for the local daemon client`);
+  const input = parseDaemonInput(args.slice(1));
+  const result = await callDaemon(process.env.ZCODE_AGENTD_SOCKET || paths.socket, command, input);
+  output({ command, result });
 }
 
 export { HELP, installPlan };
