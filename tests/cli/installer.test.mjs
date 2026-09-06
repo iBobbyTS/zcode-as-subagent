@@ -12,7 +12,7 @@ test('dry-run reports the entire plan and creates nothing', () => {
   const paths = productPaths(home);
   const result = runInit({ paths, dryRun: true });
   assert.deepEqual(result.plan.map((step) => step.id), [
-    'probe-runtime', 'create-data', 'configure-models', 'write-product-config', 'install-launch-agent',
+    'probe-runtime', 'create-data', 'write-product-config', 'install-launch-agent',
   ]);
   assert.equal(result.plan[0].path, ZCODE_RUNTIME);
   assert.equal(fs.readdirSync(home).length, 0);

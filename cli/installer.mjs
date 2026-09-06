@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 import { LAUNCH_AGENT_LABEL, ZCODE_RUNTIME } from './constants.mjs';
 import { CliError } from './errors.mjs';
 import { atomicWrite, jsonBytes, readOptional, restoreOptional, sha256 } from './fs-atomic.mjs';
-import { patchCatalog } from './catalog.mjs';
 import { codexConfigPath, productPaths } from './paths.mjs';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -63,7 +62,6 @@ export function installPlan(paths = productPaths(), options = {}) {
   const plan = [
     { id: 'probe-runtime', action: 'verify fixed ZCode runtime', path: ZCODE_RUNTIME },
     { id: 'create-data', action: 'create private product data and log directories', paths: [paths.data, paths.logs] },
-    { id: 'configure-models', action: 'patch ZCode model catalog atomically', path: paths.zcodeConfig, main_model: options.mainModel, lite_model: options.liteModel },
     { id: 'write-product-config', action: 'write product paths and fixed runtime', path: paths.config },
     { id: 'install-launch-agent', action: 'install daemon LaunchAgent', path: paths.launchAgent, label: LAUNCH_AGENT_LABEL },
   ];
@@ -147,10 +145,6 @@ export function runInit(options = {}) {
       fs.mkdirSync(paths.data, { recursive: true, mode: 0o700 });
       fs.mkdirSync(paths.logs, { recursive: true, mode: 0o700 });
       mark('create-data');
-    }
-    if (!completed.has('configure-models')) {
-      patchCatalog(paths.zcodeConfig, paths.provenance, options);
-      mark('configure-models');
     }
     if (!completed.has('write-product-config')) {
       atomicWrite(paths.config, jsonBytes({ schema_version: 1, runtime: ZCODE_RUNTIME, database: paths.database, socket: paths.socket }));

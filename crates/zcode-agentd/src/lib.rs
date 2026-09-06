@@ -1,9 +1,7 @@
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fmt, fs, io,
-    path::{Path, PathBuf},
+    path::Path,
     process::Command,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -13,10 +11,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use zcode_agent_store::{
-    BudgetRequest, EffectiveBudget, LifecycleWrite, MessageState,
+    LifecycleWrite, MessageState,
     NewTask, PendingRequestState, PendingResponseClaimDisposition, Store,
     StoreError, StoredMessage, StoredProcessIdentity, TaskClaim, TaskOutcome, TaskPhase,
-    TaskRecord, TaskResult, TaskSubmissionDisposition, TurnState, MIN_RESULT_BYTES,
+    TaskRecord, TaskResult, TaskSubmissionDisposition, TurnState,
 };
 use zcode_driver::{
     observe_process, observe_process_group, stop_and_reap_persisted_process_group, ChildExit,
@@ -31,16 +29,15 @@ use zcode_protocol::{
     SESSION_SUBSCRIBE,
 };
 
-mod budget;
+mod timeouts;
 pub mod rpc;
 
-use budget::RuntimeBudget;
+use timeouts::RuntimeDeadline;
 use zcode_agent_preparation::{
-    canonical_general_repository, general_launch_prompt, validate_general_named_command,
-    AccessMode, CompletionOutcome, GeneralCompletion, GeneralFinalizer, GeneralNamedCommand,
-    GeneralTaskManifest, GeneralTaskPreparer, PolicyLauncher, PreparedGeneralTask,
-    ValidatedPermissionDenial, ValidationCommand, ValidationOutput,
-    MAX_VALIDATION_COMMAND_TIMEOUT_MS,
+    general_launch_prompt, CompletionOutcome, GeneralCompletion,
+    GeneralFinalizer, GeneralTaskManifest, GeneralTaskPreparer, PolicyLauncher,
+    PreparedGeneralTask, ValidatedPermissionDenial, ValidationOutput,
+    RuntimeTimeouts,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1797,120 +1794,26 @@ pub fn classify_restart(identity: &ProcessIdentity) -> RuntimeTerminal {
 
 #[derive(Clone)]
 enum TaskRoute {
-    General(Box<PreparedGeneralTask>, Vec<String>),
-}
-
-const GENERAL_DAEMON_CONTRACT_SCHEMA: &str = "zcode-general-daemon-contract/v1";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GeneralDaemonContract {
-    schema: String,
-    original_manifest_sha256: String,
-    prepared_sha256: String,
-    required_command_ids: Vec<String>,
-}
-
-fn daemon_contract_digest(contract: &GeneralDaemonContract) -> Result<String, String> {
-    let encoded = serde_json::to_vec(&(
-        contract.schema.as_str(),
-        contract.original_manifest_sha256.as_str(),
-        &contract.required_command_ids,
-    ))
-    .map_err(|_| "general daemon contract could not be encoded".to_owned())?;
-    Ok(format!("{:x}", Sha256::digest(encoded)))
-}
-
-fn bind_general_daemon_contract(
-    prepared: &mut PreparedGeneralTask,
-    required_command_ids: &[String],
-) -> Result<String, String> {
-    let mut required_command_ids = required_command_ids.to_vec();
-    required_command_ids.sort();
-    required_command_ids.dedup();
-    if required_command_ids
-        .iter()
-        .any(|id| !prepared.validation_commands.contains_key(id))
-    {
-        return Err("required command is not selected by the prepared task".into());
-    }
-    let original_manifest_sha256 = prepared.manifest_sha256.clone();
-    let mut contract = GeneralDaemonContract {
-        schema: GENERAL_DAEMON_CONTRACT_SCHEMA.into(),
-        original_manifest_sha256,
-        prepared_sha256: String::new(),
-        required_command_ids,
-    };
-    prepared.manifest_sha256 = daemon_contract_digest(&contract)?;
-    prepared.prepared_sha256.clear();
-    prepared.prepared_sha256 = format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(prepared)
-                .map_err(|_| "prepared general task could not be encoded".to_owned())?,
-        )
-    );
-    contract.prepared_sha256 = prepared.prepared_sha256.clone();
-    let mut value = serde_json::to_value(prepared)
-        .map_err(|_| "prepared general task could not be encoded".to_owned())?;
-    value
-        .as_object_mut()
-        .ok_or_else(|| "prepared general task must be an object".to_owned())?
-        .insert(
-            "daemon_contract".into(),
-            serde_json::to_value(contract)
-                .map_err(|_| "general daemon contract could not be encoded".to_owned())?,
-        );
-    let json = serde_json::to_string(&value)
-        .map_err(|_| "prepared general task could not be encoded".to_owned())?;
-    Ok(json)
+    General(Box<PreparedGeneralTask>),
 }
 
 fn task_route(task: &TaskRecord) -> Result<TaskRoute, String> {
     let json = task.prepared_launch_json.as_str();
-    let value: serde_json::Value =
-        serde_json::from_str(json).map_err(|_| "stored prepared launch is invalid")?;
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|_| "stored prepared launch is invalid")?;
     match value.get("schema").and_then(serde_json::Value::as_str) {
         Some(zcode_agent_preparation::GENERAL_TASK_SCHEMA) => {
-            let prepared: PreparedGeneralTask = serde_json::from_value(value.clone())
+            let prepared: PreparedGeneralTask = serde_json::from_value(value)
                 .map_err(|_| "stored general preparation is invalid")?;
             prepared
                 .validate_digest()
                 .map_err(|_| "stored general preparation digest is invalid")?;
-            let (required_command_ids, expected_digest) = match value.get("daemon_contract") {
-                Some(contract) => {
-                    let contract: GeneralDaemonContract = serde_json::from_value(contract.clone())
-                        .map_err(|_| "stored general daemon contract is invalid")?;
-                    if contract.schema != GENERAL_DAEMON_CONTRACT_SCHEMA
-                        || contract.prepared_sha256 != prepared.prepared_sha256
-                        || contract
-                            .required_command_ids
-                            .windows(2)
-                            .any(|pair| pair[0] >= pair[1])
-                        || contract
-                            .required_command_ids
-                            .iter()
-                            .any(|id| !prepared.validation_commands.contains_key(id))
-                    {
-                        return Err("stored general daemon contract is invalid".into());
-                    }
-                    let digest = daemon_contract_digest(&contract)?;
-                    if prepared.manifest_sha256 != digest {
-                        return Err("stored general daemon contract digest is invalid".into());
-                    }
-                    (
-                        contract.required_command_ids,
-                        prepared.prepared_sha256.clone(),
-                    )
-                }
-                None => (Vec::new(), prepared.prepared_sha256.clone()),
-            };
-            if task.prepared_launch_sha256 != expected_digest
+            if task.prepared_launch_sha256 != prepared.prepared_sha256
                 || task.workspace_path != prepared.workspace.path.to_string_lossy()
             {
                 return Err("stored task does not match its general preparation".into());
             }
-            Ok(TaskRoute::General(Box::new(prepared), required_command_ids))
+            Ok(TaskRoute::General(Box::new(prepared)))
         }
         Some(_) => Err("stored prepared launch uses an unknown task schema".into()),
         None => Err("stored prepared launch omitted task schema".into()),
@@ -1919,8 +1822,8 @@ fn task_route(task: &TaskRecord) -> Result<TaskRoute, String> {
 
 fn validate_task_route(task: Option<&TaskRecord>, route: &TaskRoute) -> Result<(), String> {
     match (task, route) {
-        (Some(_), TaskRoute::General(_, _)) => Ok(()),
-        (None, TaskRoute::General(_, _)) => Err("prepared task metadata is missing".into()),
+        (Some(_), TaskRoute::General(_)) => Ok(()),
+        (None, TaskRoute::General(_)) => Err("prepared task metadata is missing".into()),
     }
 }
 
@@ -1929,7 +1832,7 @@ fn route_policy(
     resumed: bool,
 ) -> zcode_agent_preparation::PreparationResult<Option<PolicyLauncher>> {
     match route {
-        TaskRoute::General(prepared, _) => {
+        TaskRoute::General(prepared) => {
             if resumed {
                 let mut launcher = prepared.resume_launcher()?;
                 launcher.set_interactive_bash(matches!(prepared.permission_mode, zcode_agent_preparation::PermissionMode::Edit));
@@ -2167,7 +2070,7 @@ fn apply_agent_policy_environment(command: &mut Command, task: &TaskRecord) -> i
     let manifest = match task_route(task)
         .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?
     {
-        TaskRoute::General(prepared, _) => prepared
+        TaskRoute::General(prepared) => prepared
             .write_manifest
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
@@ -2194,7 +2097,7 @@ fn apply_agent_policy_environment(command: &mut Command, task: &TaskRecord) -> i
             match task_route(task)
                 .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?
             {
-                TaskRoute::General(prepared, _) => match prepared.permission_mode {
+                TaskRoute::General(prepared) => match prepared.permission_mode {
                     zcode_agent_preparation::PermissionMode::Build => "build",
                     zcode_agent_preparation::PermissionMode::Edit => "edit",
                     zcode_agent_preparation::PermissionMode::Plan => "plan",
@@ -2221,7 +2124,7 @@ where
             match task_route(task)
                 .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?
             {
-                TaskRoute::General(prepared, _) => {
+                TaskRoute::General(prepared) => {
                     prepared
                         .launcher()
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -2232,187 +2135,6 @@ where
         apply_agent_policy_environment(&mut command, task)?;
         Ok(Arc::new(RuntimeOwner::spawn(command, sink)?))
     }
-}
-
-pub const GENERAL_COMMAND_CATALOG_SCHEMA: &str = "zcode-general-command-catalog/v1";
-const MAX_GENERAL_COMMAND_CATALOG_BYTES: u64 = 1024 * 1024;
-const MAX_GENERAL_CHECK_OUTPUT_BYTES: usize = 8 * 1024;
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GeneralCommandCatalogFile {
-    schema: String,
-    commands: Vec<GeneralCommandCatalogEntry>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GeneralCommandCatalogEntry {
-    repository: PathBuf,
-    command_id: String,
-    command: ValidationCommand,
-    allowed_access_modes: Vec<AccessMode>,
-    readonly_safe: bool,
-}
-
-#[derive(Debug, Clone)]
-struct PublishedGeneralCommand {
-    command: GeneralNamedCommand,
-    allowed_access_modes: Vec<AccessMode>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct GeneralCommandCatalog {
-    commands: BTreeMap<(PathBuf, String), PublishedGeneralCommand>,
-}
-
-impl GeneralCommandCatalog {
-    pub fn load(path: &Path) -> Result<Self, SchedulerError> {
-        let metadata = fs::symlink_metadata(path).map_err(|error| {
-            SchedulerError::InvalidConfig(format!("command catalog is unavailable: {error}"))
-        })?;
-        if metadata.file_type().is_symlink()
-            || !metadata.is_file()
-            || metadata.len() > MAX_GENERAL_COMMAND_CATALOG_BYTES
-        {
-            return Err(SchedulerError::InvalidConfig(
-                "command catalog must be a bounded regular file".into(),
-            ));
-        }
-        let bytes = fs::read(path).map_err(|error| {
-            SchedulerError::InvalidConfig(format!("command catalog could not be read: {error}"))
-        })?;
-        let parsed: GeneralCommandCatalogFile =
-            serde_json::from_slice(&bytes).map_err(|error| {
-                SchedulerError::InvalidConfig(format!("command catalog is invalid: {error}"))
-            })?;
-        if parsed.schema != GENERAL_COMMAND_CATALOG_SCHEMA {
-            return Err(SchedulerError::InvalidConfig(
-                "command catalog schema is unsupported".into(),
-            ));
-        }
-        let mut commands = BTreeMap::new();
-        for entry in parsed.commands {
-            let canonical = canonical_general_repository(&entry.repository)
-                .map_err(|error| SchedulerError::InvalidConfig(error.to_string()))?;
-            if canonical != entry.repository {
-                return Err(SchedulerError::InvalidConfig(
-                    "command catalog repository must already be canonical".into(),
-                ));
-            }
-            if !valid_general_command_id(&entry.command_id) {
-                return Err(SchedulerError::InvalidConfig(
-                    "command catalog contains an invalid command id".into(),
-                ));
-            }
-            if entry.allowed_access_modes.is_empty()
-                || entry
-                    .allowed_access_modes
-                    .iter()
-                    .enumerate()
-                    .any(|(index, access_mode)| {
-                        entry.allowed_access_modes[..index].contains(access_mode)
-                    })
-            {
-                return Err(SchedulerError::InvalidConfig(
-                    "command catalog access_modes must be non-empty and unique".into(),
-                ));
-            }
-            if entry.readonly_safe && !entry.allowed_access_modes.contains(&AccessMode::ReadOnly) {
-                return Err(SchedulerError::InvalidConfig(
-                    "readonly-safe command must be published for read_only".into(),
-                ));
-            }
-            let command = GeneralNamedCommand {
-                command: entry.command,
-                readonly_safe: entry.readonly_safe,
-            };
-            if command.command.timeout_ms > MAX_VALIDATION_COMMAND_TIMEOUT_MS {
-                return Err(SchedulerError::InvalidConfig(format!(
-                    "named check timeout exceeds {MAX_VALIDATION_COMMAND_TIMEOUT_MS} ms"
-                )));
-            }
-            if command.command.max_output_bytes > MAX_GENERAL_CHECK_OUTPUT_BYTES {
-                return Err(SchedulerError::InvalidConfig(format!(
-                    "named check output cap exceeds {MAX_GENERAL_CHECK_OUTPUT_BYTES} bytes"
-                )));
-            }
-            let scratch = tempfile::tempdir().map_err(|error| {
-                SchedulerError::InvalidConfig(format!(
-                    "command catalog validation scratch is unavailable: {error}"
-                ))
-            })?;
-            validate_general_named_command(&canonical, scratch.path(), &command)
-                .map_err(|error| SchedulerError::InvalidConfig(error.to_string()))?;
-            let key = (canonical, entry.command_id);
-            if commands
-                .insert(
-                    key,
-                    PublishedGeneralCommand {
-                        command,
-                        allowed_access_modes: entry.allowed_access_modes,
-                    },
-                )
-                .is_some()
-            {
-                return Err(SchedulerError::InvalidConfig(
-                    "command catalog contains a duplicate repository and command id".into(),
-                ));
-            }
-        }
-        Ok(Self { commands })
-    }
-
-    fn resolve(
-        &self,
-        repository: &Path,
-        access_mode: AccessMode,
-        command_ids: &[String],
-    ) -> Result<BTreeMap<String, GeneralNamedCommand>, SchedulerError> {
-        if command_ids.is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        let repository = canonical_general_repository(repository)
-            .map_err(|error| SchedulerError::InvalidConfig(error.to_string()))?;
-        let mut seen = HashSet::new();
-        let mut resolved = BTreeMap::new();
-        for command_id in command_ids {
-            if !valid_general_command_id(command_id) || !seen.insert(command_id.as_str()) {
-                return Err(SchedulerError::InvalidConfig(
-                    "general command ids must be valid and unique".into(),
-                ));
-            }
-            let published = self
-                .commands
-                .get(&(repository.clone(), command_id.clone()))
-                .ok_or_else(|| {
-                    SchedulerError::InvalidConfig(format!(
-                        "general command {command_id} is not published for this repository"
-                    ))
-                })?;
-            if !published.allowed_access_modes.contains(&access_mode)
-                || (access_mode == AccessMode::ReadOnly && !published.command.readonly_safe)
-            {
-                return Err(SchedulerError::InvalidConfig(format!(
-                    "general command {command_id} is unavailable for this access_mode"
-                )));
-            }
-            resolved.insert(command_id.clone(), published.command.clone());
-        }
-        Ok(resolved)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.commands.is_empty()
-    }
-}
-
-fn valid_general_command_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
 fn general_initial_prompt(prepared: &PreparedGeneralTask) -> Result<String, SchedulerError> {
@@ -2427,8 +2149,6 @@ fn general_initial_prompt(prepared: &PreparedGeneralTask) -> Result<String, Sche
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchedulerConfig {
-    /// Deprecated compatibility knob. Agent admission is intentionally not
-    /// process-wide limited; only the per-canonical-workspace guard applies.
     pub global_max_agents: usize,
     pub per_workspace_max_agents: usize,
     pub stop_grace: Duration,
@@ -2442,14 +2162,9 @@ pub trait MonotonicClock: Send + Sync + 'static {
     fn now(&self) -> Duration;
 }
 
-struct ProcessMonotonicClock {
-    origin: Instant,
-}
-
+struct ProcessMonotonicClock { origin: Instant }
 impl MonotonicClock for ProcessMonotonicClock {
-    fn now(&self) -> Duration {
-        self.origin.elapsed()
-    }
+    fn now(&self) -> Duration { self.origin.elapsed() }
 }
 
 impl Default for SchedulerConfig {
@@ -2467,45 +2182,17 @@ impl Default for SchedulerConfig {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ControlDeadline {
-    expires_at: Instant,
-}
-
+struct ControlDeadline { expires_at: Instant }
 impl ControlDeadline {
-    fn new(budget: Duration) -> Self {
-        Self {
-            expires_at: Instant::now() + budget,
-        }
-    }
-
-    fn remaining(self) -> Option<Duration> {
-        self.expires_at
-            .checked_duration_since(Instant::now())
-            .filter(|remaining| !remaining.is_zero())
-    }
-
-    fn runtime_phase(self, stop_grace: Duration) -> Option<Duration> {
-        self.runtime_phase_deadline(stop_grace)?
-            .checked_duration_since(Instant::now())
-            .filter(|phase| !phase.is_zero())
-    }
-
+    fn new(budget: Duration) -> Self { Self { expires_at: Instant::now() + budget } }
+    fn remaining(self) -> Option<Duration> { self.expires_at.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) }
+    fn runtime_phase(self, stop_grace: Duration) -> Option<Duration> { self.runtime_phase_deadline(stop_grace)?.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) }
     fn runtime_phase_deadline(self, stop_grace: Duration) -> Option<Instant> {
         let remaining = self.remaining()?;
-        let maximum_cleanup = stop_grace
-            .checked_mul(3)
-            .unwrap_or(remaining)
-            .min(remaining / 2);
-        self.expires_at
-            .checked_sub(maximum_cleanup)
-            .filter(|deadline| *deadline > Instant::now())
+        let cleanup = stop_grace.checked_mul(3).unwrap_or(remaining).min(remaining / 2);
+        self.expires_at.checked_sub(cleanup).filter(|deadline| *deadline > Instant::now())
     }
-
-    fn cleanup_grace(self, configured: Duration) -> Duration {
-        self.remaining()
-            .map(|remaining| configured.min(remaining / 3))
-            .unwrap_or(Duration::ZERO)
-    }
+    fn cleanup_grace(self, configured: Duration) -> Duration { self.remaining().map(|remaining| configured.min(remaining / 3)).unwrap_or(Duration::ZERO) }
 }
 
 #[derive(Debug)]
@@ -2554,7 +2241,6 @@ struct SchedulerInner {
     factory: Arc<dyn RuntimeFactory>,
     config: SchedulerConfig,
     monotonic_clock: Arc<dyn MonotonicClock>,
-    general_commands: Arc<GeneralCommandCatalog>,
     #[cfg(test)]
     preflight_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     #[cfg(test)]
@@ -2746,7 +2432,7 @@ struct MonitorContext {
     runtime_lifecycle: Arc<RuntimeLifecycle>,
     route: TaskRoute,
     task: Option<TaskRecord>,
-    budget: Option<Arc<RuntimeBudget>>,
+    budget: Option<Arc<RuntimeDeadline>>,
     check: Arc<ActiveCheck>,
 }
 
@@ -2800,7 +2486,7 @@ struct StoreLifecycleSink {
     agent_id: String,
     runtime_agent_id: String,
     owner_epoch: u64,
-    budget: Option<Arc<RuntimeBudget>>,
+    budget: Option<Arc<RuntimeDeadline>>,
     runtime_lifecycle: Arc<RuntimeLifecycle>,
     activity: Arc<PassiveActivityTracker>,
     write_state: Mutex<SinkWriteState>,
@@ -2839,7 +2525,7 @@ impl StoreLifecycleSink {
         agent_id: String,
         runtime_agent_id: String,
         owner_epoch: u64,
-        budget: Option<Arc<RuntimeBudget>>,
+        budget: Option<Arc<RuntimeDeadline>>,
         runtime_lifecycle: Arc<RuntimeLifecycle>,
         activity: Arc<PassiveActivityTracker>,
     ) -> Self {
@@ -3000,7 +2686,7 @@ fn general_result_response_fits(
     // Terminal sizing must reserve the longest legal projection.  Reaping is
     // a separate cleanup transaction and must never make this preflight optimistic.
     task.reaped_at = None;
-    Ok(rpc::terminal_result_response_fits(&task, result, &[]))
+    Ok(rpc::terminal_result_response_fits(&task, result))
 }
 
 fn invalidate_untransportable_completion(completion: &mut GeneralCompletion) {
@@ -3031,113 +2717,8 @@ fn task_outcome(outcome: CompletionOutcome) -> TaskOutcome {
         CompletionOutcome::Failed => TaskOutcome::Failed,
         CompletionOutcome::Cancelled => TaskOutcome::Cancelled,
         CompletionOutcome::TimedOut => TaskOutcome::TimedOut,
-        CompletionOutcome::BudgetExhausted => TaskOutcome::BudgetExhausted,
         CompletionOutcome::RuntimeLost => TaskOutcome::RuntimeLost,
         CompletionOutcome::ResultInvalid => TaskOutcome::ResultInvalid,
-    }
-}
-
-#[derive(Debug, Default)]
-struct RequiredGeneralChecks {
-    succeeded: Vec<String>,
-    failure: Option<&'static str>,
-}
-
-fn run_required_general_checks(
-    prepared: &PreparedGeneralTask,
-    required_command_ids: &[String],
-    check: &ActiveCheck,
-    absolute_deadline: Instant,
-) -> RequiredGeneralChecks {
-    if required_command_ids.is_empty() {
-        return RequiredGeneralChecks::default();
-    }
-    if prepared.validate_digest().is_err() {
-        return RequiredGeneralChecks {
-            failure: Some("REQUIRED_CHECK_PREPARED_TASK_INVALID"),
-            ..RequiredGeneralChecks::default()
-        };
-    }
-    let policy = match prepared.final_tree_launcher() {
-        Ok(policy) => policy,
-        Err(_) => {
-            return RequiredGeneralChecks {
-                failure: Some("REQUIRED_CHECK_POLICY_INVALID"),
-                ..RequiredGeneralChecks::default()
-            };
-        }
-    };
-    let mut verified = Vec::with_capacity(required_command_ids.len());
-    for command_id in required_command_ids {
-        if check.is_cancelled() {
-            return RequiredGeneralChecks {
-                succeeded: verified,
-                failure: Some("REQUIRED_CHECK_CANCELLED"),
-            };
-        }
-        if Instant::now() >= absolute_deadline {
-            return RequiredGeneralChecks {
-                succeeded: verified,
-                failure: Some("REQUIRED_CHECK_ABSOLUTE_DEADLINE_EXCEEDED"),
-            };
-        }
-        let Some(command) = prepared.validation_commands.get(command_id) else {
-            return RequiredGeneralChecks {
-                succeeded: verified,
-                failure: Some("REQUIRED_CHECK_NOT_PREPARED"),
-            };
-        };
-        let Some(command_deadline) = Instant::now()
-            .checked_add(Duration::from_millis(command.timeout_ms))
-            .map(|deadline| deadline.min(absolute_deadline))
-        else {
-            return RequiredGeneralChecks {
-                succeeded: verified,
-                failure: Some("REQUIRED_CHECK_DEADLINE_INVALID"),
-            };
-        };
-        let output = match policy.run_cancellable(command_id, command_deadline, &check.cancelled) {
-            Ok(output) => output,
-            Err(_) => {
-                return RequiredGeneralChecks {
-                    succeeded: verified,
-                    failure: Some(if check.is_cancelled() {
-                        "REQUIRED_CHECK_CANCELLED"
-                    } else if Instant::now() >= absolute_deadline {
-                        "REQUIRED_CHECK_ABSOLUTE_DEADLINE_EXCEEDED"
-                    } else {
-                        "REQUIRED_CHECK_EXECUTION_FAILED"
-                    }),
-                };
-            }
-        };
-        if output.cancelled || check.is_cancelled() {
-            return RequiredGeneralChecks {
-                succeeded: verified,
-                failure: Some("REQUIRED_CHECK_CANCELLED"),
-            };
-        }
-        if output.timed_out && Instant::now() >= absolute_deadline {
-            return RequiredGeneralChecks {
-                succeeded: verified,
-                failure: Some("REQUIRED_CHECK_ABSOLUTE_DEADLINE_EXCEEDED"),
-            };
-        }
-        if output.status_code != Some(0)
-            || output.timed_out
-            || output.stdout_truncated
-            || output.stderr_truncated
-        {
-            return RequiredGeneralChecks {
-                succeeded: verified,
-                failure: Some("REQUIRED_CHECK_FAILED"),
-            };
-        }
-        verified.push(command_id.clone());
-    }
-    RequiredGeneralChecks {
-        succeeded: verified,
-        failure: None,
     }
 }
 
@@ -3209,14 +2790,13 @@ fn unreaped_general(
         } else {
             message.into()
         },
-        checks: Vec::new(),
         residual_gaps: Vec::new(),
         cleaned: false,
     }
 }
 
 fn runtime_timeout_reason(
-    limits: &EffectiveBudget,
+    limits: &RuntimeTimeouts,
     activity: &PassiveActivitySnapshot,
     input_wait_age_ms: Option<u64>,
 ) -> Option<&'static str> {
@@ -3604,7 +3184,6 @@ impl Scheduler {
                 monotonic_clock: Arc::new(ProcessMonotonicClock {
                     origin: Instant::now(),
                 }),
-                general_commands: Arc::new(GeneralCommandCatalog::default()),
                 #[cfg(test)]
                 preflight_hook: None,
                 #[cfg(test)]
@@ -3614,19 +3193,6 @@ impl Scheduler {
                 state: Mutex::new(SchedulerState::default()),
             }),
         })
-    }
-
-    pub fn with_general_command_catalog(
-        mut self,
-        catalog: GeneralCommandCatalog,
-    ) -> Result<Self, SchedulerError> {
-        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
-            SchedulerError::InvalidConfig(
-                "general command catalog must attach before scheduler cloning".into(),
-            )
-        })?;
-        inner.general_commands = Arc::new(catalog);
-        Ok(self)
     }
 
     pub fn with_monotonic_clock(
@@ -3669,10 +3235,6 @@ impl Scheduler {
         }
     }
 
-    pub(crate) fn named_checks_enabled(&self) -> bool {
-        !self.inner.general_commands.is_empty()
-    }
-
     pub fn store(&self) -> Arc<Store> {
         Arc::clone(&self.inner.store)
     }
@@ -3680,61 +3242,21 @@ impl Scheduler {
     pub fn enqueue_general(
         &self,
         manifest: &GeneralTaskManifest,
-        group_id: Option<&str>,
     ) -> Result<SubmittedTask, SchedulerError> {
-        self.enqueue_general_with_commands(manifest, group_id, &[], &[])
-    }
-
-    pub fn enqueue_general_with_commands(
-        &self,
-        manifest: &GeneralTaskManifest,
-        group_id: Option<&str>,
-        allowed_command_ids: &[String],
-        required_command_ids: &[String],
-    ) -> Result<SubmittedTask, SchedulerError> {
-        if group_id.is_some_and(|group_id| group_id.trim().is_empty()) {
-            return Err(SchedulerError::InvalidConfig(
-                "group_id cannot be empty when supplied".into(),
-            ));
-        }
-        let attachment_roots = Vec::new();
-        let mut command_ids = allowed_command_ids.to_vec();
-        for command_id in required_command_ids {
-            if !command_ids.contains(command_id) {
-                command_ids.push(command_id.clone());
-            }
-        }
-        let named_commands = self.inner.general_commands.resolve(
-            &manifest.repository,
-            manifest.permission_mode.access_mode(),
-            &command_ids,
-        )?;
-        let mut prepared = GeneralTaskPreparer::new(attachment_roots)
-            .and_then(|preparer| {
-                preparer.prepare_named_direct_submission(manifest, &named_commands)
-            })
+        let prepared = GeneralTaskPreparer::new(Vec::new())
+            .and_then(|preparer| preparer.prepare_direct_submission(manifest))
             .map_err(|error| SchedulerError::InvalidConfig(error.to_string()))?;
-        let prepared_json = bind_general_daemon_contract(&mut prepared, required_command_ids)
-            .map_err(SchedulerError::InvalidConfig)?;
+        let prepared_json = serde_json::to_string(&prepared)
+            .map_err(|error| SchedulerError::InvalidConfig(error.to_string()))?;
         let initial_prompt = general_initial_prompt(&prepared)?;
-        let budget = EffectiveBudget {
-            absolute_wall_time_ms: prepared.effective_budget.absolute_wall_time_ms,
-            runtime_activity_idle_timeout_ms: prepared
-                .effective_budget
-                .runtime_activity_idle_timeout_ms,
-            model_stream_idle_timeout_ms: prepared.effective_budget.model_stream_idle_timeout_ms,
-            tool_call_timeout_ms: prepared.effective_budget.tool_call_timeout_ms,
-            input_wait_timeout_ms: prepared.effective_budget.input_wait_timeout_ms,
-        };
         let task = NewTask {
             agent_id: prepared.agent_id.clone(),
             repository: prepared.repository.to_string_lossy().into_owned(),
-            workspace_path: prepared.worktree.path.to_string_lossy().into_owned(),
+            workspace_path: prepared.workspace.path.to_string_lossy().into_owned(),
             runtime_hash: None,
             prepared_launch_json: prepared_json,
             prepared_launch_sha256: prepared.prepared_sha256.clone(),
             initial_prompt,
-            budget: BudgetRequest::Limits(budget),
         };
         let enqueued = self.inner.store.enqueue_task_authoritative(&task)?;
         Ok(SubmittedTask {
@@ -3799,7 +3321,7 @@ impl Scheduler {
 
         let route = task_route(task).map_err(SchedulerError::InvalidConfig)?;
         validate_task_route(Some(task), &route).map_err(SchedulerError::InvalidConfig)?;
-        let TaskRoute::General(prepared, _) = route;
+        let TaskRoute::General(prepared) = route;
         if task.phase == TaskPhase::Terminal {
             if self.inner.store.task_result(&task.agent_id)?.is_none() {
                 return Err(SchedulerError::RuntimeCommand {
@@ -3864,7 +3386,6 @@ impl Scheduler {
 
     fn start_claim(&self, claim: TaskClaim) -> Result<bool, SchedulerError> {
         let task = self.inner.store.get_task(&claim.task.agent_id)?;
-        let budget = None;
         let route = match task_route(&claim.task) {
             Ok(route) => route,
             Err(message) => {
@@ -3886,6 +3407,11 @@ impl Scheduler {
                     )?;
                 }
                 return Err(SchedulerError::InvalidConfig(message));
+            }
+        };
+        let budget = match &route {
+            TaskRoute::General(prepared) => {
+                Some(Arc::new(RuntimeDeadline::from_timeouts(&prepared.timeouts)))
             }
         };
         if let Err(message) = validate_task_route(task.as_ref(), &route) {
@@ -4034,7 +3560,7 @@ impl Scheduler {
                 let terminal = runtime.stop(self.inner.config.stop_grace);
                 let resources_reaped = terminal_proves_process_group_reaped(&terminal);
                 let wall_timed_out = budget.as_ref().is_some_and(|budget| {
-                    budget.violation() == Some(budget::BudgetViolation::WallTime)
+                    budget.violation() == Some(timeouts::TimeoutViolation::WallTime)
                 }) || (wall_bounded_bootstrap
                     && matches!(error, RuntimeCommandError::Timeout));
                 let (outcome, code) = if wall_timed_out {
@@ -4258,7 +3784,7 @@ impl Scheduler {
         resources_reaped: bool,
     ) -> Result<TaskPhase, SchedulerError> {
         match route {
-            TaskRoute::General(prepared, _) => {
+            TaskRoute::General(prepared) => {
                 let completion = if resources_reaped {
                     finalized_general(
                         prepared,
@@ -4359,7 +3885,7 @@ impl Scheduler {
                     .then(|| (active.route.clone(), active.task.clone()))
             })
         };
-        if let Some((TaskRoute::General(prepared, required), task)) = active_route.clone() {
+        if let Some((TaskRoute::General(prepared), task)) = active_route.clone() {
             sink.runtime_lifecycle
                 .request_stop(&runtime.turn_snapshot());
             sink.runtime_lifecycle.force_terminating();
@@ -4384,7 +3910,7 @@ impl Scheduler {
                     TerminalTarget {
                         agent_id,
                         sink,
-                        route: &TaskRoute::General(prepared, required),
+                        route: &TaskRoute::General(prepared),
                     },
                     TerminalDecision {
                         terminal,
@@ -4406,7 +3932,7 @@ impl Scheduler {
                 self.finish_unstarted_route(
                     agent_id,
                     owner_epoch,
-                    &TaskRoute::General(prepared, required),
+                    &TaskRoute::General(prepared),
                     task.as_ref(),
                     UnstartedTerminal {
                         outcome,
@@ -4465,7 +3991,7 @@ impl Scheduler {
         &self,
         target: TerminalTarget<'_>,
         decision: TerminalDecision,
-        required_check_control: Option<(&ActiveCheck, Instant)>,
+        _required_check_control: Option<(&ActiveCheck, Instant)>,
     ) -> Result<TaskPhase, SchedulerError> {
         let TerminalTarget {
             agent_id,
@@ -4479,7 +4005,7 @@ impl Scheduler {
         } = decision;
         sink.runtime_lifecycle.terminalize();
         match route {
-            TaskRoute::General(prepared, required_command_ids) => {
+            TaskRoute::General(prepared) => {
                 let resumed = !prepared.prompt_path.is_file();
                 let (outcome, reason) = forced_outcome.unwrap_or_else(|| {
                     let outcome = match &terminal {
@@ -4528,44 +4054,6 @@ impl Scheduler {
                             }
                         }
                     };
-                    if matches!(terminal_text, TerminalText::Visible(_))
-                        && completion.outcome == CompletionOutcome::Completed
-                    {
-                        let required_checks = match required_check_control {
-                            Some((check, absolute_deadline)) => run_required_general_checks(
-                                prepared,
-                                required_command_ids,
-                                check,
-                                absolute_deadline,
-                            ),
-                            None if required_command_ids.is_empty() => {
-                                RequiredGeneralChecks::default()
-                            }
-                            None => RequiredGeneralChecks {
-                                failure: Some("REQUIRED_CHECK_CONTROL_UNAVAILABLE"),
-                                ..RequiredGeneralChecks::default()
-                            },
-                        };
-                        completion.checks = required_checks.succeeded;
-                        if let Some(check_failure) = required_checks.failure {
-                            completion.residual_gaps.push(check_failure.into());
-                            match check_failure {
-                                "REQUIRED_CHECK_CANCELLED" => {
-                                    completion.outcome = CompletionOutcome::Cancelled;
-                                    completion.reason_code = Some("CANCELLED".into());
-                                }
-                                "REQUIRED_CHECK_ABSOLUTE_DEADLINE_EXCEEDED" => {
-                                    completion.outcome = CompletionOutcome::TimedOut;
-                                    completion.reason_code =
-                                        Some("WALL_TIME_DEADLINE_EXCEEDED".into());
-                                }
-                                _ => {
-                                    completion.outcome = CompletionOutcome::Failed;
-                                    completion.reason_code = Some(check_failure.into());
-                                }
-                            }
-                        }
-                    }
                     match terminal_text {
                         TerminalText::Visible(text) => completion.summary = text,
                         TerminalText::Missing => {
@@ -4638,7 +4126,7 @@ impl Scheduler {
         route: &TaskRoute,
         _task: Option<&TaskRecord>,
         check: &ActiveCheck,
-        budget: Option<&RuntimeBudget>,
+        budget: Option<&RuntimeDeadline>,
         terminal: RuntimeTerminal,
         natural_completion: bool,
         forced_outcome: Option<(CompletionOutcome, String)>,
@@ -4705,7 +4193,7 @@ impl Scheduler {
         route: &TaskRoute,
         task: Option<&TaskRecord>,
         check: &Arc<ActiveCheck>,
-        budget: Option<&RuntimeBudget>,
+        budget: Option<&RuntimeDeadline>,
         reason_code: &str,
     ) -> Result<(), SchedulerError> {
         let stop = self.inner.store.request_runtime_stop(agent_id)?;
@@ -4765,7 +4253,7 @@ impl Scheduler {
             let mut handled_generation = 0;
             loop {
                 if let Some(violation) = budget.as_ref().and_then(|budget| budget.violation()) {
-                    if violation == budget::BudgetViolation::WallTime {
+                    if violation == timeouts::TimeoutViolation::WallTime {
                         if let Err(error) = scheduler.finish_monitor_timeout(
                             &agent_id,
                             owner_epoch,
@@ -4814,7 +4302,7 @@ impl Scheduler {
                         terminal,
                         false,
                         Some((
-                            CompletionOutcome::BudgetExhausted,
+                            CompletionOutcome::TimedOut,
                             violation.reason_code().into(),
                         )),
                     ) {

@@ -1,7 +1,5 @@
 mod general;
-mod manifest;
 mod policy;
-mod worktree;
 
 pub use general::PermissionMode;
 pub use policy::AGENT_BASH_COMMAND_FAMILIES;
@@ -347,19 +345,15 @@ pub fn agent_bash_policy_sha256() -> String {
 
 pub use general::{
     canonical_general_repository, general_control_header, general_launch_prompt,
-    validate_general_named_command, AccessMode, AttachmentInput, BudgetLimits,
-    CompletionOutcome, GeneralCompletion, GeneralFinalizer, GeneralNamedCommand,
-    GeneralTaskManifest, GeneralTaskPreparer, PreparedAttachment, PreparedContext,
-    PreparedGeneralTask, PreparedWorkspace, PublicAttachment, GENERAL_CONTROL_SCHEMA,
-    GENERAL_TASK_SCHEMA,
+    AccessMode, CompletionOutcome, GeneralCompletion, GeneralFinalizer, GeneralTaskManifest,
+    GeneralTaskPreparer, PreparedGeneralTask, PreparedWorkspace, RuntimeTimeouts,
+    GENERAL_CONTROL_SCHEMA, GENERAL_TASK_SCHEMA,
 };
 
-pub use manifest::{ValidationCommand, MAX_VALIDATION_COMMAND_TIMEOUT_MS};
 pub use policy::{
     ExternalDecision, PermissionDecision, PermissionRequest, PolicyCapabilities, PolicyLauncher,
     PreparedCommand, SandboxEnforcement, ValidatedPermissionDenial, ValidationOutput,
 };
-pub use worktree::{CleanupRecord, IntegrityDiagnostics, PreparedWorktree, WorktreeManager};
 
 #[derive(Debug)]
 pub enum PreparationError {

@@ -14,15 +14,13 @@ use std::{
 };
 use zcode_agent_store::Store;
 use zcode_agentd::{
-    rpc::ServerOptions, CommandRuntimeFactory, Daemon, GeneralCommandCatalog, RuntimeFactory,
-    Scheduler, SchedulerConfig,
+    rpc::ServerOptions, CommandRuntimeFactory, Daemon, RuntimeFactory, Scheduler, SchedulerConfig,
 };
 
 struct Config {
     database: PathBuf,
     socket: PathBuf,
     runtime: Option<PathBuf>,
-    command_catalog: Option<PathBuf>,
 }
 
 const PRODUCTION_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(90);
@@ -43,19 +41,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         move |_task: &zcode_agent_store::TaskRecord| runtime_command(runtime.as_deref()),
     ));
     let runtime_factory: Arc<dyn RuntimeFactory> = factory;
-    let command_catalog = config
-        .command_catalog
-        .as_deref()
-        .map(GeneralCommandCatalog::load)
-        .transpose()?
-        .unwrap_or_default();
     let scheduler = Scheduler::new(
         format!("agentd-{}", std::process::id()),
         store,
         runtime_factory,
         production_scheduler_config(),
-    )?
-    .with_general_command_catalog(command_catalog)?;
+    )?;
     let daemon = match Daemon::start_with_shutdown(
         &config.socket,
         scheduler,
@@ -118,7 +109,6 @@ fn parse_config() -> io::Result<Config> {
     let mut database = env::var_os("ZCODE_AGENTD_STORE").map(PathBuf::from);
     let mut socket = env::var_os("ZCODE_AGENTD_SOCKET").map(PathBuf::from);
     let mut runtime = env::var_os("ZCODE_RUNTIME_PATH").map(PathBuf::from);
-    let mut command_catalog = env::var_os("ZCODE_AGENTD_COMMAND_CATALOG").map(PathBuf::from);
     let mut arguments = env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         let value = arguments.next().ok_or_else(|| {
@@ -131,7 +121,6 @@ fn parse_config() -> io::Result<Config> {
             "--database" => database = Some(PathBuf::from(value)),
             "--socket" => socket = Some(PathBuf::from(value)),
             "--runtime" => runtime = Some(PathBuf::from(value)),
-            "--command-catalog" => command_catalog = Some(PathBuf::from(value)),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -159,25 +148,10 @@ fn parse_config() -> io::Result<Config> {
             "runtime path is not a regular file",
         ));
     }
-    let command_catalog = command_catalog
-        .map(absolute_path)
-        .transpose()?
-        .map(|path| {
-            let canonical = fs::canonicalize(&path)?;
-            if canonical != path {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "command catalog path must already be canonical",
-                ));
-            }
-            Ok(canonical)
-        })
-        .transpose()?;
     Ok(Config {
         database,
         socket,
         runtime,
-        command_catalog,
     })
 }
 

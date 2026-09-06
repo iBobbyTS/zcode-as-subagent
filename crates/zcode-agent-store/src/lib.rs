@@ -203,7 +203,6 @@ pub enum TaskOutcome {
     Failed,
     Cancelled,
     TimedOut,
-    BudgetExhausted,
     RuntimeLost,
     ResultInvalid,
 }
@@ -215,7 +214,6 @@ impl TaskOutcome {
             Self::Failed => "FAILED",
             Self::Cancelled => "CANCELLED",
             Self::TimedOut => "TIMED_OUT",
-            Self::BudgetExhausted => "BUDGET_EXHAUSTED",
             Self::RuntimeLost => "RUNTIME_LOST",
             Self::ResultInvalid => "RESULT_INVALID",
         }
@@ -227,7 +225,6 @@ impl TaskOutcome {
             "FAILED" => Ok(Self::Failed),
             "CANCELLED" => Ok(Self::Cancelled),
             "TIMED_OUT" => Ok(Self::TimedOut),
-            "BUDGET_EXHAUSTED" => Ok(Self::BudgetExhausted),
             "RUNTIME_LOST" => Ok(Self::RuntimeLost),
             "RESULT_INVALID" => Ok(Self::ResultInvalid),
             other => Err(StoreError::InvalidState(format!(
@@ -235,22 +232,6 @@ impl TaskOutcome {
             ))),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct EffectiveBudget {
-    pub absolute_wall_time_ms: u64,
-    pub runtime_activity_idle_timeout_ms: u64,
-    pub model_stream_idle_timeout_ms: u64,
-    pub tool_call_timeout_ms: u64,
-    pub input_wait_timeout_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BudgetRequest {
-    Omitted,
-    Null,
-    Limits(EffectiveBudget),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,7 +243,6 @@ pub struct NewTask {
     pub prepared_launch_json: String,
     pub prepared_launch_sha256: String,
     pub initial_prompt: String,
-    pub budget: BudgetRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -464,24 +444,6 @@ pub enum PendingResponseClaimDisposition {
     NotFound,
 }
 
-const DEFAULT_BUDGET: EffectiveBudget = EffectiveBudget {
-    absolute_wall_time_ms: 3_600_000,
-    runtime_activity_idle_timeout_ms: 90_000,
-    model_stream_idle_timeout_ms: 90_000,
-    tool_call_timeout_ms: 300_000,
-    input_wait_timeout_ms: 300_000,
-};
-
-pub const MIN_RESULT_BYTES: u64 = 512;
-
-const MAX_BUDGET: EffectiveBudget = EffectiveBudget {
-    absolute_wall_time_ms: 86_400_000,
-    runtime_activity_idle_timeout_ms: 86_400_000,
-    model_stream_idle_timeout_ms: 86_400_000,
-    tool_call_timeout_ms: 86_400_000,
-    input_wait_timeout_ms: 86_400_000,
-};
-
 pub struct Store {
     connection: Mutex<Connection>,
     database_path: PathBuf,
@@ -514,7 +476,6 @@ impl Store {
 
     pub fn enqueue_task_authoritative(&self, task: &NewTask) -> StoreResult<SubmittedTask> {
         validate_task(task)?;
-        let _effective_budget = resolve_effective_budget(&task.budget)?;
         let mut connection = self.connection.lock().unwrap();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if query_task(&transaction, &task.agent_id)?.is_some() {
@@ -1203,17 +1164,7 @@ impl Store {
     }
 
     pub fn store_task_result(&self, agent_id: &str, result: &TaskResult) -> StoreResult<()> {
-        self.store_task_result_with_patch(agent_id, result, None)
-    }
-
-    pub fn store_task_result_with_patch(
-        &self,
-        agent_id: &str,
-        result: &TaskResult,
-        patch: Option<&()>,
-    ) -> StoreResult<()> {
         validate_result(result)?;
-        let _ = patch;
         let canonical = task_result_bytes(result)?;
         let digest = task_result_digest(&canonical);
         let mut connection = self.connection.lock().unwrap();
@@ -1267,7 +1218,6 @@ impl Store {
                 "cancellation or close intent wins over late result".into(),
             ));
         }
-        let _ = patch;
         transaction.execute(
             "INSERT INTO task_results(agent_id,outcome,final_text,partial,result_sha256,completed_at)
              VALUES (?1,?2,?3,?4,?5,?6)",
@@ -1604,43 +1554,6 @@ impl Store {
         )?;
         i64_to_u64(count)
     }
-}
-
-pub fn resolve_effective_budget(request: &BudgetRequest) -> StoreResult<EffectiveBudget> {
-    let value = match request {
-        BudgetRequest::Omitted => DEFAULT_BUDGET,
-        BudgetRequest::Null => {
-            return Err(StoreError::InvalidState(
-                "budget null is not omission".into(),
-            ))
-        }
-        BudgetRequest::Limits(value) => value.clone(),
-    };
-    let pairs = [
-        (
-            value.absolute_wall_time_ms,
-            MAX_BUDGET.absolute_wall_time_ms,
-        ),
-        (
-            value.runtime_activity_idle_timeout_ms,
-            MAX_BUDGET.runtime_activity_idle_timeout_ms,
-        ),
-        (
-            value.model_stream_idle_timeout_ms,
-            MAX_BUDGET.model_stream_idle_timeout_ms,
-        ),
-        (value.tool_call_timeout_ms, MAX_BUDGET.tool_call_timeout_ms),
-        (
-            value.input_wait_timeout_ms,
-            MAX_BUDGET.input_wait_timeout_ms,
-        ),
-    ];
-    if pairs.iter().any(|(value, cap)| *value == 0 || value > cap) {
-        return Err(StoreError::InvalidState(
-            "budget limit is zero or above hard cap".into(),
-        ));
-    }
-    Ok(value)
 }
 
 fn initialize_schema(connection: &mut Connection) -> StoreResult<()> {
@@ -2152,7 +2065,6 @@ mod tests {
             prepared_launch_json: "{}".into(),
             prepared_launch_sha256: "prepared".into(),
             initial_prompt: "do work".into(),
-            budget: BudgetRequest::Limits(DEFAULT_BUDGET),
         }
     }
 
@@ -2494,7 +2406,6 @@ mod tests {
             TaskOutcome::Completed,
             TaskOutcome::Failed,
             TaskOutcome::TimedOut,
-            TaskOutcome::BudgetExhausted,
             TaskOutcome::RuntimeLost,
             TaskOutcome::ResultInvalid,
         ] {

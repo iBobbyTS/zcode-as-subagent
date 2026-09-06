@@ -257,7 +257,7 @@ impl PolicyLauncher {
     pub fn for_general(
         worktree: PathBuf,
         scratch_root: PathBuf,
-        artifact_target: PathBuf,
+        result_target: PathBuf,
         readable_inputs: Vec<PathBuf>,
         commands: BTreeMap<String, PreparedCommand>,
         capabilities: PolicyCapabilities,
@@ -267,7 +267,7 @@ impl PolicyLauncher {
         let mut launcher = Self::new(
             worktree,
             scratch_root,
-            artifact_target,
+            result_target,
             readable_inputs,
             commands,
             false,
@@ -816,13 +816,13 @@ impl PolicyLauncher {
             };
         }
         if target.starts_with(report_root) {
-            return Some("daemon_artifact_root_denied");
+            return Some("daemon_result_root_denied");
         }
         if target == self.scratch_root
             || target == report_root
             || (!target.starts_with(&self.scratch_root) && !target.starts_with(report_root))
         {
-            Some("write_outside_artifact_roots_denied")
+            Some("write_outside_result_roots_denied")
         } else {
             None
         }
