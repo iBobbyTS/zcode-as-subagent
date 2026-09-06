@@ -50,6 +50,20 @@ codex exec --dangerously-bypass-approvals-and-sandbox --json \
 | `zcode_subagent_result` | `result`，已终态 agent | 同名工具 | 返回 outcome、final_text、partial；未终态应明确失败 |
 | `zcode_subagent_close` | `close`，已完成或取消的 agent | 同名工具 | 返回 closed/resources_reaped；重复调用保持幂等 |
 
+## Case 3 长运行探测流程
+
+Case 3 不再使用“spawn 后立即 cancel”的短路径作为主要验证。对 CLI 和 Codex MCP 各执行一条独立任务：
+
+1. `status`、`list`。
+2. `spawn` Case 3，使用 `build` 和 `write_manifest=["src"]`。
+3. 持续 `poll`，直到至少一次返回非空 `latest_text_tail`，并且任务已经进入 `RUNNING`；保存每次的 revision、activity 和时间戳。
+4. 在仍运行时执行 `list` 和 `send`。`send` 使用唯一 `message_id`，随后用相同 message_id 重复一次，验证幂等结果。
+5. 不调用 `respond`，因为没有真实 pending request 时不能伪造 request_id；若 poll 出现 pending request，记录为“未执行 respond，待专门测试”。
+6. 立即执行 `cancel`，继续 `poll` 到 `TERMINAL/CANCELLED`，再执行 `result` 和 `close`。
+7. 取消后至少观察 10 秒：检查任务对应 runtime 是否仍存在，并查询 `~/.zcode/cli/db/db.sqlite` 的 `model_usage`，确认没有继续新增 token 记录。
+
+每条路径必须记录 `spawn_at`、首次文本时间、`send_at`、重复 send 结果、`cancel_at`、terminal 时间、最后一条 `completed_at` 和 token 差值。若任务在获得文本前就终止，该路径标记为 `TEXT_NOT_OBSERVED`，不能当作长运行测试通过。
+
 ## 推荐执行顺序
 
 先分别执行 `status`、`list`。创建一个 `plan` 任务验证 `spawn → poll → result → close`；创建一个短生命周期写模式任务验证 `send`、pending `respond` 和重复响应；再创建一个可取消任务验证 `cancel → poll → result → close`。`list` 在每个阶段执行一次，核对终态过滤和 cursor。每个步骤都在两条路径各执行一次，不能用 CLI 结果替代 Codex MCP 结果。
