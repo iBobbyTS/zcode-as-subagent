@@ -345,7 +345,7 @@ pub use general::{
 
 pub use policy::{
     ExternalDecision, PermissionDecision, PermissionRequest, PolicyCapabilities, PolicyLauncher,
-    PreparedCommand, SandboxEnforcement, ValidatedPermissionDenial, ValidationOutput,
+    SandboxEnforcement, ValidatedPermissionDenial,
 };
 
 #[derive(Debug)]
