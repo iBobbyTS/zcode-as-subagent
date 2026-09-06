@@ -206,6 +206,7 @@ pub struct PolicyLauncher {
     capabilities: PolicyCapabilities,
     access_mode: AccessMode,
     tracked_write_roots: Vec<PathBuf>,
+    interactive_bash: bool,
 }
 
 impl PolicyLauncher {
@@ -248,6 +249,7 @@ impl PolicyLauncher {
             capabilities,
             access_mode: AccessMode::ReadOnly,
             tracked_write_roots: Vec::new(),
+            interactive_bash: false,
         })
     }
 
@@ -292,6 +294,10 @@ impl PolicyLauncher {
 
     pub fn capabilities(&self) -> &PolicyCapabilities {
         &self.capabilities
+    }
+
+    pub fn set_interactive_bash(&mut self, enabled: bool) {
+        self.interactive_bash = enabled;
     }
 
     /// Produces policy identity from the daemon's own closed decision result.
@@ -365,6 +371,13 @@ impl PolicyLauncher {
         let input = params.get("input").unwrap_or(&serde_json::Value::Null);
         if tool_name == "Bash" {
             if self.access_mode != AccessMode::ReadOnly {
+                if self.interactive_bash {
+                    return if external == ExternalDecision::Deny {
+                        PermissionDecision { allowed: false, reason: "external_policy_denied" }
+                    } else {
+                        PermissionDecision { allowed: true, reason: "interactive_permission_required" }
+                    };
+                }
                 return PermissionDecision {
                     allowed: false,
                     reason: "permission_request_unrecognized",

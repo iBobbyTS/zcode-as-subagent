@@ -64,6 +64,15 @@ Case 3 不再使用“spawn 后立即 cancel”的短路径作为主要验证。
 
 每条路径必须记录 `spawn_at`、首次文本时间、`send_at`、重复 send 结果、`cancel_at`、terminal 时间、最后一条 `completed_at` 和 token 差值。若任务在获得文本前就终止，该路径标记为 `TEXT_NOT_OBSERVED`，不能当作长运行测试通过。
 
+## 独立 Respond Case（edit）
+
+使用 `tests/live-agent/non-git-based/respond_case.py` 执行专门的权限请求测试。脚本只使用 `permission_mode=edit` 和 `write_manifest=["src"]`，分别启动 allow 与 deny 两条独立任务；每条任务都必须在 `poll` 观察到真实的 pending、首次 `respond`，再用完全相同的 `request_id` 重复响应验证幂等，最后 `result → close`。没有观察到真实 pending 时脚本失败，不允许伪造 request_id。
+
+```sh
+python3 tests/live-agent/non-git-based/respond_case.py --transport cli --repository <absolute-fixture-repo>
+python3 tests/live-agent/non-git-based/respond_case.py --transport mcp --repository <absolute-fixture-repo>
+```
+
 ## 推荐执行顺序
 
 先分别执行 `status`、`list`。创建一个 `plan` 任务验证 `spawn → poll → result → close`；创建一个短生命周期写模式任务验证 `send`、pending `respond` 和重复响应；再创建一个可取消任务验证 `cancel → poll → result → close`。`list` 在每个阶段执行一次，核对终态过滤和 cursor。每个步骤都在两条路径各执行一次，不能用 CLI 结果替代 Codex MCP 结果。

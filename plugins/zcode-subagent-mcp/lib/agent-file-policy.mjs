@@ -24,6 +24,10 @@ function allow() {
   return { decision: 'allow', code: 'ok', reason: `${AGENT_FILE_POLICY_VERSION}: allowed` };
 }
 
+function ask() {
+  return { decision: 'ask', code: 'edit_requires_approval', reason: `${AGENT_FILE_POLICY_VERSION}: edit requires external approval` };
+}
+
 function envRequired(env) {
   if (env?.ZCODE_AGENT_POLICY !== '1') return deny('policy_marker_missing');
   const rawRoot = env?.ZCODE_AGENT_WORKTREE_ROOT;
@@ -186,6 +190,7 @@ export function evaluateAgentFileInput(input, env = process.env) {
     if (!pathAllowedForRead(state, value)) return deny('path_outside_root');
     if (WRITE_TOOLS.has(tool) && !withinManifest(state.root, value, state.manifest)) return deny('write_not_allowlisted');
   }
+  if (WRITE_TOOLS.has(tool) && env.ZCODE_AGENT_PERMISSION_MODE === 'edit') return ask();
   return allow();
 }
 
