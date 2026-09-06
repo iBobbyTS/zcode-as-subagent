@@ -1302,6 +1302,7 @@ impl RuntimeOwner {
             initial_prompt,
             &[],
             None,
+            None,
             timeout,
         )
     }
@@ -1317,6 +1318,7 @@ impl RuntimeOwner {
             workspace_path,
             initial_prompt,
             mcp_servers,
+            None,
             None,
             timeout,
         )
@@ -1378,6 +1380,7 @@ impl RuntimeOwner {
             &task.initial_prompt,
             mcp_servers,
             requested_model.as_deref(),
+            permission_mode_from_task(task),
             timeout,
         )
     }
@@ -1388,6 +1391,7 @@ impl RuntimeOwner {
         initial_prompt: &str,
         mcp_servers: &[StdioMcpServer],
         requested_model: Option<&str>,
+        mode: Option<&str>,
         timeout: Duration,
     ) -> Result<SessionReady, RuntimeCommandError> {
         let deadline = Instant::now()
@@ -1399,6 +1403,7 @@ impl RuntimeOwner {
         };
         let create_params = serde_json::to_value(CreateSessionParams {
             workspace,
+            mode,
             mcp_servers,
         })
         .map_err(|error| RuntimeCommandError::Transport(error.to_string()))?;
@@ -1656,6 +1661,20 @@ fn requested_model_from_prepared_launch(prepared_launch_json: Option<&str>) -> O
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
         })
+}
+
+fn permission_mode_from_task(task: &TaskRecord) -> Option<&'static str> {
+    let value = serde_json::from_str::<serde_json::Value>(&task.prepared_launch_json).ok()?;
+    match value.get("permission_mode").and_then(serde_json::Value::as_str) {
+        Some("plan") => Some("plan"),
+        Some("build") => Some("build"),
+        // ZCode's ACP session mode uses `build` for interactive tool approval;
+        // its `edit` mode auto-approves workspace mutations. The public
+        // contract keeps `edit`, but must map it to the approval-bearing mode.
+        Some("edit") => Some("build"),
+        Some("yolo") => Some("yolo"),
+        _ => None,
+    }
 }
 
 impl Drop for RuntimeOwner {
@@ -1934,9 +1953,13 @@ fn route_policy(
     match route {
         TaskRoute::General(prepared, _) => {
             if resumed {
-                prepared.resume_launcher().map(Some)
+                let mut launcher = prepared.resume_launcher()?;
+                launcher.set_interactive_bash(matches!(prepared.permission_mode, zcode_agent_preparation::PermissionMode::Edit));
+                Ok(Some(launcher))
             } else {
-                prepared.launcher().map(Some)
+                let mut launcher = prepared.launcher()?;
+                launcher.set_interactive_bash(matches!(prepared.permission_mode, zcode_agent_preparation::PermissionMode::Edit));
+                Ok(Some(launcher))
             }
         }
     }
@@ -2188,6 +2211,19 @@ fn apply_agent_policy_environment(command: &mut Command, task: &TaskRecord) -> i
     }
     command
         .env("ZCODE_AGENT_POLICY", "1")
+        .env(
+            "ZCODE_AGENT_PERMISSION_MODE",
+            match task_route(task)
+                .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?
+            {
+                TaskRoute::General(prepared, _) => match prepared.permission_mode {
+                    zcode_agent_preparation::PermissionMode::Build => "build",
+                    zcode_agent_preparation::PermissionMode::Edit => "edit",
+                    zcode_agent_preparation::PermissionMode::Plan => "plan",
+                    zcode_agent_preparation::PermissionMode::Yolo => "yolo",
+                },
+            },
+        )
         .env("ZCODE_AGENT_WORKTREE_ROOT", root)
         .env("ZCODE_AGENT_BOOTSTRAP_ROOTS", "/Applications/ZCode.app")
         .env("ZCODE_AGENT_WRITE_MANIFEST", serialized);

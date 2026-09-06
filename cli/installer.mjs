@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -19,7 +20,8 @@ const CODEX_MCP_SECTION = 'mcp_servers.zcode_as_subagent';
 
 function codexMcpConfig(paths) {
   const command = nativeBinary('zcode-as-subagent-mcp');
-  return `[${CODEX_MCP_SECTION}]\ncommand = ${JSON.stringify(command)}\nenabled = true\nrequired = true\nstartup_timeout_sec = 10\ntool_timeout_sec = 10\nenabled_tools = [\n  "zcode_subagent_cancel",\n  "zcode_subagent_close",\n  "zcode_subagent_list",\n  "zcode_subagent_poll",\n  "zcode_subagent_respond",\n  "zcode_subagent_result",\n  "zcode_subagent_send",\n  "zcode_subagent_spawn",\n  "zcode_subagent_status",\n]\ndefault_tools_approval_mode = "prompt"\n\n[${CODEX_MCP_SECTION}.env]\nZCODE_AGENTD_SOCKET = ${JSON.stringify(paths.socket)}\n\n[${CODEX_MCP_SECTION}.tools.zcode_subagent_status]\napproval_mode = "auto"\n\n[${CODEX_MCP_SECTION}.tools.zcode_subagent_list]\napproval_mode = "auto"\n\n[${CODEX_MCP_SECTION}.tools.zcode_subagent_poll]\napproval_mode = "auto"\n\n[${CODEX_MCP_SECTION}.tools.zcode_subagent_result]\napproval_mode = "auto"\n`;
+  const generation = crypto.createHash('sha256').update(`${nativeBinary('zcode-as-subagentd')}:${ZCODE_RUNTIME}`).digest('hex').slice(0, 32);
+  return `[${CODEX_MCP_SECTION}]\ncommand = ${JSON.stringify(command)}\nenabled = true\nrequired = true\nstartup_timeout_sec = 10\ntool_timeout_sec = 10\nenabled_tools = [\n  "zcode_subagent_cancel",\n  "zcode_subagent_close",\n  "zcode_subagent_list",\n  "zcode_subagent_poll",\n  "zcode_subagent_respond",\n  "zcode_subagent_result",\n  "zcode_subagent_send",\n  "zcode_subagent_spawn",\n  "zcode_subagent_status",\n]\ndefault_tools_approval_mode = "prompt"\n\n[${CODEX_MCP_SECTION}.env]\nZCODE_AGENTD_SOCKET = ${JSON.stringify(paths.socket)}\nZCODE_AGENT_SERVICE_GENERATION = ${JSON.stringify(generation)}\n\n[${CODEX_MCP_SECTION}.tools.zcode_subagent_status]\napproval_mode = "auto"\n\n[${CODEX_MCP_SECTION}.tools.zcode_subagent_list]\napproval_mode = "auto"\n\n[${CODEX_MCP_SECTION}.tools.zcode_subagent_poll]\napproval_mode = "auto"\n\n[${CODEX_MCP_SECTION}.tools.zcode_subagent_result]\napproval_mode = "auto"\n`;
 }
 
 function removeTomlSection(text, section) {
@@ -81,7 +83,8 @@ export function installHooks(paths = productPaths(), options = {}) {
 function plist(paths) {
   const daemon = nativeBinary('zcode-as-subagentd');
   const esc = (value) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-  return Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${LAUNCH_AGENT_LABEL}</string>\n<key>ProgramArguments</key><array><string>${esc(daemon)}</string><string>--database</string><string>${esc(paths.database)}</string><string>--socket</string><string>${esc(paths.socket)}</string><string>--runtime</string><string>${esc(ZCODE_RUNTIME)}</string></array>\n<key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n<key>StandardOutPath</key><string>${esc(path.join(paths.logs, 'daemon.log'))}</string>\n<key>StandardErrorPath</key><string>${esc(path.join(paths.logs, 'daemon-error.log'))}</string>\n</dict></plist>\n`);
+  const generation = crypto.createHash('sha256').update(`${daemon}:${ZCODE_RUNTIME}`).digest('hex').slice(0, 32);
+  return Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${LAUNCH_AGENT_LABEL}</string>\n<key>ProgramArguments</key><array><string>${esc(daemon)}</string><string>--database</string><string>${esc(paths.database)}</string><string>--socket</string><string>${esc(paths.socket)}</string><string>--runtime</string><string>${esc(ZCODE_RUNTIME)}</string></array>\n<key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string><key>ZCODE_AGENT_SERVICE_GENERATION</key><string>${generation}</string></dict>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n<key>StandardOutPath</key><string>${esc(path.join(paths.logs, 'daemon.log'))}</string>\n<key>StandardErrorPath</key><string>${esc(path.join(paths.logs, 'daemon-error.log'))}</string>\n</dict></plist>\n`);
 }
 
 function loadState(file) {

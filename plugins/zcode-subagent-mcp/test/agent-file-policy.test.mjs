@@ -65,6 +65,14 @@ test('read-only denies mutations and workspace-write is manifest confined', () =
   assert.equal(evaluateAgentFileInput({ tool_name: 'Move', tool_input: { source: 'src/ok.txt', destination: 'other.txt' }, cwd: root }, writable).code, 'write_not_allowlisted');
 });
 
+test('edit mode asks for external approval only for otherwise allowed writes', () => {
+  const root = fixture();
+  const edit = { ...env(root, ['src']), ZCODE_AGENT_PERMISSION_MODE: 'edit' };
+  assert.equal(evaluateAgentFileInput({ toolName: 'Edit', toolInput: { filePath: 'src/ok.txt' }, workingDirectory: root }, edit).decision, 'ask');
+  assert.equal(evaluateAgentFileInput({ toolName: 'Read', toolInput: { filePath: 'src/ok.txt' }, workingDirectory: root }, edit).decision, 'allow');
+  assert.equal(evaluateAgentFileInput({ toolName: 'Edit', toolInput: { filePath: 'outside.txt' }, workingDirectory: root }, edit).decision, 'deny');
+});
+
 test('rejects protected metadata and secrets for reads and manifests', () => {
   const root = fixture();
   fs.mkdirSync(path.join(root, '.git'), { recursive: true });

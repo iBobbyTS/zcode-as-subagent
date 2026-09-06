@@ -1528,6 +1528,11 @@ fn pending_permission_preview_uses_the_typed_active_policy() {
         ),
     );
     assert_eq!(editable.policy_preview, "externally_decidable");
+    let bash = pending_request_view(
+        Some(&policy),
+        request("bash", "{\"toolName\":\"Bash\",\"input\":{\"command\":\"pwd\"}}"),
+    );
+    assert_eq!(bash.operation, "command");
 
     let network = pending_request_view(
         Some(&policy),

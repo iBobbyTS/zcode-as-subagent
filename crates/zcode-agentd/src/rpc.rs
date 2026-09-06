@@ -245,6 +245,7 @@ pub enum RpcSuccess {
         revision: u64,
         next_revision: u64,
         pending_requests: Vec<PendingRequestView>,
+        command_pending_approval: bool,
         result_available: bool,
         activity: TaskActivityView,
         latest_progress: Option<String>,
@@ -972,6 +973,10 @@ impl RpcService {
                 .into_iter()
                 .map(|request| pending_request_view(policy.as_deref(), request))
                 .collect::<Vec<_>>();
+            let command_pending_approval = pending_requests.iter().any(|request| {
+                request.kind == "permission"
+                    && request.state == PendingRequestStateView::Pending
+            });
             let result_available = self
                 .store
                 .task_result(&task.agent_id)
@@ -1000,6 +1005,7 @@ impl RpcService {
                     revision,
                     next_revision: revision,
                     pending_requests,
+                    command_pending_approval,
                     result_available,
                     latest_progress: self.scheduler.passive_activity_snapshot(&task.agent_id).and_then(|a| a.latest_progress),
                     result: if terminal {
@@ -1340,7 +1346,7 @@ fn operation_category(tool_name: &str) -> &'static str {
     match tool_name.to_ascii_lowercase().as_str() {
         "read" | "grep" | "glob" => "read",
         "write" | "edit" | "delete" | "move" => "write",
-        "execute" | "terminal" => "command",
+        "bash" | "execute" | "terminal" => "command",
         "network" => "network",
         "git_ref_mutation" => "git_ref_mutation",
         _ => "unknown",
