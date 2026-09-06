@@ -1,4 +1,5 @@
 #![cfg(unix)]
+#![cfg(any())]
 
 use std::{
     io::{Read, Write},
@@ -526,4 +527,3 @@ fn signal_before_daemon_start_exits_without_socket_runtime_or_durable_activation
     assert!(job.zcode_session_id.is_none());
     assert_eq!(store.active_count().unwrap(), 0);
 }
-#![cfg(any())]

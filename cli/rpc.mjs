@@ -1,7 +1,6 @@
 import net from 'node:net';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import { CliError } from './errors.mjs';
 
 export const RPC_VERSION = 12;
@@ -24,10 +23,8 @@ function manifest(input) {
   if (!input.repository || !input.prompt) throw new CliError('INVALID_ARGUMENT', 'create requires repository and prompt', 2);
   return {
     schema: 'zcode-general-task/v1', agent_id: 'daemon-prepared', repository: input.repository,
-    permission_mode: input.permission_mode || 'build', prompt: input.prompt, repo_context: [], attachments: [],
+    permission_mode: input.permission_mode || 'build', prompt: input.prompt,
     write_manifest: input.write_manifest || [], scratch_root: os.tmpdir(),
-    artifact_root: os.tmpdir(), retain_partial: false,
-    idempotency_key: requestId(),
   };
 }
 

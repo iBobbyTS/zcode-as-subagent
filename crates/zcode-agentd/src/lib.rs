@@ -3719,11 +3719,7 @@ impl Scheduler {
                 "group_id cannot be empty when supplied".into(),
             ));
         }
-        let attachment_roots = manifest
-            .attachments
-            .iter()
-            .map(|attachment| attachment.allowed_root.clone())
-            .collect();
+        let attachment_roots = Vec::new();
         let mut command_ids = allowed_command_ids.to_vec();
         for command_id in required_command_ids {
             if !command_ids.contains(command_id) {

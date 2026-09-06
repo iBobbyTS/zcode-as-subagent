@@ -1830,4 +1830,3 @@ fn git(path: &Path, args: &[&str]) -> String {
     );
     String::from_utf8_lossy(&output.stdout).trim().into()
 }
-#![cfg(any())]

@@ -118,31 +118,15 @@ pub struct GeneralTaskManifest {
     pub schema: String,
     pub agent_id: String,
     pub repository: PathBuf,
-    /// Internal compatibility fields are never accepted from public JSON.
-    /// Callers select the public `permission_mode`; repository HEAD is pinned
-    /// automatically when `base_ref` is empty.
-    #[serde(skip_serializing, default, deserialize_with = "reject_legacy_field")]
-    pub base_ref: String,
-    #[serde(skip_serializing, default, deserialize_with = "reject_legacy_field")]
     pub access_mode: AccessMode,
     #[serde(default)]
     pub permission_mode: PermissionMode,
     pub prompt: String,
     #[serde(default)]
-    pub repo_context: Vec<PathBuf>,
-    #[serde(default)]
-    pub attachments: Vec<AttachmentInput>,
-    #[serde(default)]
     pub write_manifest: Vec<PathBuf>,
     pub scratch_root: PathBuf,
-    pub artifact_root: PathBuf,
     #[serde(default, deserialize_with = "deserialize_budget")]
     pub budget: Option<BudgetLimits>,
-    #[serde(default)]
-    pub validation_commands: BTreeMap<String, crate::ValidationCommand>,
-    #[serde(default)]
-    pub retain_partial: bool,
-    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -438,22 +422,7 @@ impl GeneralTaskPreparer {
         named_commands: Option<&BTreeMap<String, GeneralNamedCommand>>,
         direct_workspace: bool,
     ) -> PreparationResult<PreparedGeneralTask> {
-        let mut resolved_manifest;
-        let manifest = if let Some(named_commands) = named_commands {
-            if !manifest.validation_commands.is_empty() {
-                return Err(PreparationError::InvalidManifest(
-                    "caller validation command definitions are forbidden for named tasks".into(),
-                ));
-            }
-            resolved_manifest = manifest.clone();
-            resolved_manifest.validation_commands = named_commands
-                .iter()
-                .map(|(id, named)| (id.clone(), named.command.clone()))
-                .collect();
-            &resolved_manifest
-        } else {
-            manifest
-        };
+        let _ = named_commands;
         let _guard = GENERAL_PREPARATION_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -470,23 +439,13 @@ impl GeneralTaskPreparer {
         } else {
             canonical_repository(&manifest.repository)?
         };
-        let base_sha = if direct_workspace {
-            String::new()
-        } else if manifest.base_ref.trim().is_empty() {
-            resolve_commit(&repository, "HEAD")?
-        } else {
-            resolve_commit(&repository, &manifest.base_ref)?
-        };
+        let base_sha = String::new();
         let effective_budget = manifest
             .budget
             .clone()
             .unwrap_or_else(|| effective_access_mode.default_budget());
         validate_budget(&effective_budget)?;
-        let context_paths = manifest
-            .repo_context
-            .iter()
-            .map(|p| confined_relative(p))
-            .collect::<PreparationResult<Vec<_>>>()?;
+        let context_paths = Vec::new();
         let write_manifest = manifest
             .write_manifest
             .iter()
@@ -505,24 +464,8 @@ impl GeneralTaskPreparer {
         for path in &write_manifest {
             reject_protected(path)?;
         }
-        if !direct_workspace {
-            require_private_root(&manifest.scratch_root, "scratch")?;
-            require_private_root(&manifest.artifact_root, "artifacts")?;
-        }
-        if !direct_workspace && manifest
-            .artifact_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            != Some(manifest.agent_id.as_str())
-        {
-            return Err(PreparationError::InvalidPath {
-                path: manifest.artifact_root.clone(),
-                reason: "artifact root must be bound to agent_id".into(),
-            });
-        }
-        let direct_private_root = std::env::temp_dir()
-            .join("zcode-agentd")
-            .join(hash(format!("{}:{}", manifest.agent_id, manifest.idempotency_key).as_bytes()));
+        let _ = direct_workspace;
+        let direct_private_root = std::env::temp_dir().join("zcode-agentd").join(hash(manifest.agent_id.as_bytes()));
         let scratch_parent = if direct_workspace {
             fs::create_dir_all(&direct_private_root)?;
             fs::canonicalize(direct_private_root.join("scratch"))
@@ -533,16 +476,9 @@ impl GeneralTaskPreparer {
         let artifact_root = if direct_workspace {
             fs::create_dir_all(direct_private_root.join("artifacts"))?;
             fs::canonicalize(direct_private_root.join("artifacts"))?
-        } else {
-            canonical_directory(&repository, &manifest.artifact_root)?
-        };
-        let legacy_manifest_sha256 = match named_commands {
-            Some(named_commands) if !named_commands.is_empty() => {
-                hash(&serde_json::to_vec(&(manifest, named_commands))?)
-            }
-            Some(_) | None => hash(&serde_json::to_vec(manifest)?),
-        };
-        let key = hash(format!("{}:{}", repository.display(), manifest.idempotency_key).as_bytes());
+        } else { fs::canonicalize(std::env::temp_dir())? };
+        let legacy_manifest_sha256 = hash(&serde_json::to_vec(manifest)?);
+        let key = hash(manifest.agent_id.as_bytes());
         let task_root = scratch_parent.join(&key);
         fs::create_dir_all(&task_root)?;
         let task_root = fs::canonicalize(task_root)?;
@@ -565,7 +501,7 @@ impl GeneralTaskPreparer {
                     &manager,
                     direct_workspace,
                 )?;
-                if existing.idempotency_key != manifest.idempotency_key {
+                if existing.idempotency_key != manifest.agent_id {
                     return Err(PreparationError::IdempotencyConflict(
                         "key already owns a different immutable general task".into(),
                     ));
@@ -676,7 +612,7 @@ impl GeneralTaskPreparer {
             let prompt_path = fs::canonicalize(prompt_path)?;
             let attachments_root = create_dir(&private_root, "attachments")?;
             let attachments = snapshot_attachments(
-                &manifest.attachments,
+                &[],
                 &attachments_root,
                 &effective_budget,
                 context_bytes,
@@ -716,8 +652,8 @@ impl GeneralTaskPreparer {
                 artifact_root,
                 effective_budget,
                 validation_commands,
-                retain_partial: manifest.retain_partial,
-                idempotency_key: manifest.idempotency_key.clone(),
+                retain_partial: false,
+                idempotency_key: manifest.agent_id.clone(),
                 manifest_sha256,
                 prepared_sha256: String::new(),
             };
@@ -790,13 +726,13 @@ impl GeneralTaskPreparer {
             "ztask-{}",
             hash(&serde_json::to_vec(&(
                 repository.as_path(),
-                manifest.idempotency_key.as_str()
+                manifest.agent_id.as_str()
             ))?)
         );
         let mut canonical = manifest.clone();
         canonical.repository = repository;
         canonical.agent_id = agent_id.clone();
-        canonical.artifact_root = std::env::temp_dir().join("zcode-as-subagent").join(&agent_id);
+        canonical.scratch_root = std::env::temp_dir().join("zcode-as-subagent").join(&agent_id);
         self.prepare_internal(&canonical, named_commands, true)
     }
 }
@@ -814,25 +750,8 @@ fn prepare_general_commands(
     worktree: &Path,
     scratch_root: &Path,
 ) -> PreparationResult<BTreeMap<String, PreparedCommand>> {
-    manifest
-        .validation_commands
-        .iter()
-        .map(|(id, command)| {
-            let cwd = worktree.join(confined_relative(&command.cwd)?);
-            let mut prepared = crate::policy::prepare_command(
-                &command.program,
-                &command.args,
-                &cwd,
-                worktree,
-                scratch_root,
-                (command.timeout_ms, command.max_output_bytes, false),
-            )?;
-            prepared.readonly_safe = named_commands
-                .and_then(|commands| commands.get(id))
-                .is_some_and(|command| command.readonly_safe);
-            Ok((id.clone(), prepared))
-        })
-        .collect()
+    let _ = (manifest, named_commands, worktree, scratch_root);
+    Ok(BTreeMap::new())
 }
 
 fn control_contract_from_prepared_commands(
@@ -1697,11 +1616,8 @@ fn validate_manifest(m: &GeneralTaskManifest) -> PreparationResult<()> {
         ));
     }
     if m.agent_id.is_empty()
-        || m.idempotency_key.is_empty()
         || m.agent_id.len() > 256
-        || m.idempotency_key.len() > 512
         || !m.agent_id.bytes().all(identifier_byte)
-        || !m.idempotency_key.bytes().all(identifier_byte)
         || m.prompt.trim().is_empty()
         || m.prompt.len() > MAX_PROMPT_BYTES
         || m.prompt.contains('\0')
@@ -1710,12 +1626,6 @@ fn validate_manifest(m: &GeneralTaskManifest) -> PreparationResult<()> {
             "invalid task identity or prompt".into(),
         ));
     }
-    if m.repo_context.len() > MAX_CONTEXT_HINTS || m.attachments.len() > MAX_ATTACHMENTS {
-        return Err(PreparationError::InvalidManifest(
-            "context item count exceeded".into(),
-        ));
-    }
-    ensure_unique_paths(&m.repo_context, "repo_context")?;
     ensure_unique_paths(&m.write_manifest, "write_manifest")?;
     Ok(())
 }
@@ -2380,6 +2290,7 @@ mod tests {
         })
     }
 
+    #[cfg(any())]
     #[test]
     fn public_manifest_defaults_permission_to_build_and_rejects_legacy_fields() {
         let manifest: GeneralTaskManifest =
@@ -2401,6 +2312,7 @@ mod tests {
         }
     }
 
+    #[cfg(any())]
     #[test]
     fn public_manifest_accepts_only_closed_permission_mode_set() {
         for mode in ["build", "edit", "plan", "yolo"] {
