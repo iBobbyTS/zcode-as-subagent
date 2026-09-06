@@ -322,7 +322,6 @@ pub struct SystemStatusView {
 pub struct AgentCapabilitiesView {
     pub max_rpc_frame_bytes: usize,
     pub max_wait_ms: u64,
-    pub named_checks: bool,
     pub maturity: BTreeMap<String, CapabilityMaturityView>,
 }
 
@@ -859,7 +858,7 @@ impl RpcService {
             protocol_version: RPC_VERSION,
             service_generation: self.service_generation.clone(),
             components,
-            capabilities: agent_capabilities(self.scheduler.named_checks_enabled()),
+            capabilities: agent_capabilities(),
         }
     }
 
@@ -1026,12 +1025,11 @@ fn opaque_generation() -> Result<String, RpcServiceConfigError> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn agent_capabilities(named_checks: bool) -> AgentCapabilitiesView {
+fn agent_capabilities() -> AgentCapabilitiesView {
     let maturity = BTreeMap::new();
     AgentCapabilitiesView {
         max_rpc_frame_bytes: MAX_FRAME_BYTES,
         max_wait_ms: MAX_WAIT.as_millis() as u64,
-        named_checks,
         maturity,
     }
 }

@@ -1150,7 +1150,6 @@ fn system_status_is_bounded_layered_and_generation_is_restart_scoped() {
     );
     assert_eq!(first.capabilities.max_rpc_frame_bytes, MAX_FRAME_BYTES);
     assert_eq!(first.capabilities.max_wait_ms, MAX_WAIT.as_millis() as u64);
-    assert!(!first.capabilities.named_checks);
     assert!(first.capabilities.maturity.is_empty());
 
     let replacement =
