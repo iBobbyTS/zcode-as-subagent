@@ -16,7 +16,7 @@ function fixture() {
 function env(root, manifest = []) {
   return {
     ZCODE_AGENT_POLICY: '1',
-    ZCODE_AGENT_WORKTREE_ROOT: root,
+    ZCODE_AGENT_WORKSPACE_ROOT: root,
     ZCODE_AGENT_WRITE_MANIFEST: JSON.stringify(manifest),
   };
 }
@@ -34,7 +34,7 @@ test('supports snake_case and camelCase hook payloads while redacting paths', ()
 test('requires marker and canonical root, and rejects traversal/symlink escape', () => {
   const root = fixture();
   assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: 'src/ok.txt' } }, {}).code, 'policy_marker_missing');
-  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: 'src/ok.txt' } }, { ZCODE_AGENT_POLICY: '1' }).code, 'worktree_root_missing');
+  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: 'src/ok.txt' } }, { ZCODE_AGENT_POLICY: '1' }).code, 'workspace_root_missing');
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-agent-outside-'));
   fs.writeFileSync(path.join(outside, 'secret.txt'), 'secret');
   fs.symlinkSync(outside, path.join(root, 'link'));
