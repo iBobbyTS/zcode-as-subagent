@@ -11,27 +11,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Version and descriptor digest of the plugin-supplied conservative Bash policy.
-/// The daemon exposes these alongside agent-hook provenance so policy decisions are auditable.
-pub const AGENT_BASH_POLICY_VERSION: &str = "zcode-agent-bash/v1.0.0";
 pub const AGENT_FILE_POLICY_VERSION: &str = "zcode-agent-file-policy/v1.0.0";
+const AGENT_BASH_POLICY_VERSION: &str = "zcode-agent-bash/v1.0.0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentHookProvenance {
-    pub daemon_policy_version: String,
-    pub daemon_policy_sha256: String,
-    pub expected_hook_version: String,
-    pub expected_hook_sha256: String,
-    pub effective_hook_version: Option<String>,
-    pub effective_hook_sha256: Option<String>,
     #[serde(default)]
     pub effective_file_policy_version: Option<String>,
     #[serde(default)]
     pub effective_file_policy_sha256: Option<String>,
     #[serde(default)]
     pub effective_file_policy_path: Option<String>,
-    #[serde(default)]
-    pub effective_hook_path: Option<String>,
     #[serde(default)]
     pub effective_config_path: Option<String>,
     #[serde(default)]
@@ -57,7 +47,7 @@ pub struct AgentHookProvenance {
 
 impl Default for AgentHookProvenance {
     fn default() -> Self {
-        agent_bash_hook_provenance()
+        agent_hook_provenance()
     }
 }
 
@@ -65,38 +55,13 @@ fn sha256_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-pub fn agent_bash_daemon_policy_sha256() -> String {
-    sha256_bytes(include_bytes!("policy.rs"))
-}
-
-pub fn agent_bash_hook_sha256() -> String {
-    sha256_bytes(include_bytes!(
-        "../../../plugins/zcode-subagent-mcp/lib/bash-policy.mjs"
-    ))
-}
-
-pub fn agent_bash_hook_provenance() -> AgentHookProvenance {
-    agent_bash_hook_provenance_record()
-}
-
 /// Load and verify the installed hook record. The service identity is generated
 /// and persisted by installation; callers do not provide an environment value.
-pub fn agent_bash_hook_provenance_record() -> AgentHookProvenance {
-    let daemon_policy_version = AGENT_BASH_POLICY_VERSION.to_owned();
-    let daemon_policy_sha256 = agent_bash_daemon_policy_sha256();
-    let expected_hook_version = AGENT_BASH_POLICY_VERSION.to_owned();
-    let expected_hook_sha256 = agent_bash_hook_sha256();
+pub fn agent_hook_provenance() -> AgentHookProvenance {
     let unverified = || AgentHookProvenance {
-        daemon_policy_version: daemon_policy_version.clone(),
-        daemon_policy_sha256: daemon_policy_sha256.clone(),
-        expected_hook_version: expected_hook_version.clone(),
-        expected_hook_sha256: expected_hook_sha256.clone(),
-        effective_hook_version: None,
-        effective_hook_sha256: None,
         effective_file_policy_version: None,
         effective_file_policy_sha256: None,
         effective_file_policy_path: None,
-        effective_hook_path: None,
         effective_config_path: None,
         effective_config_sha256: None,
         effective_guard_wrapper_path: None,
@@ -119,22 +84,11 @@ pub fn agent_bash_hook_provenance_record() -> AgentHookProvenance {
     let Ok(record) = serde_json::from_slice::<AgentHookProvenance>(&bytes) else {
         return unverified();
     };
-    let artifact_matches = file_hash_matches(
-        record.effective_hook_path.as_deref(),
-        record.effective_hook_sha256.as_deref(),
-    );
     let file_policy_matches = file_hash_matches(
         record.effective_file_policy_path.as_deref(),
         record.effective_file_policy_sha256.as_deref(),
     );
     let verified = record.hook_activation_verified
-        && record.daemon_policy_version == daemon_policy_version
-        && record.daemon_policy_sha256 == daemon_policy_sha256
-        && record.expected_hook_version == expected_hook_version
-        && record.expected_hook_sha256 == expected_hook_sha256
-        && record.effective_hook_version.as_deref() == Some(expected_hook_version.as_str())
-        && record.effective_hook_sha256.as_deref() == Some(expected_hook_sha256.as_str())
-        && artifact_matches
         && record.effective_file_policy_version.as_deref() == Some(AGENT_FILE_POLICY_VERSION)
         && file_policy_matches
         && effective_config_references_hook(&record)
@@ -210,7 +164,6 @@ fn effective_config_references_hook(record: &AgentHookProvenance) -> bool {
         return false;
     };
     if Path::new(audit_path) != hook_root.join("hooks/audit-bash-result.mjs")
-        || record.effective_hook_path.as_deref() != hook_root.join("lib/bash-policy.mjs").to_str()
         || Path::new(file_policy_path) != hook_root.join("lib/agent-file-policy.mjs")
         || Path::new(file_wrapper_path) != hook_root.join("hooks/check-agent-files.mjs")
     {
@@ -299,41 +252,14 @@ fn config_event_references(
 
 #[cfg(test)]
 mod provenance_tests {
-    use super::agent_bash_hook_provenance_record;
+    use super::agent_hook_provenance;
 
     #[test]
     fn missing_record_cannot_verify() {
-        let provenance = agent_bash_hook_provenance_record();
+        let provenance = agent_hook_provenance();
         assert!(!provenance.hook_activation_verified);
         assert!(provenance.service_generation.is_none());
     }
-}
-
-/// Digest of both decision owners that make up the shipped agent Bash policy.
-///
-/// The Rust source governs daemon permission preview/effective decisions, while
-/// the plugin JavaScript governs the ZCode hook. Embedding both source files
-/// prevents provenance from silently identifying only one half of the policy.
-pub fn agent_bash_policy_sha256() -> String {
-    let mut digest = Sha256::new();
-    for (label, source) in [
-        ("daemon-rust-policy", include_bytes!("policy.rs").as_slice()),
-        (
-            "plugin-js-policy",
-            include_bytes!("../../../plugins/zcode-subagent-mcp/lib/bash-policy.mjs").as_slice(),
-        ),
-        (
-            "plugin-js-file-policy",
-            include_bytes!("../../../plugins/zcode-subagent-mcp/lib/agent-file-policy.mjs")
-                .as_slice(),
-        ),
-    ] {
-        digest.update((label.len() as u64).to_be_bytes());
-        digest.update(label.as_bytes());
-        digest.update((source.len() as u64).to_be_bytes());
-        digest.update(source);
-    }
-    format!("{:x}", digest.finalize())
 }
 
 pub use general::{

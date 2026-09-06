@@ -9,6 +9,7 @@ const auditHook = new URL('../hooks/audit-bash-result.mjs', import.meta.url);
 
 test('shipped plugin discovers the default guard and both audit hooks', () => {
   const packageRoot = path.dirname(new URL('../package.json', import.meta.url).pathname);
+  assert.equal(fs.existsSync(path.join(packageRoot, 'lib', 'bash-policy.mjs')), false);
   const hooks = JSON.parse(fs.readFileSync(path.join(packageRoot, 'hooks', 'hooks.json'), 'utf8'));
   assert.deepEqual(Object.keys(hooks.hooks).sort(), [
     'PostToolUse',
