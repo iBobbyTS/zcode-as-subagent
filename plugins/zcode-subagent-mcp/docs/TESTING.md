@@ -27,7 +27,7 @@ printf '%s\n' '{
   "hook_event_name":"PreToolUse",
   "tool_name":"Bash",
   "tool_input":{"command":"git status --short"}
-}' | node hooks/check-bash-readonly.mjs | jq
+}' | node hooks/check-agent-files.mjs | jq
 ```
 
 Expected result:
@@ -53,7 +53,7 @@ printf '%s\n' '{
   "hook_event_name":"PreToolUse",
   "tool_name":"Bash",
   "tool_input":{"command":"find . -delete"}
-}' | node hooks/check-bash-readonly.mjs | jq
+}' | node hooks/audit-bash-result.mjs | jq
 ```
 
 Expected decision: `deny`.
