@@ -15,8 +15,10 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE tasks (
     agent_id TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL UNIQUE,
     semantic_fingerprint TEXT NOT NULL,
     repository TEXT NOT NULL,
+    group_id TEXT,
     phase TEXT NOT NULL,
     outcome TEXT,
     workspace_path TEXT NOT NULL,
@@ -24,6 +26,8 @@ CREATE TABLE tasks (
     prepared_launch_json TEXT NOT NULL,
     prepared_launch_sha256 TEXT NOT NULL,
     initial_prompt TEXT NOT NULL,
+    effective_budget_json TEXT NOT NULL,
+    retain_partial INTEGER NOT NULL DEFAULT 0,
     zcode_session_id TEXT,
     turn_state TEXT NOT NULL DEFAULT 'IDLE',
     pid INTEGER,
@@ -49,7 +53,7 @@ CREATE TABLE tasks (
 );
 CREATE INDEX tasks_queue_idx ON tasks(phase, created_at, agent_id);
 CREATE INDEX tasks_workspace_phase_idx ON tasks(workspace_path, phase);
-CREATE INDEX tasks_scope_idx ON tasks(repository, phase, created_at);
+CREATE INDEX tasks_scope_idx ON tasks(repository, group_id, phase, created_at);
 
 CREATE TABLE events (
     agent_id TEXT NOT NULL REFERENCES tasks(agent_id) ON DELETE CASCADE,
@@ -98,12 +102,25 @@ CREATE TABLE task_results (
     final_text TEXT NOT NULL,
     partial INTEGER NOT NULL,
     retained INTEGER NOT NULL,
+    base_commit TEXT,
+    head_commit TEXT,
     changed_files_json TEXT NOT NULL,
     diff_stat TEXT,
     checks_json TEXT NOT NULL,
     result_sha256 TEXT NOT NULL,
     residual_gaps_json TEXT NOT NULL,
+    artifacts_json TEXT NOT NULL,
     completed_at INTEGER NOT NULL
+);
+
+CREATE TABLE artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES tasks(agent_id) ON DELETE CASCADE,
+    artifact_type TEXT NOT NULL CHECK (artifact_type = 'changes_patch'),
+    path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
 );
 
 CREATE TABLE lifecycle_ledger (
