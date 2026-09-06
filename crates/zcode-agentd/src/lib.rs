@@ -31,7 +31,7 @@ use zcode_protocol::{
 pub mod rpc;
 use zcode_agent_preparation::{
     general_launch_prompt, CompletionOutcome, GeneralCompletion, GeneralFinalizer,
-    GeneralTaskManifest, GeneralTaskPreparer, PolicyLauncher, PreparedGeneralTask, RuntimeTimeouts,
+    GeneralTaskManifest, GeneralTaskPreparer, PolicyLauncher, PreparedGeneralTask,
     ValidatedPermissionDenial,
 };
 
@@ -2146,21 +2146,6 @@ pub struct SchedulerConfig {
     pub stop_grace: Duration,
     pub bootstrap_timeout: Duration,
     pub control_timeout: Duration,
-    pub transport_idle_timeout: Duration,
-    pub model_call_timeout: Duration,
-}
-
-pub trait MonotonicClock: Send + Sync + 'static {
-    fn now(&self) -> Duration;
-}
-
-struct ProcessMonotonicClock {
-    origin: Instant,
-}
-impl MonotonicClock for ProcessMonotonicClock {
-    fn now(&self) -> Duration {
-        self.origin.elapsed()
-    }
 }
 
 impl Default for SchedulerConfig {
@@ -2171,8 +2156,6 @@ impl Default for SchedulerConfig {
             stop_grace: Duration::from_secs(1),
             bootstrap_timeout: Duration::from_secs(2),
             control_timeout: Duration::from_secs(2),
-            transport_idle_timeout: Duration::from_secs(90),
-            model_call_timeout: Duration::from_secs(300),
         }
     }
 }
@@ -2259,7 +2242,6 @@ struct SchedulerInner {
     store: Arc<Store>,
     factory: Arc<dyn RuntimeFactory>,
     config: SchedulerConfig,
-    monotonic_clock: Arc<dyn MonotonicClock>,
     #[cfg(test)]
     preflight_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     #[cfg(test)]
@@ -2421,10 +2403,6 @@ struct ActiveCheck {
 impl ActiveCheck {
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
     }
 }
 
@@ -2777,34 +2755,6 @@ fn unreaped_general(
     }
 }
 
-fn runtime_timeout_reason(
-    limits: &RuntimeTimeouts,
-    activity: &PassiveActivitySnapshot,
-    input_wait_age_ms: Option<u64>,
-) -> Option<&'static str> {
-    if let Some(age) = input_wait_age_ms {
-        return (age >= limits.input_wait_timeout_ms).then_some("INPUT_WAIT_TIMEOUT");
-    }
-    if let Some(age) = activity.oldest_active_tool_age_ms {
-        return (age >= limits.tool_call_timeout_ms).then_some("TOOL_CALL_TIMEOUT");
-    }
-    if activity.model_request_active {
-        return activity
-            .model_last_delta_age_ms
-            .or(activity.model_request_age_ms)
-            .is_some_and(|age| age >= limits.model_stream_idle_timeout_ms)
-            .then_some("MODEL_STREAM_IDLE_TIMEOUT");
-    }
-    if activity
-        .last_activity_age_ms
-        .is_some_and(|age| age >= limits.runtime_activity_idle_timeout_ms)
-    {
-        Some("RUNTIME_ACTIVITY_IDLE_TIMEOUT")
-    } else {
-        None
-    }
-}
-
 impl LifecycleSink for StoreLifecycleSink {
     fn emit(&self, record: LifecycleRecord) {
         let Some(_admission) = self.runtime_lifecycle.admit_event() else {
@@ -3145,11 +3095,9 @@ impl Scheduler {
         if config.per_workspace_max_agents == 0
             || config.bootstrap_timeout.is_zero()
             || config.control_timeout.is_zero()
-            || config.transport_idle_timeout.is_zero()
-            || config.model_call_timeout.is_zero()
         {
             return Err(SchedulerError::InvalidConfig(
-                "scheduler limits and deadlines must be positive".into(),
+                "scheduler limits and bounded control waits must be positive".into(),
             ));
         }
         Ok(Self {
@@ -3158,9 +3106,6 @@ impl Scheduler {
                 store,
                 factory,
                 config,
-                monotonic_clock: Arc::new(ProcessMonotonicClock {
-                    origin: Instant::now(),
-                }),
                 #[cfg(test)]
                 preflight_hook: None,
                 #[cfg(test)]
@@ -3170,19 +3115,6 @@ impl Scheduler {
                 state: Mutex::new(SchedulerState::default()),
             }),
         })
-    }
-
-    pub fn with_monotonic_clock(
-        mut self,
-        clock: Arc<dyn MonotonicClock>,
-    ) -> Result<Self, SchedulerError> {
-        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
-            SchedulerError::InvalidConfig(
-                "monotonic clock must attach before scheduler cloning".into(),
-            )
-        })?;
-        inner.monotonic_clock = clock;
-        Ok(self)
     }
 
     #[cfg(test)]
@@ -4086,57 +4018,6 @@ impl Scheduler {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn finish_monitor_timeout(
-        &self,
-        agent_id: &str,
-        owner_epoch: u64,
-        runtime: &Arc<dyn ManagedRuntime>,
-        sink: &Arc<StoreLifecycleSink>,
-        session_id: &str,
-        operation: &Arc<Mutex<()>>,
-        runtime_lifecycle: &Arc<RuntimeLifecycle>,
-        route: &TaskRoute,
-        task: Option<&TaskRecord>,
-        check: &Arc<ActiveCheck>,
-        reason_code: &str,
-    ) -> Result<(), SchedulerError> {
-        let stop = self.inner.store.request_runtime_stop(agent_id)?;
-        check.cancel();
-        runtime_lifecycle.request_stop(&runtime.turn_snapshot());
-        let _guard = operation.lock().unwrap();
-        if let Some(error) = Self::request_cooperative_stop(
-            runtime,
-            session_id,
-            runtime_lifecycle,
-            self.inner.config.stop_grace,
-        ) {
-            self.record_failure(agent_id, error);
-        }
-        let terminal = runtime.stop(self.inner.config.stop_grace);
-        let forced = if stop.prior_stop_or_close {
-            (CompletionOutcome::Cancelled, "CANCELLED".into())
-        } else {
-            (CompletionOutcome::TimedOut, reason_code.into())
-        };
-        self.finish_locked_monitor_terminal(
-            agent_id,
-            owner_epoch,
-            runtime,
-            sink,
-            route,
-            task,
-            terminal,
-            false,
-            Some(forced),
-        )?;
-        self.release_active(agent_id, owner_epoch);
-        if let Err(error) = self.start_ready() {
-            self.record_failure(agent_id, error.to_string());
-        }
-        Ok(())
-    }
-
     fn spawn_monitor(&self, context: MonitorContext) {
         let MonitorContext {
             agent_id,
@@ -4154,51 +4035,6 @@ impl Scheduler {
         thread::spawn(move || {
             let mut handled_generation = 0;
             loop {
-                if let Some(task) = task.as_ref() {
-                    let passive = sink.activity.snapshot();
-                    let now_ms = activity_wall_now_millis();
-                    let input_wait_age = scheduler
-                        .inner
-                        .store
-                        .pending_requests(&agent_id)
-                        .ok()
-                        .and_then(|requests| {
-                            requests
-                                .into_iter()
-                                .filter(|request| {
-                                    matches!(
-                                        request.state,
-                                        PendingRequestState::Pending | PendingRequestState::Sending
-                                    )
-                                })
-                                .map(|request| {
-                                    now_ms.saturating_sub(request.created_at.max(0) as u64)
-                                })
-                                .max()
-                        });
-                    let limits = match &route {
-                        TaskRoute::General(prepared) => &prepared.timeouts,
-                    };
-                    let timeout_reason = runtime_timeout_reason(limits, &passive, input_wait_age);
-                    if let Some(reason) = timeout_reason {
-                        if let Err(error) = scheduler.finish_monitor_timeout(
-                            &agent_id,
-                            owner_epoch,
-                            &runtime,
-                            &sink,
-                            &session_id,
-                            &operation,
-                            &runtime_lifecycle,
-                            &route,
-                            Some(task),
-                            &check,
-                            reason,
-                        ) {
-                            scheduler.record_failure(&agent_id, error.to_string());
-                        }
-                        return;
-                    }
-                }
                 if let Some(terminal) = runtime.wait_terminal(Duration::from_millis(50)) {
                     let _guard = operation.lock().unwrap();
                     let natural = matches!(terminal, RuntimeTerminal::Completed(_));
@@ -4649,12 +4485,11 @@ impl Scheduler {
             .ok_or_else(|| Self::control_timeout_error(agent_id))?;
         #[cfg(test)]
         self.run_response_claim_hook(ResponseClaimHookStage::BeforeClaim, agent_id);
-        let existing_disposition = match self.inner.store.claim_pending_response_if_accepting(
-            agent_id,
-            request_id,
-            decision,
-            content,
-        )? {
+        let existing_disposition = match self
+            .inner
+            .store
+            .claim_pending_response_if_accepting(agent_id, request_id, decision, content)?
+        {
             PendingResponseClaimDisposition::Claimed => None,
             PendingResponseClaimDisposition::TaskStopping => {
                 return Err(Self::late_ingress_error(agent_id, "TASK_STOPPING"));

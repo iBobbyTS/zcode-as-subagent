@@ -13,9 +13,6 @@ const PATH_KEYS = new Set([
   'source', 'source_path', 'sourcePath', 'destination', 'destination_path', 'destinationPath',
   'old_path', 'oldPath', 'new_path', 'newPath', 'from', 'to',
 ]);
-// Protect unambiguously secret-bearing names only. Ordinary source names such
-// as session.ts, password.ts, and oauth.ts remain ordinary workspace files.
-const SECRET_NAME = /(^|[._/\\-])(?:\.env(?:\.|$)|credentials?(?:\.|$)|secrets?(?:\.|$)|(?:api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key|client[_-]?secret)(?:[._-][^/\\]*)?$|id_rsa(?:\.|$)|id_ed25519(?:\.|$)|[^/\\]*\.(?:pem|key|p12|pfx))/iu;
 const PROTECTED_PART = /^(?:\.git|\.gitmodules|\.zcode|\.codex|\.agent-work)$/u;
 
 function deny(code) {
@@ -59,7 +56,7 @@ function envRequired(env) {
       if (path.posix.isAbsolute(candidate) || candidate === '..' || candidate.startsWith('../') || candidate.includes('\0')) {
         throw new Error('manifest traversal');
       }
-      if (candidate.split('/').some((part) => PROTECTED_PART.test(part) || SECRET_NAME.test(part))) {
+      if (candidate.split('/').some((part) => PROTECTED_PART.test(part))) {
         throw new Error('manifest protected');
       }
       return candidate === '.' ? '' : candidate;
@@ -82,7 +79,7 @@ function envRequired(env) {
         if (typeof item !== 'string' || !path.isAbsolute(item) || item.length > MAX_PATH_BYTES || item.includes('\0') || hasParentTraversal(item)) {
           throw new Error('bootstrap root path');
         }
-        if (item.split(/[\\/]/u).some((part) => PROTECTED_PART.test(part) || SECRET_NAME.test(part))) {
+        if (item.split(/[\\/]/u).some((part) => PROTECTED_PART.test(part))) {
           throw new Error('bootstrap protected');
         }
         try {
@@ -146,13 +143,13 @@ function resolveCanonicalPath(root, value) {
 
 function protectedPath(root, value) {
   const relative = path.isAbsolute(value) ? path.relative(root, value) : value;
-  const lexicalProtected = relative.split(/[\\/]/u).some((part) => PROTECTED_PART.test(part) || SECRET_NAME.test(part));
+  const lexicalProtected = relative.split(/[\\/]/u).some((part) => PROTECTED_PART.test(part));
   if (lexicalProtected) return true;
   const canonical = resolveCanonicalPath(root, value);
   if (!canonical) return false;
   return path.relative(root, canonical)
     .split(/[\\/]/u)
-    .some((part) => PROTECTED_PART.test(part) || SECRET_NAME.test(part));
+    .some((part) => PROTECTED_PART.test(part));
 }
 
 function pathAllowedForRead(state, value) {

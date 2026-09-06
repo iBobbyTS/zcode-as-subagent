@@ -5,6 +5,7 @@ import { CliError } from './errors.mjs';
 
 export const RPC_VERSION = 12;
 export const MAX_FRAME_BYTES = 512 * 1024;
+export const MAX_RESULT_CHUNK_BYTES = 80 * 1024;
 
 function readJsonInput(args) {
   const inline = args.find((arg) => arg.startsWith('--json='));
@@ -41,9 +42,53 @@ function methodFor(command, input) {
     case 'send': return { method: 'task_message', params: { agent_id: input.agent_id, message_id: input.message_id || requestId(), mode: input.mode || 'queue', content: input.content } };
     case 'respond': return { method: 'task_respond', params: { agent_id: input.agent_id, request_id: input.request_id, decision: input.decision, content: input.reason ?? input.content ?? null } };
     case 'cancel': return { method: 'task_cancel', params: { agent_id: input.agent_id } };
-    case 'result': return { method: 'task_result', params: { agent_id: input.agent_id, offset: input.offset ?? 0, limit: input.limit ?? 128 * 1024 } };
+    case 'result': return { method: 'task_result', params: { agent_id: input.agent_id, offset: input.offset ?? 0, limit: input.limit ?? MAX_RESULT_CHUNK_BYTES } };
     case 'close': return { method: 'task_close', params: { agent_id: input.agent_id } };
     default: throw new CliError('UNKNOWN_COMMAND', `unsupported daemon command: ${command}`, 2);
+  }
+}
+
+function publicTask(task) {
+  return {
+    agent_id: task.agent_id,
+    phase: task.phase,
+    outcome: task.outcome ?? null,
+    reason_code: task.reason_code ?? null,
+    cancel_requested: task.stop_requested,
+    close_requested: task.close_requested,
+    closed: task.closed,
+    resources_reaped: task.reaped,
+  };
+}
+
+function publicResult(result) {
+  if (result == null) return null;
+  return {
+    outcome: result.outcome,
+    final_text: result.final_text,
+    partial: result.partial,
+    offset: result.offset,
+    total_bytes: result.total_bytes,
+    next_offset: result.next_offset ?? null,
+    complete: result.complete,
+  };
+}
+
+export function projectDaemonResult(command, result) {
+  switch (command) {
+    case 'create': case 'spawn':
+      return { agent_id: result.task.agent_id, submission_disposition: result.disposition, phase: result.task.phase };
+    case 'get': case 'poll': {
+      const { latest_progress, result: taskResult, task, activity, kind: _kind, ...rest } = result;
+      const { latest_progress: _activityProgress, ...publicActivity } = activity;
+      return { ...rest, task: publicTask(task), activity: publicActivity, latest_progress, result: publicResult(taskResult) };
+    }
+    case 'list': return { tasks: result.tasks.map(publicTask), next_cursor: result.next_cursor ?? null };
+    case 'send': return { disposition: result.disposition };
+    case 'respond': return { ...result.outcome, policy_reason_code: result.outcome.policy_reason_code ?? null };
+    case 'cancel': case 'close': return { task: publicTask(result.task) };
+    case 'result': return { task: publicTask(result.task), result: publicResult(result.result) };
+    default: throw new CliError('PROTOCOL_ERROR', `daemon returned an unsupported result for ${command}`);
   }
 }
 
@@ -71,7 +116,10 @@ export function callDaemon(socketPath, command, input, timeoutMs = 6000) {
         const response = JSON.parse(line);
         if (response.version !== RPC_VERSION || response.request_id !== request_id) finish(reject, new CliError('PROTOCOL_ERROR', 'daemon returned an RPC response for a different version or request'));
         else if (response.outcome === 'error') { const daemon = response.error || {}; const error = new CliError(daemon.code || 'DAEMON_ERROR', daemon.message || 'daemon request failed'); error.agentId = daemon.active_agent_id; finish(reject, error); }
-        else if (response.outcome === 'success') finish(resolve, response.result);
+        else if (response.outcome === 'success') {
+          try { finish(resolve, projectDaemonResult(command, response.result)); }
+          catch (error) { finish(reject, error instanceof CliError ? error : new CliError('PROTOCOL_ERROR', 'daemon returned an invalid public result')); }
+        }
         else finish(reject, new CliError('PROTOCOL_ERROR', 'daemon returned an invalid RPC response'));
       } catch { finish(reject, new CliError('PROTOCOL_ERROR', 'daemon returned invalid JSON')); }
     });

@@ -26,7 +26,10 @@ pub const MAX_FRAME_BYTES: usize = 512 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_LIST_TASKS: usize = 100;
 pub const MAX_PENDING_REQUESTS: usize = 100;
-pub const MAX_RESULT_CHUNK_BYTES: usize = 128 * 1024;
+/// A result page is capped below the transport frame cap so that even the
+/// worst-case JSON escaping (one input byte becoming a six-byte `\\u00XX`
+/// escape), the response envelope, and the trailing newline fit in one frame.
+pub const MAX_RESULT_CHUNK_BYTES: usize = 80 * 1024;
 pub const MAX_WAIT: Duration = Duration::from_secs(5);
 pub const RPC_TRANSPORT_SUPPORTED: bool = cfg!(unix);
 
@@ -53,12 +56,16 @@ pub struct RpcRequest {
 #[allow(clippy::large_enum_variant)]
 pub enum RpcMethod {
     SystemStatus,
-    SubmitGeneral { input: GeneralSubmitInput },
+    SubmitGeneral {
+        input: GeneralSubmitInput,
+    },
     TaskList(TaskListQuery),
     TaskPoll(TaskPollQuery),
     TaskMessage(MessageInput),
     TaskRespond(RespondInput),
-    TaskCancel { agent_id: String },
+    TaskCancel {
+        agent_id: String,
+    },
     TaskResult {
         agent_id: String,
         #[serde(default)]
@@ -66,7 +73,9 @@ pub enum RpcMethod {
         #[serde(default = "default_result_limit")]
         limit: usize,
     },
-    TaskClose { agent_id: String },
+    TaskClose {
+        agent_id: String,
+    },
 }
 
 impl RpcMethod {
@@ -754,7 +763,11 @@ impl RpcService {
                     task: task_view(task),
                 })
             }
-            RpcMethod::TaskResult { agent_id, offset, limit } => {
+            RpcMethod::TaskResult {
+                agent_id,
+                offset,
+                limit,
+            } => {
                 let task = self.require_task(&agent_id)?;
                 if limit == 0 || limit > MAX_RESULT_CHUNK_BYTES {
                     return Err(RpcError::new(
@@ -834,14 +847,7 @@ impl RpcService {
     ) -> Result<TaskResultView, RpcError> {
         let text = stored.result.final_text;
         let total_bytes = text.len();
-        if offset > total_bytes || !text.is_char_boundary(offset) {
-            return Err(RpcError::new(RpcErrorCode::Validation, "result offset is outside the result"));
-        }
-        let mut end = (offset + limit).min(total_bytes);
-        while end > offset && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        let next_offset = (end < total_bytes).then_some(end);
+        let (end, next_offset) = result_page_bounds(&text, offset, limit)?;
         Ok(TaskResultView {
             outcome: stored.result.outcome,
             final_text: text[offset..end].to_owned(),
@@ -918,6 +924,33 @@ impl RpcService {
             thread::sleep((deadline - now).min(Duration::from_millis(10)));
         }
     }
+}
+
+fn result_page_bounds(
+    text: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<(usize, Option<usize>), RpcError> {
+    let total_bytes = text.len();
+    if offset > total_bytes || !text.is_char_boundary(offset) {
+        return Err(RpcError::new(
+            RpcErrorCode::Validation,
+            "result offset is outside the result",
+        ));
+    }
+    let mut end = offset.saturating_add(limit).min(total_bytes);
+    while end > offset && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == offset && offset < total_bytes {
+        return Err(RpcError::new(
+            RpcErrorCode::Validation,
+            "result limit does not include a complete UTF-8 character",
+        ));
+    }
+    let next_offset = (end < total_bytes).then_some(end);
+    debug_assert!(next_offset.is_none_or(|next| next > offset));
+    Ok((end, next_offset))
 }
 
 fn opaque_generation() -> Result<String, RpcServiceConfigError> {
@@ -1106,6 +1139,80 @@ fn pending_request_view(request: StoredPendingRequest) -> PendingRequestView {
         operation,
         summary,
         policy_preview,
+    }
+}
+
+#[cfg(test)]
+mod result_paging_tests {
+    use super::{
+        result_page_bounds, RpcResponse, RpcSuccess, TaskResultView, TaskView, MAX_FRAME_BYTES,
+        MAX_RESULT_CHUNK_BYTES,
+    };
+    use zcode_agent_store::TaskOutcome;
+
+    fn task() -> TaskView {
+        TaskView {
+            agent_id: "a".repeat(256),
+            phase: "TERMINAL".into(),
+            outcome: Some(TaskOutcome::Completed),
+            reason_code: Some("r".repeat(256)),
+            stop_requested: false,
+            close_requested: false,
+            closed: false,
+            reaped: true,
+        }
+    }
+
+    #[test]
+    fn non_terminal_pages_always_advance() {
+        assert_eq!(result_page_bounds("abcdef", 0, 3).unwrap(), (3, Some(3)));
+        assert_eq!(result_page_bounds("abcdef", 3, 3).unwrap(), (6, None));
+    }
+
+    #[test]
+    fn too_small_utf8_page_is_rejected_instead_of_stalling() {
+        let error = result_page_bounds("你a", 0, 1).unwrap_err();
+        assert_eq!(error.code, super::RpcErrorCode::Validation);
+        assert_eq!(result_page_bounds("你a", 0, 3).unwrap(), (3, Some(3)));
+        assert!(result_page_bounds("你a", 1, 3).is_err());
+    }
+
+    #[test]
+    fn worst_case_encoded_result_response_and_newline_fit_the_frame() {
+        let text = "\u{0}".repeat(MAX_RESULT_CHUNK_BYTES);
+        let response = RpcResponse::success(
+            "q".repeat(128),
+            RpcSuccess::TaskResult {
+                task: task(),
+                result: Some(TaskResultView {
+                    outcome: TaskOutcome::Completed,
+                    final_text: text,
+                    partial: false,
+                    result_sha256: "f".repeat(64),
+                    offset: 0,
+                    total_bytes: MAX_RESULT_CHUNK_BYTES + 1,
+                    next_offset: Some(MAX_RESULT_CHUNK_BYTES),
+                    complete: false,
+                }),
+            },
+        );
+        assert!(serde_json::to_vec(&response).unwrap().len() + 1 <= MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn transport_projection_does_not_change_the_stored_outcome() {
+        let view = TaskResultView {
+            outcome: TaskOutcome::Failed,
+            final_text: "failure".into(),
+            partial: true,
+            result_sha256: "f".repeat(64),
+            offset: 0,
+            total_bytes: 7,
+            next_offset: None,
+            complete: true,
+        };
+        assert_eq!(view.outcome, TaskOutcome::Failed);
+        assert!(view.partial);
     }
 }
 

@@ -160,7 +160,7 @@ impl RpcClient {
         let mut stream = unsafe { UnixStream::from_raw_fd(socket.into_raw_fd()) };
         let mut frame = serde_json::to_vec(request)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        if frame.len() > MAX_FRAME_BYTES {
+        if frame.len() + 1 > MAX_FRAME_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "request frame exceeds cap",
@@ -378,7 +378,7 @@ fn write_busy(mut stream: UnixStream, timeout: Duration) {
 fn write_response(stream: &mut UnixStream, mut response: RpcResponse) -> io::Result<()> {
     let mut frame = serde_json::to_vec(&response)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if frame.len() > MAX_FRAME_BYTES {
+    if frame.len() + 1 > MAX_FRAME_BYTES {
         response = RpcResponse {
             version: RPC_VERSION,
             request_id: response
@@ -390,7 +390,7 @@ fn write_response(stream: &mut UnixStream, mut response: RpcResponse) -> io::Res
         };
         frame = serde_json::to_vec(&response)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if frame.len() > MAX_FRAME_BYTES {
+        if frame.len() + 1 > MAX_FRAME_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "oversized fallback response exceeds cap",

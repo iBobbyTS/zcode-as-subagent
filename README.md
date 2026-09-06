@@ -39,13 +39,13 @@ The nine tools are `zcode_subagent_status`, `zcode_subagent_spawn`,
 `zcode_subagent_poll`, `zcode_subagent_list`, `zcode_subagent_send`,
 `zcode_subagent_respond`, `zcode_subagent_cancel`, `zcode_subagent_result`,
 and `zcode_subagent_close`. Spawn accepts only `build`, `edit`, `plan`, or
-`yolo` permission modes (default `build`). `build`, `edit`, and `yolo` require
-`write_manifest` is optional for `build`, `edit`, and `yolo`; when omitted the
+`yolo` permission modes (default `build`). `write_manifest` is optional for
+`build`, `edit`, and `yolo`; when omitted the
 daemon uses the protected repository workspace scope, while `plan` remains
 read-only. A canonical workspace has one active Agent; a collision is reported
 as `WORKSPACE_BUSY` with the active id. Terminal results expose stable outcome,
-partial status, reason code, and bounded result segments; use `offset`/`limit`
-for large text.
+partial status, task reason code, and bounded result segments; use
+`offset`/`limit` (default and maximum 81920 bytes) for large text.
 
 ## Data, cleanup, and safety
 
