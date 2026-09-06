@@ -20,9 +20,8 @@ use zcode_agentd::rpc::{
     AgentCapabilitiesView, CapabilityMaturityView, ComponentStateView, GeneralSubmitInput,
     MessageInput, RespondInput, ResponseDecision, ResponseOutcomeView, RpcClient, RpcMethod,
     RpcOutcome, RpcRequest, RpcSuccess, SubmissionDispositionView, SystemStatusView,
-    TaskActivityStateView, TaskActivityView,
-    TaskListQuery, TaskPhaseFilter, TaskPollQuery, TaskResultView, TaskView, TelemetryStatusView,
-    RPC_VERSION,
+    TaskActivityStateView, TaskActivityView, TaskListQuery, TaskPhaseFilter, TaskPollQuery,
+    TaskResultView, TaskView, TelemetryStatusView, RPC_VERSION,
 };
 
 use crate::{
@@ -40,7 +39,9 @@ pub enum PublicPermissionMode {
 }
 
 impl Default for PublicPermissionMode {
-    fn default() -> Self { Self::Build }
+    fn default() -> Self {
+        Self::Build
+    }
 }
 
 impl From<PublicPermissionMode> for PermissionMode {
@@ -207,7 +208,6 @@ pub struct AgentSpawnOutput {
     pub agent_id: String,
     pub submission_disposition: SubmissionDisposition,
     pub phase: String,
-    pub capabilities: PublicAgentCapabilities,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -608,16 +608,11 @@ impl SubagentMcp {
         }
     }
 
-    fn result(
-        &self,
-        agent_id: String,
-    ) -> Result<(PublicTask, Option<PublicResult>), String> {
+    fn result(&self, agent_id: String) -> Result<(PublicTask, Option<PublicResult>), String> {
         match self.rpc(RpcMethod::TaskResult { agent_id })? {
-            RpcSuccess::TaskResult {
-                task,
-                result,
-                ..
-            } => Ok((task.into(), result.map(TryInto::try_into).transpose()?)),
+            RpcSuccess::TaskResult { task, result, .. } => {
+                Ok((task.into(), result.map(TryInto::try_into).transpose()?))
+            }
             _ => Err(protocol_error()),
         }
     }
@@ -639,19 +634,22 @@ fn general_manifest(input: &AgentSpawnInput) -> Result<GeneralTaskManifest, Stri
     for value in &input.write_manifest {
         validate_path(value, "write_manifest")?;
         let path = PathBuf::from(value);
-        if path.is_absolute() || path.components().any(|component| {
-            matches!(component, std::path::Component::ParentDir | std::path::Component::Prefix(_)
-                | std::path::Component::RootDir)
-        }) {
+        if path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::Prefix(_)
+                        | std::path::Component::RootDir
+                )
+            })
+        {
             return Err("validation: write_manifest paths must be relative to repository".into());
         }
         write_manifest.push(path);
     }
     if matches!(input.permission_mode, PublicPermissionMode::Plan) && !write_manifest.is_empty() {
         return Err("validation: write_manifest is only valid for write permission modes".into());
-    }
-    if !matches!(input.permission_mode, PublicPermissionMode::Plan) && write_manifest.is_empty() {
-        return Err("validation: write permission modes require a non-empty write_manifest".into());
     }
     Ok(GeneralTaskManifest {
         schema: GENERAL_TASK_SCHEMA.into(),
@@ -726,7 +724,7 @@ impl SubagentMcp {
 
     #[tool(
         name = "zcode_subagent_spawn",
-        description = "Start one durable Agent in an absolute repository workspace. permission_mode defaults to build; build/edit/yolo require a non-empty relative write_manifest, while plan is read-only. Poll the returned agent_id for progress and terminal diagnostics.",
+        description = "Start one durable Agent in an absolute repository workspace. permission_mode defaults to build; an omitted write_manifest uses the protected workspace scope. Poll the returned agent_id for progress and terminal diagnostics.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -740,15 +738,9 @@ impl SubagentMcp {
     ) -> Result<Json<AgentSpawnOutput>, String> {
         let manifest = general_manifest(&input)?;
         let (task, disposition) = match self.rpc(RpcMethod::SubmitGeneral {
-            input: GeneralSubmitInput {
-                manifest,
-            },
+            input: GeneralSubmitInput { manifest },
         })? {
             RpcSuccess::GeneralSubmitted { task, disposition } => (task, disposition),
-            _ => return Err(protocol_error()),
-        };
-        let capabilities = match self.rpc(RpcMethod::SystemStatus)? {
-            RpcSuccess::SystemStatus { status } => status.capabilities.into(),
             _ => return Err(protocol_error()),
         };
         Ok(Json(AgentSpawnOutput {
@@ -758,7 +750,6 @@ impl SubagentMcp {
                 SubmissionDispositionView::Existing => SubmissionDisposition::Existing,
             },
             phase: task.phase,
-            capabilities,
         }))
     }
 
@@ -961,10 +952,7 @@ impl SubagentMcp {
         Parameters(input): Parameters<AgentResultInput>,
     ) -> Result<Json<AgentResultOutput>, String> {
         let (task, result) = self.result(input.agent_id.clone())?;
-        Ok(Json(AgentResultOutput {
-            task,
-            result,
-        }))
+        Ok(Json(AgentResultOutput { task, result }))
     }
 
     #[tool(

@@ -11,9 +11,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use zcode_agent_store::{
-    LifecycleWrite, MessageState,
-    NewTask, PendingRequestState, PendingResponseClaimDisposition, Store,
-    StoreError, StoredMessage, StoredProcessIdentity, TaskClaim, TaskOutcome, TaskPhase,
+    LifecycleWrite, MessageState, NewTask, PendingRequestState, PendingResponseClaimDisposition,
+    Store, StoreError, StoredMessage, StoredProcessIdentity, TaskClaim, TaskOutcome, TaskPhase,
     TaskRecord, TaskResult, TaskSubmissionDisposition, TurnState,
 };
 use zcode_driver::{
@@ -29,15 +28,14 @@ use zcode_protocol::{
     SESSION_SUBSCRIBE,
 };
 
-mod timeouts;
 pub mod rpc;
+mod timeouts;
 
 use timeouts::RuntimeDeadline;
 use zcode_agent_preparation::{
-    general_launch_prompt, CompletionOutcome, GeneralCompletion,
-    GeneralFinalizer, GeneralTaskManifest, GeneralTaskPreparer, PolicyLauncher,
-    PreparedGeneralTask, ValidatedPermissionDenial, ValidationOutput,
-    RuntimeTimeouts,
+    general_launch_prompt, CompletionOutcome, GeneralCompletion, GeneralFinalizer,
+    GeneralTaskManifest, GeneralTaskPreparer, PolicyLauncher, PreparedGeneralTask, RuntimeTimeouts,
+    ValidatedPermissionDenial, ValidationOutput,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,7 +309,10 @@ impl PassiveActivityTracker {
             if let Some(delta) = parsed.text_delta.as_deref() {
                 append_latest_text(&mut state, delta, wall_now_ms);
                 if let Some(message_id) = parsed.assistant_message_id.as_deref() {
-                    let buffer = state.assistant_buffers.entry(message_id.to_owned()).or_default();
+                    let buffer = state
+                        .assistant_buffers
+                        .entry(message_id.to_owned())
+                        .or_default();
                     buffer.push_str(delta);
                     if buffer.len() > MAX_LATEST_TEXT_BYTES {
                         let mut keep_from = buffer.len().saturating_sub(MAX_LATEST_TEXT_BYTES);
@@ -571,11 +572,20 @@ fn parse_activity_message(
                 parsed.text_delta = delta.map(str::to_owned);
                 parsed.assistant_message_id = activity_id(payload.get("assistantMessageId"));
             }
-            (Some("model.streaming"), kind, _) if matches!(kind, Some("message_finished") | Some("message_done") | Some("text_done")) => {
+            (Some("model.streaming"), kind, _)
+                if matches!(
+                    kind,
+                    Some("message_finished") | Some("message_done") | Some("text_done")
+                ) =>
+            {
                 parsed.assistant_message_id = activity_id(payload.get("assistantMessageId"));
                 parsed.message_finished = true;
             }
-            (Some("message.completed" | "message.finished" | "message.done" | "text.done"), _, _) => {
+            (
+                Some("message.completed" | "message.finished" | "message.done" | "text.done"),
+                _,
+                _,
+            ) => {
                 parsed.assistant_message_id = activity_id(payload.get("assistantMessageId"));
                 parsed.message_finished = true;
             }
@@ -775,7 +785,6 @@ fn activity_id(value: Option<&serde_json::Value>) -> Option<String> {
         })
         .map(str::to_owned)
 }
-
 
 fn classify_passive_tool(value: Option<&serde_json::Value>) -> PassiveToolKind {
     match value.and_then(serde_json::Value::as_str) {
@@ -1610,7 +1619,10 @@ fn requested_model_from_prepared_launch(prepared_launch_json: Option<&str>) -> O
 
 fn permission_mode_from_task(task: &TaskRecord) -> Option<&'static str> {
     let value = serde_json::from_str::<serde_json::Value>(&task.prepared_launch_json).ok()?;
-    match value.get("permission_mode").and_then(serde_json::Value::as_str) {
+    match value
+        .get("permission_mode")
+        .and_then(serde_json::Value::as_str)
+    {
         Some("plan") => Some("plan"),
         Some("build") => Some("build"),
         // ZCode's ACP session mode uses `build` for interactive tool approval;
@@ -1769,8 +1781,8 @@ enum TaskRoute {
 
 fn task_route(task: &TaskRecord) -> Result<TaskRoute, String> {
     let json = task.prepared_launch_json.as_str();
-    let value: serde_json::Value = serde_json::from_str(json)
-        .map_err(|_| "stored prepared launch is invalid")?;
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|_| "stored prepared launch is invalid")?;
     match value.get("schema").and_then(serde_json::Value::as_str) {
         Some(zcode_agent_preparation::GENERAL_TASK_SCHEMA) => {
             let prepared: PreparedGeneralTask = serde_json::from_value(value)
@@ -1805,11 +1817,17 @@ fn route_policy(
         TaskRoute::General(prepared) => {
             if resumed {
                 let mut launcher = prepared.resume_launcher()?;
-                launcher.set_interactive_bash(matches!(prepared.permission_mode, zcode_agent_preparation::PermissionMode::Edit));
+                launcher.set_interactive_bash(matches!(
+                    prepared.permission_mode,
+                    zcode_agent_preparation::PermissionMode::Edit
+                ));
                 Ok(Some(launcher))
             } else {
                 let mut launcher = prepared.launcher()?;
-                launcher.set_interactive_bash(matches!(prepared.permission_mode, zcode_agent_preparation::PermissionMode::Edit));
+                launcher.set_interactive_bash(matches!(
+                    prepared.permission_mode,
+                    zcode_agent_preparation::PermissionMode::Edit
+                ));
                 Ok(Some(launcher))
             }
         }
@@ -2132,9 +2150,13 @@ pub trait MonotonicClock: Send + Sync + 'static {
     fn now(&self) -> Duration;
 }
 
-struct ProcessMonotonicClock { origin: Instant }
+struct ProcessMonotonicClock {
+    origin: Instant,
+}
 impl MonotonicClock for ProcessMonotonicClock {
-    fn now(&self) -> Duration { self.origin.elapsed() }
+    fn now(&self) -> Duration {
+        self.origin.elapsed()
+    }
 }
 
 impl Default for SchedulerConfig {
@@ -2152,17 +2174,40 @@ impl Default for SchedulerConfig {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ControlDeadline { expires_at: Instant }
+struct ControlDeadline {
+    expires_at: Instant,
+}
 impl ControlDeadline {
-    fn new(budget: Duration) -> Self { Self { expires_at: Instant::now() + budget } }
-    fn remaining(self) -> Option<Duration> { self.expires_at.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) }
-    fn runtime_phase(self, stop_grace: Duration) -> Option<Duration> { self.runtime_phase_deadline(stop_grace)?.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) }
+    fn new(budget: Duration) -> Self {
+        Self {
+            expires_at: Instant::now() + budget,
+        }
+    }
+    fn remaining(self) -> Option<Duration> {
+        self.expires_at
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+    }
+    fn runtime_phase(self, stop_grace: Duration) -> Option<Duration> {
+        self.runtime_phase_deadline(stop_grace)?
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+    }
     fn runtime_phase_deadline(self, stop_grace: Duration) -> Option<Instant> {
         let remaining = self.remaining()?;
-        let cleanup = stop_grace.checked_mul(3).unwrap_or(remaining).min(remaining / 2);
-        self.expires_at.checked_sub(cleanup).filter(|deadline| *deadline > Instant::now())
+        let cleanup = stop_grace
+            .checked_mul(3)
+            .unwrap_or(remaining)
+            .min(remaining / 2);
+        self.expires_at
+            .checked_sub(cleanup)
+            .filter(|deadline| *deadline > Instant::now())
     }
-    fn cleanup_grace(self, configured: Duration) -> Duration { self.remaining().map(|remaining| configured.min(remaining / 3)).unwrap_or(Duration::ZERO) }
+    fn cleanup_grace(self, configured: Duration) -> Duration {
+        self.remaining()
+            .map(|remaining| configured.min(remaining / 3))
+            .unwrap_or(Duration::ZERO)
+    }
 }
 
 #[derive(Debug)]
@@ -2611,11 +2656,6 @@ fn persist_general_result(
     completion: &GeneralCompletion,
 ) -> Result<(), StoreError> {
     let result = task_result(completion);
-    if !general_result_response_fits(store, agent_id, completion, &result)? {
-        return Err(StoreError::InvalidState(
-            "task result exceeds private RPC response frame".into(),
-        ));
-    }
     let _ = prepared;
     store_result_with_cancel_precedence(store, agent_id, &result)
 }
@@ -2642,27 +2682,6 @@ fn store_result_with_cancel_precedence(
         }
         Err(error) => Err(error),
     }
-}
-
-fn general_result_response_fits(
-    store: &Store,
-    agent_id: &str,
-    completion: &GeneralCompletion,
-    result: &TaskResult,
-) -> Result<bool, StoreError> {
-    let mut task = store
-        .get_task(agent_id)?
-        .ok_or_else(|| StoreError::InvalidState("terminal result task disappeared".into()))?;
-    // Terminal sizing must reserve the longest legal projection.  Reaping is
-    // a separate cleanup transaction and must never make this preflight optimistic.
-    task.reaped_at = None;
-    Ok(rpc::terminal_result_response_fits(&task, result))
-}
-
-fn invalidate_untransportable_completion(completion: &mut GeneralCompletion) {
-    completion.outcome = CompletionOutcome::ResultInvalid;
-    completion.reason_code = Some("RESULT_RESPONSE_FRAME_EXCEEDED".into());
-    completion.summary = "terminal result exceeds private RPC response frame".into();
 }
 
 fn task_result(completion: &GeneralCompletion) -> TaskResult {
@@ -4055,19 +4074,6 @@ impl Scheduler {
                     completion.reason_code = Some(reason);
                 }
                 let reap_after_persist = completion.cleaned && process_group_reaped;
-                let result = task_result(&completion);
-                if !general_result_response_fits(&self.inner.store, agent_id, &completion, &result)?
-                {
-                    invalidate_untransportable_completion(&mut completion);
-                    let result = task_result(&completion);
-                    if !general_result_response_fits(
-                        &self.inner.store,
-                        agent_id,
-                        &completion,
-                        &result,
-                    )? {
-                    }
-                }
                 #[cfg(test)]
                 self.run_result_persist_hook(agent_id);
                 match sink.finish_general(&terminal, prepared, &completion) {
@@ -4271,10 +4277,7 @@ impl Scheduler {
                         budget.as_deref(),
                         terminal,
                         false,
-                        Some((
-                            CompletionOutcome::TimedOut,
-                            violation.reason_code().into(),
-                        )),
+                        Some((CompletionOutcome::TimedOut, violation.reason_code().into())),
                     ) {
                         scheduler.record_failure(&agent_id, error.to_string());
                     }
