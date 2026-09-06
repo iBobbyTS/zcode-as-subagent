@@ -79,4 +79,4 @@ python3 tests/live-agent/non-git-based/respond_case.py --transport mcp --reposit
 
 ## 失败处理
 
-记录第一层完整错误。`validation: request validation failed` 只表示 facade 校验失败；若带有 scheduler/preparation 详情，按详情定位仓库、快照、权限、budget 或持久化问题。没有 `agent_id` 时禁止调用 poll/result。修复后必须重建 native binary、验证 hash、重启 daemon，并从失败工具重新开始整条生命周期。
+记录第一层完整错误。`validation: request validation failed` 只表示 facade 校验失败；若带有 scheduler/preparation 详情，按详情定位仓库、快照、权限或持久化问题。没有 `agent_id` 时禁止调用 poll/result。修复后必须重建 native binary、验证 hash、重启 daemon，并从失败工具重新开始整条生命周期。

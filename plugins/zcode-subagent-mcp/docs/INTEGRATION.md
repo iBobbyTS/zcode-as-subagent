@@ -3,9 +3,8 @@
 The plugin root is the only installation surface. `hooks/hooks.json` registers
 the Bash guard, file guard, and metadata-only Bash audit wrapper. The hook
 scripts consume the verified record at `ZCODE_AGENT_HOOK_PROVENANCE`. The
-daemon does not require hook provenance and starts without either hook
-environment variable. Callers may provide `ZCODE_AGENT_SERVICE_GENERATION` to
-keep daemon status generation stable.
+daemon does not require hook provenance or caller-supplied generation; service
+identity is generated automatically.
 
 ## Runtime environment
 
@@ -13,7 +12,6 @@ The daemon injects these values into each ZCode child:
 
 ```text
 ZCODE_AGENT_POLICY=1
-ZCODE_AGENT_WORKTREE_ROOT=/absolute/prepared/worktree
 ZCODE_AGENT_WRITE_MANIFEST=["src"]
 ZCODE_AGENT_BOOTSTRAP_ROOTS=/Applications/ZCode.app
 ```

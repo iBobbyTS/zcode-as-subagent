@@ -24,7 +24,7 @@ not claim a real installation or model run.
 
 Live-agent goal status is judged by the executing agent or human evaluator from
 the stated task goal and collected evidence. Harness checks report facts such
-as ref preservation, resource cleanup, and artifact hash integrity; they must
+as workspace preservation and resource cleanup; they must
 not turn one missing expected file or an inapplicable replay check into an
 automatic failure when the goal was otherwise achieved.
 
@@ -46,4 +46,3 @@ model during local tests.
 | No provider/credential management | public command/schema catalog |
 | No remote daemon/multi-tenant/second supervisor | command surface and process fixture |
 | No Windows daemon/GUI/Rosetta | Windows isolated HOME unsupported matrix |
-| No Git/worktree/base_ref/access_mode | public schema and live runner grep |

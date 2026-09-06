@@ -19,12 +19,6 @@ repository or group scope, which the Store applies before the bound. Stable
 public IDs are not authentication tokens; this is a local,
 single-user transport without remote or multi-tenant authorization.
 
-Artifact metadata contains only ID, approved kind, SHA-256, and size. Chunk
-retrieval verifies the stored row, expected task result, regular non-symlink
-file type, complete SHA-256, size, offset, and per-call cap before returning
-base64 bytes. Any replacement, truncation, symlink, or malformed metadata fails
-closed as `result_invalid` or not found.
-
 The repo-local plugin and sample config expose only the fixed generic catalog
 and forward the already configured socket. They do not copy credentials,
 download runtimes, edit provider/account configuration, or start a second
