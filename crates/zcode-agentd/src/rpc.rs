@@ -26,6 +26,7 @@ pub const MAX_FRAME_BYTES: usize = 512 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_LIST_TASKS: usize = 100;
 pub const MAX_PENDING_REQUESTS: usize = 100;
+pub const MAX_RESULT_CHUNK_BYTES: usize = 128 * 1024;
 pub const MAX_WAIT: Duration = Duration::from_secs(5);
 pub const RPC_TRANSPORT_SUPPORTED: bool = cfg!(unix);
 
@@ -58,7 +59,13 @@ pub enum RpcMethod {
     TaskMessage(MessageInput),
     TaskRespond(RespondInput),
     TaskCancel { agent_id: String },
-    TaskResult { agent_id: String },
+    TaskResult {
+        agent_id: String,
+        #[serde(default)]
+        offset: usize,
+        #[serde(default = "default_result_limit")]
+        limit: usize,
+    },
     TaskClose { agent_id: String },
 }
 
@@ -382,6 +389,14 @@ pub struct TaskResultView {
     pub final_text: String,
     pub partial: bool,
     pub result_sha256: String,
+    pub offset: usize,
+    pub total_bytes: usize,
+    pub next_offset: Option<usize>,
+    pub complete: bool,
+}
+
+fn default_result_limit() -> usize {
+    MAX_RESULT_CHUNK_BYTES
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -739,13 +754,19 @@ impl RpcService {
                     task: task_view(task),
                 })
             }
-            RpcMethod::TaskResult { agent_id } => {
+            RpcMethod::TaskResult { agent_id, offset, limit } => {
                 let task = self.require_task(&agent_id)?;
+                if limit == 0 || limit > MAX_RESULT_CHUNK_BYTES {
+                    return Err(RpcError::new(
+                        RpcErrorCode::Validation,
+                        "result limit is outside the allowed range",
+                    ));
+                }
                 let result = self
                     .store
                     .task_result(&task.agent_id)
                     .map_err(map_store)?
-                    .map(|stored| self.task_result_view(stored))
+                    .map(|stored| self.task_result_view(stored, offset, limit))
                     .transpose()?;
                 Ok(RpcSuccess::TaskResult {
                     task: task_view(task),
@@ -805,8 +826,32 @@ impl RpcService {
         Ok(task)
     }
 
-    fn task_result_view(&self, stored: StoredTaskResult) -> Result<TaskResultView, RpcError> {
-        Ok(TaskResultView::from(stored))
+    fn task_result_view(
+        &self,
+        stored: StoredTaskResult,
+        offset: usize,
+        limit: usize,
+    ) -> Result<TaskResultView, RpcError> {
+        let text = stored.result.final_text;
+        let total_bytes = text.len();
+        if offset > total_bytes || !text.is_char_boundary(offset) {
+            return Err(RpcError::new(RpcErrorCode::Validation, "result offset is outside the result"));
+        }
+        let mut end = (offset + limit).min(total_bytes);
+        while end > offset && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let next_offset = (end < total_bytes).then_some(end);
+        Ok(TaskResultView {
+            outcome: stored.result.outcome,
+            final_text: text[offset..end].to_owned(),
+            partial: stored.result.partial,
+            result_sha256: stored.result_sha256,
+            offset,
+            total_bytes,
+            next_offset,
+            complete: next_offset.is_none(),
+        })
     }
 
     fn task_poll(&self, query: TaskPollQuery) -> Result<RpcSuccess, RpcError> {
@@ -819,13 +864,12 @@ impl RpcService {
         let deadline = Instant::now() + Duration::from_millis(query.timeout_ms);
         loop {
             let task = self.require_task(&query.agent_id)?;
-            let policy = self.scheduler.active_policy(&task.agent_id);
             let pending_requests = self
                 .store
                 .pending_requests_bounded(&task.agent_id, MAX_PENDING_REQUESTS)
                 .map_err(map_store)?
                 .into_iter()
-                .map(|request| pending_request_view(policy.as_deref(), request))
+                .map(pending_request_view)
                 .collect::<Vec<_>>();
             let command_pending_approval = pending_requests.iter().any(|request| {
                 request.kind == "permission" && request.state == PendingRequestStateView::Pending
@@ -864,14 +908,9 @@ impl RpcService {
                         .scheduler
                         .passive_activity_snapshot(&task.agent_id)
                         .and_then(|a| a.latest_progress),
-                    result: if terminal {
-                        self.store
-                            .task_result(&task.agent_id)
-                            .map_err(map_store)?
-                            .map(TaskResultView::from)
-                    } else {
-                        None
-                    },
+                    // Result text is read through the bounded result endpoint;
+                    // poll must remain queryable for arbitrarily large results.
+                    result: None,
                     instruction: (!terminal).then(|| "Use poll for progress".to_owned()),
                     timed_out,
                 });
@@ -1010,19 +1049,21 @@ fn activity_window_view(value: PassiveActivityWindow) -> ActivityWindowView {
 
 impl From<StoredTaskResult> for TaskResultView {
     fn from(stored: StoredTaskResult) -> Self {
+        let total_bytes = stored.result.final_text.len();
         Self {
             outcome: stored.result.outcome,
             final_text: stored.result.final_text,
             partial: stored.result.partial,
             result_sha256: stored.result_sha256,
+            offset: 0,
+            total_bytes,
+            next_offset: None,
+            complete: true,
         }
     }
 }
 
-fn pending_request_view(
-    policy: Option<&zcode_agent_preparation::PolicyLauncher>,
-    request: StoredPendingRequest,
-) -> PendingRequestView {
+fn pending_request_view(request: StoredPendingRequest) -> PendingRequestView {
     let state = match request.state {
         PendingRequestState::Pending => PendingRequestStateView::Pending,
         PendingRequestState::Sending => PendingRequestStateView::Sending,
@@ -1055,19 +1096,7 @@ fn pending_request_view(
         .as_ref()
         .map(sanitized_permission_summary)
         .unwrap_or_else(|| "unrecognized permission request".into());
-    let policy_preview = params
-        .as_ref()
-        .and_then(|params| {
-            let decision = policy?
-                .decide_zcode_permission(params, zcode_agent_preparation::ExternalDecision::Allow);
-            Some(if decision.allowed {
-                "externally_decidable"
-            } else {
-                "hard_deny"
-            })
-        })
-        .unwrap_or("unknown")
-        .to_owned();
+    let policy_preview = "official_permission_request".to_owned();
     PendingRequestView {
         request_id: request.request_id,
         kind: "permission".into(),

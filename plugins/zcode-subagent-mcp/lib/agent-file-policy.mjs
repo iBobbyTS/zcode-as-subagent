@@ -13,7 +13,9 @@ const PATH_KEYS = new Set([
   'source', 'source_path', 'sourcePath', 'destination', 'destination_path', 'destinationPath',
   'old_path', 'oldPath', 'new_path', 'newPath', 'from', 'to',
 ]);
-const SECRET_NAME = /(^|[._/\\-])(\.env(?:\.|$)|credentials?(?:\.|$)|secrets?(?:\.|$)|.*(?:api[_-]?key|access[_-]?key|auth[_-]?token|password|passwd|private[_-]?key|client[_-]?secret|oauth|cookie|session)[^/\\]*$)|(^|[._-])(id_rsa|id_ed25519)(?:\.|$)|\.(?:pem|key|p12|pfx)$/iu;
+// Protect unambiguously secret-bearing names only. Ordinary source names such
+// as session.ts, password.ts, and oauth.ts remain ordinary workspace files.
+const SECRET_NAME = /(^|[._/\\-])(?:\.env(?:\.|$)|credentials?(?:\.|$)|secrets?(?:\.|$)|(?:api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key|client[_-]?secret)(?:[._-][^/\\]*)?$|id_rsa(?:\.|$)|id_ed25519(?:\.|$)|[^/\\]*\.(?:pem|key|p12|pfx))/iu;
 const PROTECTED_PART = /^(?:\.git|\.gitmodules|\.zcode|\.codex|\.agent-work)$/u;
 
 function deny(code) {
@@ -29,7 +31,7 @@ function ask() {
 }
 
 function envRequired(env) {
-  if (env?.ZCODE_AGENT_POLICY !== '1') return deny('policy_marker_missing');
+  if (env?.ZCODE_AGENT_POLICY !== '1') return { decision: 'skip', code: 'policy_not_managed', reason: `${AGENT_FILE_POLICY_VERSION}: unmanaged session` };
   const rawRoot = env?.ZCODE_AGENT_WORKSPACE_ROOT;
   if (typeof rawRoot !== 'string' || rawRoot.length === 0 || !path.isAbsolute(rawRoot)) {
     return deny('workspace_root_missing');

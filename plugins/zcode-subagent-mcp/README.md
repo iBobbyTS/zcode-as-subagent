@@ -15,12 +15,9 @@ invoke a second supervisor, provide old aliases, or migrate legacy data.
 .codex-plugin/plugin.json
 .mcp.json
 hooks/hooks.json
-hooks/check-bash-readonly.mjs
 hooks/check-agent-files.mjs
 hooks/audit-bash-result.mjs
-lib/bash-policy.mjs
 lib/agent-file-policy.mjs
-policy-corpus.json
 scripts/install-agent-hooks.mjs
 scripts/check-agent-hooks.mjs
 scripts/preflight-agent-hooks.mjs

@@ -274,6 +274,10 @@ pub struct PublicResult {
     pub outcome: PublicOutcome,
     pub final_text: String,
     pub partial: bool,
+    pub offset: usize,
+    pub total_bytes: usize,
+    pub next_offset: Option<usize>,
+    pub complete: bool,
 }
 
 impl TryFrom<TaskResultView> for PublicResult {
@@ -284,6 +288,10 @@ impl TryFrom<TaskResultView> for PublicResult {
             outcome: value.outcome.into(),
             final_text: value.final_text,
             partial: value.partial,
+            offset: value.offset,
+            total_bytes: value.total_bytes,
+            next_offset: value.next_offset,
+            complete: value.complete,
         })
     }
 }
@@ -562,6 +570,14 @@ pub struct AgentStateOutput {
 #[serde(deny_unknown_fields)]
 pub struct AgentResultInput {
     pub agent_id: String,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_result_limit")]
+    pub limit: usize,
+}
+
+fn default_result_limit() -> usize {
+    128 * 1024
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -598,6 +614,11 @@ impl SubagentMcp {
             ),
             method,
         };
+        let encoded = serde_json::to_vec(&request)
+            .map_err(|error| format!("validation: request encoding failed: {error}"))?;
+        if encoded.len() + 1 > 512 * 1024 {
+            return Err("validation: encoded RPC request exceeds frame cap".into());
+        }
         let response = RpcClient::new(&self.socket, self.timeout)
             .call(&request)
             .map_err(public_transport_error)?;
@@ -610,8 +631,8 @@ impl SubagentMcp {
         }
     }
 
-    fn result(&self, agent_id: String) -> Result<(PublicTask, Option<PublicResult>), String> {
-        match self.rpc(RpcMethod::TaskResult { agent_id })? {
+    fn result(&self, agent_id: String, offset: usize, limit: usize) -> Result<(PublicTask, Option<PublicResult>), String> {
+        match self.rpc(RpcMethod::TaskResult { agent_id, offset, limit })? {
             RpcSuccess::TaskResult { task, result, .. } => {
                 Ok((task.into(), result.map(TryInto::try_into).transpose()?))
             }
@@ -710,7 +731,7 @@ impl SubagentMcp {
         annotations(
             read_only_hint = true,
             destructive_hint = false,
-            idempotent_hint = true,
+            idempotent_hint = false,
             open_world_hint = false
         )
     )]
@@ -941,7 +962,7 @@ impl SubagentMcp {
 
     #[tool(
         name = "zcode_subagent_result",
-        description = "Read a terminal task result, including outcome, partial status, final text, and daemon residual_gaps diagnostics. Returns null result while the task is non-terminal.",
+        description = "Read a terminal task result with stable outcome, partial status, reason code, and bounded final-text segments. Returns null result while the task is non-terminal.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -953,7 +974,7 @@ impl SubagentMcp {
         &self,
         Parameters(input): Parameters<AgentResultInput>,
     ) -> Result<Json<AgentResultOutput>, String> {
-        let (task, result) = self.result(input.agent_id.clone())?;
+        let (task, result) = self.result(input.agent_id.clone(), input.offset, input.limit)?;
         Ok(Json(AgentResultOutput { task, result }))
     }
 

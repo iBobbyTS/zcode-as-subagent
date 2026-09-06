@@ -40,6 +40,6 @@ Pending requests and terminal transitions wake long polls immediately. Unknown t
 
 A matching `turn.completed` converges the task to `TERMINAL` after runtime cleanup. The terminal response text is the authoritative final text.
 
-Timeout classes are `RUNTIME_ACTIVITY_IDLE_TIMEOUT`, `MODEL_STREAM_IDLE_TIMEOUT`, `TOOL_CALL_TIMEOUT`, `INPUT_WAIT_TIMEOUT`, and `WALL_TIME_DEADLINE_EXCEEDED`. Timeout and cancellation fence late events before terminal persistence.
+Timeout classes are `RUNTIME_ACTIVITY_IDLE_TIMEOUT`, `MODEL_STREAM_IDLE_TIMEOUT`, `TOOL_CALL_TIMEOUT`, and `INPUT_WAIT_TIMEOUT`. The adapter has no self-selected total task wall-clock deadline; timeout and cancellation fence late events before terminal persistence.
 
 `COMPLETED` means the runtime turn ended and daemon finalization succeeded. It does not mean a review is clean, a patch is correct, or the change is mergeable.
