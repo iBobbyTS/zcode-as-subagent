@@ -320,7 +320,6 @@ pub struct SystemStatusView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCapabilitiesView {
-    pub hard_budget_caps: BudgetLimits,
     pub max_rpc_frame_bytes: usize,
     pub max_wait_ms: u64,
     pub named_checks: bool,
@@ -332,7 +331,6 @@ pub struct TaskView {
     pub agent_id: String,
     pub phase: String,
     pub outcome: Option<TaskOutcome>,
-    pub effective_budget: EffectiveBudget,
     pub stop_requested: bool,
     pub close_requested: bool,
     pub closed: bool,
@@ -1031,18 +1029,6 @@ fn opaque_generation() -> Result<String, RpcServiceConfigError> {
 fn agent_capabilities(named_checks: bool) -> AgentCapabilitiesView {
     let maturity = BTreeMap::new();
     AgentCapabilitiesView {
-        hard_budget_caps: BudgetLimits {
-            absolute_wall_time_ms: 86_400_000,
-            runtime_activity_idle_timeout_ms: 86_400_000,
-            model_stream_idle_timeout_ms: 86_400_000,
-            tool_call_timeout_ms: 86_400_000,
-            input_wait_timeout_ms: 86_400_000,
-            max_turns: 1_024,
-            max_tool_calls: 4_096,
-            max_context_bytes: 16_777_216,
-            max_result_bytes: 16_777_216,
-            max_artifact_bytes: 268_435_456,
-        },
         max_rpc_frame_bytes: MAX_FRAME_BYTES,
         max_wait_ms: MAX_WAIT.as_millis() as u64,
         named_checks,
@@ -1142,7 +1128,6 @@ fn task_view(task: TaskRecord) -> TaskView {
         }
         .into(),
         outcome: task.outcome,
-        effective_budget: task.effective_budget,
         stop_requested: task.stop_requested,
         close_requested: task.close_requested,
         closed: task.closed_at.is_some(),

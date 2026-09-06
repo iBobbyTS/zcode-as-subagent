@@ -106,11 +106,6 @@ pub struct PublicBudget {
     pub model_stream_idle_timeout_ms: u64,
     pub tool_call_timeout_ms: u64,
     pub input_wait_timeout_ms: u64,
-    pub max_turns: u64,
-    pub max_tool_calls: u64,
-    pub max_context_bytes: u64,
-    pub max_result_bytes: u64,
-    pub max_artifact_bytes: u64,
 }
 
 impl From<PublicBudget> for BudgetLimits {
@@ -121,11 +116,7 @@ impl From<PublicBudget> for BudgetLimits {
             model_stream_idle_timeout_ms: value.model_stream_idle_timeout_ms,
             tool_call_timeout_ms: value.tool_call_timeout_ms,
             input_wait_timeout_ms: value.input_wait_timeout_ms,
-            max_turns: value.max_turns,
-            max_tool_calls: value.max_tool_calls,
-            max_context_bytes: value.max_context_bytes,
-            max_result_bytes: value.max_result_bytes,
-            max_artifact_bytes: value.max_artifact_bytes,
+            max_turns: u64::MAX, max_tool_calls: u64::MAX, max_context_bytes: u64::MAX, max_result_bytes: u64::MAX, max_artifact_bytes: u64::MAX,
         }
     }
 }
@@ -138,11 +129,6 @@ impl From<BudgetLimits> for PublicBudget {
             model_stream_idle_timeout_ms: value.model_stream_idle_timeout_ms,
             tool_call_timeout_ms: value.tool_call_timeout_ms,
             input_wait_timeout_ms: value.input_wait_timeout_ms,
-            max_turns: value.max_turns,
-            max_tool_calls: value.max_tool_calls,
-            max_context_bytes: value.max_context_bytes,
-            max_result_bytes: value.max_result_bytes,
-            max_artifact_bytes: value.max_artifact_bytes,
         }
     }
 }
@@ -155,11 +141,6 @@ impl From<EffectiveBudget> for PublicBudget {
             model_stream_idle_timeout_ms: value.model_stream_idle_timeout_ms,
             tool_call_timeout_ms: value.tool_call_timeout_ms,
             input_wait_timeout_ms: value.input_wait_timeout_ms,
-            max_turns: value.max_turns,
-            max_tool_calls: value.max_tool_calls,
-            max_context_bytes: value.max_context_bytes,
-            max_result_bytes: value.max_result_bytes,
-            max_artifact_bytes: value.max_artifact_bytes,
         }
     }
 }
@@ -205,9 +186,6 @@ impl From<ComponentStateView> for PublicComponentState {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct PublicAgentCapabilities {
-    #[serde(skip)]
-    #[schemars(skip)]
-    pub hard_budget_caps: PublicBudget,
     pub max_rpc_frame_bytes: usize,
     pub max_wait_ms: u64,
     pub maturity: BTreeMap<String, PublicCapabilityMaturity>,
@@ -221,7 +199,6 @@ impl From<AgentCapabilitiesView> for PublicAgentCapabilities {
             .map(|(name, maturity)| (name, maturity.into()))
             .collect();
         Self {
-            hard_budget_caps: value.hard_budget_caps.into(),
             max_rpc_frame_bytes: value.max_rpc_frame_bytes,
             max_wait_ms: value.max_wait_ms,
             maturity,
@@ -288,9 +265,6 @@ pub struct AgentSpawnOutput {
     pub agent_id: String,
     pub submission_disposition: SubmissionDisposition,
     pub phase: String,
-    #[serde(skip)]
-    #[schemars(skip)]
-    pub effective_budget: PublicBudget,
     pub capabilities: PublicAgentCapabilities,
 }
 
@@ -306,9 +280,6 @@ pub struct PublicTask {
     pub agent_id: String,
     pub phase: String,
     pub outcome: Option<PublicOutcome>,
-    #[serde(skip)]
-    #[schemars(skip)]
-    pub effective_budget: PublicBudget,
     pub cancel_requested: bool,
     pub close_requested: bool,
     pub closed: bool,
@@ -321,7 +292,6 @@ impl From<TaskView> for PublicTask {
             agent_id: value.agent_id,
             phase: value.phase,
             outcome: value.outcome.map(Into::into),
-            effective_budget: value.effective_budget.into(),
             cancel_requested: value.stop_requested,
             close_requested: value.close_requested,
             closed: value.closed,
@@ -917,7 +887,6 @@ impl SubagentMcp {
                 SubmissionDispositionView::Existing => SubmissionDisposition::Existing,
             },
             phase: task.phase,
-            effective_budget: task.effective_budget.into(),
             capabilities,
         }))
     }
@@ -1311,11 +1280,6 @@ mod generic_tests {
             model_stream_idle_timeout_ms: 3,
             tool_call_timeout_ms: 4,
             input_wait_timeout_ms: 5,
-            max_turns: 6,
-            max_tool_calls: 7,
-            max_context_bytes: 8,
-            max_result_bytes: 9,
-            max_artifact_bytes: 10,
         };
         let value = serde_json::to_value(budget).unwrap();
         assert_eq!(value.as_object().unwrap().len(), 10);

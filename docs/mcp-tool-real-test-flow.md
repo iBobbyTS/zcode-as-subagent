@@ -15,11 +15,11 @@ zcode-as-subagent install-mcp codex
 zcode-as-subagent status
 ```
 
-记录 `target/release` 与 `npm/native/darwin-arm64` 两个 native binary 的 SHA-256，并确认 daemon socket、ZCode runtime 和 `ZCODE_AGENT_SERVICE_GENERATION` 已配置。真实调用使用专用测试仓库；不要把项目当前工作区作为 build/edit/yolo 的写入目标。
+记录 `target/release` 与 `npm/native/darwin-arm64` 两个 native binary 的 SHA-256，并确认 daemon socket 与固定的 ZCode runtime 可用。真实调用使用专用测试仓库；不要把项目当前工作区作为 build/edit/yolo 的写入目标。
 
 ## 公共输入和生命周期
 
-每次 `spawn` 使用新的 `idempotency_key`，并保存返回的 `agent_id`。`plan` 不传 `write_manifest`；`build`、`edit`、`yolo` 必须传非空的仓库相对路径，例如 `write_manifest=["src"]`。成功后循环 `poll`，把返回的 `next_revision` 作为下一次 `after_revision`；遇到 pending permission request 只用 `respond` 回复。进入 `TERMINAL` 后调用 `result`，最后调用 `close`。
+每次 `spawn` 保存返回的 `agent_id`。`plan` 不传 `write_manifest`；`build`、`edit`、`yolo` 必须传非空的仓库相对路径，例如 `write_manifest=["src"]`。成功后循环 `poll`，把返回的 `next_revision` 作为下一次 `after_revision`；遇到 pending permission request 只用 `respond` 回复。进入 `TERMINAL` 后调用 `result`，最后调用 `close`。
 
 CLI 请求形状如下（`<method>` 替换为表格中的方法，JSON 从 stdin 或 `--json` 传入）：
 

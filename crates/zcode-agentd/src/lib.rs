@@ -2224,7 +2224,7 @@ fn apply_agent_policy_environment(command: &mut Command, task: &TaskRecord) -> i
                 },
             },
         )
-        .env("ZCODE_AGENT_WORKTREE_ROOT", root)
+        .env("ZCODE_AGENT_WORKSPACE_ROOT", root)
         .env("ZCODE_AGENT_BOOTSTRAP_ROOTS", "/Applications/ZCode.app")
         .env("ZCODE_AGENT_WRITE_MANIFEST", serialized);
     Ok(())
@@ -3796,15 +3796,6 @@ impl Scheduler {
         allowed_command_ids: &[String],
         required_command_ids: &[String],
     ) -> Result<SubmittedTask, SchedulerError> {
-        if manifest
-            .budget
-            .as_ref()
-            .is_some_and(|budget| budget.max_result_bytes < MIN_RESULT_BYTES)
-        {
-            return Err(SchedulerError::InvalidConfig(format!(
-                "max_result_bytes must be at least {MIN_RESULT_BYTES}"
-            )));
-        }
         if group_id.is_some_and(|group_id| group_id.trim().is_empty()) {
             return Err(SchedulerError::InvalidConfig(
                 "group_id cannot be empty when supplied".into(),
@@ -3842,11 +3833,11 @@ impl Scheduler {
             model_stream_idle_timeout_ms: prepared.effective_budget.model_stream_idle_timeout_ms,
             tool_call_timeout_ms: prepared.effective_budget.tool_call_timeout_ms,
             input_wait_timeout_ms: prepared.effective_budget.input_wait_timeout_ms,
-            max_turns: prepared.effective_budget.max_turns,
-            max_tool_calls: prepared.effective_budget.max_tool_calls,
-            max_context_bytes: prepared.effective_budget.max_context_bytes,
-            max_result_bytes: prepared.effective_budget.max_result_bytes,
-            max_artifact_bytes: prepared.effective_budget.max_artifact_bytes,
+            max_turns: u64::MAX,
+            max_tool_calls: u64::MAX,
+            max_context_bytes: u64::MAX,
+            max_result_bytes: u64::MAX,
+            max_artifact_bytes: u64::MAX,
         };
         let task = NewTask {
             agent_id: prepared.agent_id.clone(),
@@ -4064,9 +4055,9 @@ impl Scheduler {
         let runtime_agent_id = format!("{}:{}", claim.task.agent_id, claim.owner_epoch);
         let runtime_lifecycle = Arc::new(RuntimeLifecycle::new(claim.owner_epoch));
         let terminal_text_limit = match &route {
-            TaskRoute::General(prepared, _) => prepared.effective_budget.max_result_bytes,
+            TaskRoute::General(_, _) => usize::MAX,
         };
-        let activity = Arc::new(PassiveActivityTracker::new(terminal_text_limit));
+        let activity = Arc::new(PassiveActivityTracker::new(terminal_text_limit as u64));
         let sink = Arc::new(StoreLifecycleSink::new(
             Arc::clone(&self.inner.store),
             claim.task.agent_id.clone(),
