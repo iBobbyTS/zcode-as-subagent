@@ -63,8 +63,9 @@ Review is a normal read-only Agent invocation. Put review instructions in `promp
 ```
 
 `permission_mode` defaults to `build`. For `build`, `edit`, and `yolo`,
-`write_manifest` is required and must be a non-empty list of repository-relative
-paths. It is propagated to the runtime Hook through
+`write_manifest` is optional; when omitted the daemon uses the protected
+repository workspace as the write scope. A provided list narrows that scope to
+repository-relative paths. It is propagated to the runtime Hook through
 `ZCODE_AGENT_WRITE_MANIFEST`; writes outside the list are denied during tool
 execution. `plan` is read-only and must omit the list. Terminal results expose
 `residual_gaps` for machine-readable daemon diagnostics. Callers cannot submit

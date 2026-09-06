@@ -146,7 +146,10 @@ pub fn agent_bash_hook_provenance_record() -> AgentHookProvenance {
             .activation_generation
             .as_deref()
             .is_some_and(|value| !value.is_empty())
-        && record.service_generation.as_deref().is_some_and(|value| !value.is_empty());
+        && record
+            .service_generation
+            .as_deref()
+            .is_some_and(|value| !value.is_empty());
     if verified {
         record
     } else {
@@ -334,8 +337,8 @@ pub fn agent_bash_policy_sha256() -> String {
 }
 
 pub use general::{
-    canonical_general_repository, general_control_header, general_launch_prompt,
-    AccessMode, CompletionOutcome, GeneralCompletion, GeneralFinalizer, GeneralTaskManifest,
+    canonical_general_repository, general_control_header, general_launch_prompt, AccessMode,
+    CompletionOutcome, GeneralCompletion, GeneralFinalizer, GeneralTaskManifest,
     GeneralTaskPreparer, PreparedGeneralTask, PreparedWorkspace, RuntimeTimeouts,
     GENERAL_CONTROL_SCHEMA, GENERAL_TASK_SCHEMA,
 };

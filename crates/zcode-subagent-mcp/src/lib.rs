@@ -126,8 +126,10 @@ pub(crate) fn public_error(error: RpcError) -> String {
     };
     if let Some(agent_id) = error.active_agent_id {
         format!("{code}: {message} (active_agent_id={agent_id})")
-    } else if matches!(error.code, RpcErrorCode::Validation | RpcErrorCode::Malformed)
-        && detail != message
+    } else if matches!(
+        error.code,
+        RpcErrorCode::Validation | RpcErrorCode::Malformed
+    ) && detail != message
         && detail.len() <= 512
     {
         format!("{code}: {message}: {detail}")

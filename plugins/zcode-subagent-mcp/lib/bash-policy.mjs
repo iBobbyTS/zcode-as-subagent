@@ -1322,12 +1322,22 @@ export function evaluateHookInput(input, env = process.env) {
   if (tool !== 'Bash') {
     return hardDeny('unexpected_tool', `hook only evaluates Bash, received ${String(tool)}`, { hookEventName, toolInput });
   }
-  // Permission mode is a public four-value selector. It may influence the
-  // caller's prompting policy, but it can never weaken this fail-closed hook:
-  // especially `yolo` must not turn a deny into an allow.
+  // Native yolo delegates command authorization to the upstream runtime. The
+  // adapter must not turn that mode into a second, read-only reviewer.
   const permissionMode = env.ZCODE_PERMISSION_MODE || env.ZCODE_AGENT_PERMISSION_MODE || 'build';
   if (!['build', 'edit', 'plan', 'yolo'].includes(permissionMode)) {
     return hardDeny('invalid_permission_mode', 'permission mode must be build, edit, plan, or yolo', { hookEventName, toolInput });
+  }
+  if (permissionMode === 'yolo') {
+    return {
+      decision: 'allow',
+      code: 'delegated_permission_mode',
+      reason: `${POLICY_VERSION}: yolo delegated to native permission handling`,
+      hookEventName,
+      toolInput,
+      originalCommand: command,
+      cwd,
+    };
   }
   const evaluated = evaluateCommand({
     command,

@@ -22,7 +22,7 @@ function requestId() { return `cli-${process.pid}-${crypto.randomUUID()}`; }
 function manifest(input) {
   if (!input.repository || !input.prompt) throw new CliError('INVALID_ARGUMENT', 'create requires repository and prompt', 2);
   return {
-    schema: 'zcode-general-task/v1', agent_id: 'daemon-prepared', repository: input.repository,
+    schema: 'zcode-general-task/v1', agent_id: requestId(), repository: input.repository,
     permission_mode: input.permission_mode || 'build', prompt: input.prompt,
     write_manifest: input.write_manifest || [],
   };
@@ -57,7 +57,12 @@ export function callDaemon(socketPath, command, input, timeoutMs = 6000) {
     socket.setEncoding('utf8');
     socket.on('connect', () => socket.end(request));
     socket.on('data', (chunk) => {
-      data += chunk; const line = data.split('\n')[0]; if (!line) return; clearTimeout(timer);
+      data += chunk;
+      const newline = data.indexOf('\n');
+      if (newline < 0) return;
+      const line = data.slice(0, newline);
+      if (!line) return;
+      clearTimeout(timer);
       try {
         const response = JSON.parse(line);
         if (response.version !== RPC_VERSION || response.request_id !== request_id) finish(reject, new CliError('PROTOCOL_ERROR', 'daemon returned an RPC response for a different version or request'));

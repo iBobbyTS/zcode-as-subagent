@@ -4,14 +4,16 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub const GENERAL_TASK_SCHEMA: &str = "zcode-general-task/v1";
 pub const GENERAL_CONTROL_SCHEMA: &str = "zcode-general-control/v3";
 const MAX_PROMPT_BYTES: usize = 256 * 1024;
-const MAX_DIRECT_SNAPSHOT_ENTRIES: usize = 100_000;
-const MAX_DIRECT_SNAPSHOT_BYTES: u64 = 1_073_741_824;
+static SUBMISSION_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -115,8 +117,6 @@ pub struct PreparedGeneralTask {
     pub prompt_path: PathBuf,
     pub prompt_sha256: String,
     pub write_manifest: Vec<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub read_only_snapshot_sha256: Option<String>,
     pub timeouts: RuntimeTimeouts,
     pub manifest_sha256: String,
     pub prepared_sha256: String,
@@ -228,7 +228,10 @@ impl GeneralTaskPreparer {
         Ok(Self)
     }
 
-    pub fn prepare(&self, manifest: &GeneralTaskManifest) -> PreparationResult<PreparedGeneralTask> {
+    pub fn prepare(
+        &self,
+        manifest: &GeneralTaskManifest,
+    ) -> PreparationResult<PreparedGeneralTask> {
         self.prepare_direct_submission(manifest)
     }
 
@@ -245,26 +248,24 @@ impl GeneralTaskPreparer {
     ) -> PreparationResult<PreparedGeneralTask> {
         validate_manifest(manifest)?;
         let repository = canonical_general_repository(&manifest.repository)?;
-        let agent_id = format!(
-            "ztask-{}",
-            hash(&serde_json::to_vec(&(repository.as_path(), manifest.agent_id.as_str()))?)
-        );
+        let (agent_id, scratch_root) = allocate_submission(&repository, &manifest.agent_id)?;
+        let permission_mode = manifest.permission_mode;
         let write_manifest = manifest
             .write_manifest
             .iter()
             .map(|path| confined_relative(path))
             .collect::<PreparationResult<Vec<_>>>()?;
+        let write_manifest = if permission_mode != PermissionMode::Plan && write_manifest.is_empty()
+        {
+            vec![PathBuf::from(".")]
+        } else {
+            write_manifest
+        };
         validate_write_scope(manifest.permission_mode, &write_manifest)?;
 
-        let scratch_root = std::env::temp_dir()
-            .join("zcode-as-subagent")
-            .join(&agent_id);
-        fs::create_dir_all(&scratch_root)?;
-        let scratch_root = fs::canonicalize(scratch_root)?;
         let prompt_path = scratch_root.join("prompt.txt");
         atomic_write(&prompt_path, manifest.prompt.as_bytes())?;
         let prompt_path = fs::canonicalize(prompt_path)?;
-        let permission_mode = manifest.permission_mode;
         let mut prepared = PreparedGeneralTask {
             schema: manifest.schema.clone(),
             agent_id,
@@ -277,16 +278,6 @@ impl GeneralTaskPreparer {
             prompt_path,
             prompt_sha256: hash(manifest.prompt.as_bytes()),
             write_manifest,
-            read_only_snapshot_sha256: if permission_mode == PermissionMode::Plan {
-                Some(direct_workspace_snapshot(&repository).map_err(|reason| {
-                    PreparationError::InvalidPath {
-                        path: repository.clone(),
-                        reason,
-                    }
-                })?)
-            } else {
-                None
-            },
             timeouts: permission_mode.access_mode().default_timeouts(),
             manifest_sha256: hash(&serde_json::to_vec(manifest)?),
             prepared_sha256: String::new(),
@@ -295,7 +286,44 @@ impl GeneralTaskPreparer {
         prepared.validate_digest()?;
         Ok(prepared)
     }
+}
 
+fn allocate_submission(
+    repository: &Path,
+    manifest_agent_id: &str,
+) -> PreparationResult<(String, PathBuf)> {
+    let parent = std::env::temp_dir().join("zcode-as-subagent");
+    fs::create_dir_all(&parent)?;
+    for _ in 0..32 {
+        let nonce = SUBMISSION_NONCE.fetch_add(1, Ordering::Relaxed);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let mut entropy = [0u8; 16];
+        if let Ok(mut source) = fs::File::open("/dev/urandom") {
+            let _ = source.read_exact(&mut entropy);
+        }
+        let agent_id = format!(
+            "ztask-{}",
+            hash(&serde_json::to_vec(&(
+                repository,
+                manifest_agent_id,
+                timestamp,
+                nonce,
+                entropy
+            ))?)
+        );
+        let scratch_root = parent.join(&agent_id);
+        match fs::create_dir(&scratch_root) {
+            Ok(()) => return Ok((agent_id, fs::canonicalize(scratch_root)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(PreparationError::InvalidManifest(
+        "could not allocate a unique task scratch directory".into(),
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,20 +387,10 @@ impl GeneralFinalizer {
     fn finish(
         prepared: &PreparedGeneralTask,
         requested: CompletionOutcome,
-        resumed: bool,
+        _resumed: bool,
     ) -> GeneralCompletion {
         let reason_code = if prepared.validate_digest().is_err() {
             Some("PREPARED_TASK_INVALID".to_owned())
-        } else if !resumed && prepared.permission_mode == PermissionMode::Plan {
-            match prepared.read_only_snapshot_sha256.as_deref() {
-                Some(expected)
-                    if direct_workspace_snapshot(&prepared.repository).as_deref() == Ok(expected) =>
-                {
-                    None
-                }
-                Some(_) => Some("READ_ONLY_WORKSPACE_MODIFIED".to_owned()),
-                None => Some("READ_ONLY_SNAPSHOT_MISSING".to_owned()),
-            }
         } else {
             None
         };
@@ -425,7 +443,11 @@ fn validate_manifest(manifest: &GeneralTaskManifest) -> PreparationResult<()> {
         ));
     }
     let mut unique = std::collections::HashSet::new();
-    if manifest.write_manifest.iter().any(|path| !unique.insert(path)) {
+    if manifest
+        .write_manifest
+        .iter()
+        .any(|path| !unique.insert(path))
+    {
         return Err(PreparationError::InvalidManifest(
             "write_manifest contains duplicates".into(),
         ));
@@ -464,11 +486,6 @@ fn validate_write_scope(
             "plan mode does not accept a write manifest".into(),
         ));
     }
-    if permission_mode != PermissionMode::Plan && write_manifest.is_empty() {
-        return Err(PreparationError::InvalidManifest(
-            "write permission modes require a write manifest".into(),
-        ));
-    }
     for path in write_manifest {
         if path.components().any(|component| {
             matches!(component, Component::Normal(name) if name == ".git" || name == ".gitmodules")
@@ -495,72 +512,6 @@ fn verify_file(path: &Path, expected_hash: &str) -> PreparationResult<()> {
     Ok(())
 }
 
-fn direct_workspace_snapshot(root: &Path) -> Result<String, String> {
-    fn visit(
-        root: &Path,
-        directory: &Path,
-        hasher: &mut Sha256,
-        entries: &mut usize,
-        bytes: &mut u64,
-    ) -> Result<(), String> {
-        let mut children = fs::read_dir(directory)
-            .map_err(|_| "READ_ONLY_SNAPSHOT_FAILED".to_owned())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| "READ_ONLY_SNAPSHOT_FAILED".to_owned())?;
-        children.sort_by_key(|entry| entry.file_name());
-        for child in children {
-            let path = child.path();
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| "READ_ONLY_SNAPSHOT_FAILED".to_owned())?;
-            if relative.components().next().is_some_and(|component| {
-                matches!(component, Component::Normal(name) if name == ".git" || name == ".codegraph" || name == "target")
-            }) || relative.starts_with(Path::new("tests/live-agent/workspace"))
-            {
-                continue;
-            }
-            *entries += 1;
-            if *entries > MAX_DIRECT_SNAPSHOT_ENTRIES {
-                return Err("READ_ONLY_SNAPSHOT_LIMIT_EXCEEDED".into());
-            }
-            let metadata = fs::symlink_metadata(&path)
-                .map_err(|_| "READ_ONLY_SNAPSHOT_FAILED".to_owned())?;
-            hasher.update(relative.as_os_str().as_encoded_bytes());
-            hasher.update([0]);
-            if metadata.file_type().is_symlink() {
-                hasher.update(b"symlink\0");
-                let target = fs::read_link(&path)
-                    .map_err(|_| "READ_ONLY_SNAPSHOT_FAILED".to_owned())?;
-                hasher.update(target.as_os_str().as_encoded_bytes());
-            } else if metadata.is_dir() {
-                hasher.update(b"directory\0");
-                visit(root, &path, hasher, entries, bytes)?;
-            } else if metadata.is_file() {
-                hasher.update(b"file\0");
-                *bytes = bytes
-                    .checked_add(metadata.len())
-                    .ok_or_else(|| "READ_ONLY_SNAPSHOT_LIMIT_EXCEEDED".to_owned())?;
-                if *bytes > MAX_DIRECT_SNAPSHOT_BYTES {
-                    return Err("READ_ONLY_SNAPSHOT_LIMIT_EXCEEDED".into());
-                }
-                hasher.update(
-                    fs::read(&path).map_err(|_| "READ_ONLY_SNAPSHOT_FAILED".to_owned())?,
-                );
-            } else {
-                return Err("READ_ONLY_SNAPSHOT_UNSUPPORTED_ENTRY".into());
-            }
-            hasher.update([0xff]);
-        }
-        Ok(())
-    }
-
-    let mut hasher = Sha256::new();
-    let mut entries = 0;
-    let mut bytes = 0;
-    visit(root, root, &mut hasher, &mut entries, &mut bytes)?;
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
 fn atomic_write(path: &Path, bytes: &[u8]) -> PreparationResult<()> {
     let temporary = path.with_extension("tmp");
     fs::write(&temporary, bytes)?;
@@ -574,7 +525,7 @@ fn hash(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{GeneralTaskManifest, PermissionMode};
+    use super::{GeneralTaskManifest, GeneralTaskPreparer, PermissionMode, GENERAL_TASK_SCHEMA};
     use serde_json::json;
 
     #[test]
@@ -588,14 +539,46 @@ mod tests {
                 "prompt": "inspect",
                 "write_manifest": []
             });
-            value.as_object_mut().unwrap().insert(field.into(), json!(null));
-            assert!(serde_json::from_value::<GeneralTaskManifest>(value).is_err(), "{field}");
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert(field.into(), json!(null));
+            assert!(
+                serde_json::from_value::<GeneralTaskManifest>(value).is_err(),
+                "{field}"
+            );
         }
     }
 
     #[test]
     fn permission_mode_maps_to_internal_policy() {
-        assert_eq!(PermissionMode::Plan.access_mode(), super::AccessMode::ReadOnly);
-        assert_eq!(PermissionMode::Edit.access_mode(), super::AccessMode::WorkspaceWrite);
+        assert_eq!(
+            PermissionMode::Plan.access_mode(),
+            super::AccessMode::ReadOnly
+        );
+        assert_eq!(
+            PermissionMode::Edit.access_mode(),
+            super::AccessMode::WorkspaceWrite
+        );
+    }
+
+    #[test]
+    fn each_submission_allocates_a_fresh_identity_and_scratch_root() {
+        let repository = tempfile::tempdir().expect("repository");
+        let manifest = GeneralTaskManifest {
+            schema: GENERAL_TASK_SCHEMA.into(),
+            agent_id: "daemon-prepared".into(),
+            repository: repository.path().to_path_buf(),
+            permission_mode: PermissionMode::Plan,
+            prompt: "inspect".into(),
+            write_manifest: Vec::new(),
+        };
+        let preparer = GeneralTaskPreparer::new(Vec::new()).expect("preparer");
+        let first = preparer.prepare(&manifest).expect("first submission");
+        let second = preparer.prepare(&manifest).expect("second submission");
+        assert_ne!(first.agent_id, second.agent_id);
+        assert_ne!(first.workspace.scratch_root, second.workspace.scratch_root);
+        assert!(first.prompt_path.exists());
+        assert!(second.prompt_path.exists());
     }
 }

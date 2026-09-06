@@ -21,18 +21,8 @@
         "write_manifest": { "type": "array", "items": { "type": "string", "minLength": 1 } }
       },
       "allOf": [
-        {
-          "if": { "properties": { "permission_mode": { "enum": ["build", "edit", "yolo"] } } },
-          "then": { "required": ["write_manifest"], "properties": { "write_manifest": { "minItems": 1 } } }
-        },
-        {
-          "if": { "properties": { "permission_mode": { "const": "plan" } } },
-          "then": { "properties": { "write_manifest": { "maxItems": 0 } } }
-        },
-        {
-          "if": { "not": { "required": ["permission_mode"] } },
-          "then": { "required": ["write_manifest"], "properties": { "write_manifest": { "minItems": 1 } } }
-        }
+        { "if": { "properties": { "permission_mode": { "const": "plan" } } },
+          "then": { "properties": { "write_manifest": { "maxItems": 0 } } } }
       ],
       "additionalProperties": false
     },
@@ -41,7 +31,7 @@
       "additionalProperties": false,
       "properties": {
         "zcode_subagent_status": { "input": [], "output": ["api_surface", "protocol_version", "service_generation", "components", "capabilities"] },
-        "zcode_subagent_spawn": { "input": ["repository", "permission_mode", "prompt", "write_manifest"], "output": ["agent_id", "submission_disposition", "phase", "capabilities"] },
+        "zcode_subagent_spawn": { "input": ["repository", "permission_mode", "prompt", "write_manifest"], "output": ["agent_id", "submission_disposition", "phase"] },
         "zcode_subagent_poll": { "input": ["agent_id", "after_revision", "timeout_ms"], "output": ["task", "revision", "next_revision", "pending_requests", "result_available", "activity", "latest_progress", "result", "instruction", "timed_out"] },
         "zcode_subagent_list": { "input": ["repository", "phase", "outcome", "cursor", "limit"], "output": ["tasks", "next_cursor"] },
         "zcode_subagent_send": { "input": ["agent_id", "message_id", "content"], "output": ["disposition"] },

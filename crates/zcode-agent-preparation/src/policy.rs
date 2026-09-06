@@ -373,9 +373,15 @@ impl PolicyLauncher {
             if self.access_mode != AccessMode::ReadOnly {
                 if self.interactive_bash {
                     return if external == ExternalDecision::Deny {
-                        PermissionDecision { allowed: false, reason: "external_policy_denied" }
+                        PermissionDecision {
+                            allowed: false,
+                            reason: "external_policy_denied",
+                        }
                     } else {
-                        PermissionDecision { allowed: true, reason: "interactive_permission_required" }
+                        PermissionDecision {
+                            allowed: true,
+                            reason: "interactive_permission_required",
+                        }
                     };
                 }
                 return PermissionDecision {

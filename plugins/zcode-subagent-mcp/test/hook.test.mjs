@@ -46,12 +46,14 @@ test('hook denies shell composition', () => {
   assert.equal('updatedInput' in output.hookSpecificOutput, false);
 });
 
-test('all native permission modes preserve fail-closed denies', () => {
+test('native yolo delegates instead of applying the read-only reviewer', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-hook-mode-'));
-  for (const mode of ['build', 'edit', 'plan', 'yolo']) {
+  for (const mode of ['build', 'edit', 'plan']) {
     const output = runHook('find . -delete', root, { ZCODE_PERMISSION_MODE: mode });
     assert.equal(output.hookSpecificOutput.permissionDecision, 'deny', mode);
   }
+  const yolo = runHook('find . -delete', root, { ZCODE_PERMISSION_MODE: 'yolo' });
+  assert.equal(yolo.hookSpecificOutput.permissionDecision, 'allow');
 });
 
 test('hook supports ask for unsupported commands when explicitly configured', () => {

@@ -19,7 +19,7 @@ zcode-as-subagent status
 
 ## 公共输入和生命周期
 
-每次 `spawn` 保存返回的 `agent_id`。`plan` 不传 `write_manifest`；`build`、`edit`、`yolo` 必须传非空的仓库相对路径，例如 `write_manifest=["src"]`。成功后循环 `poll`，把返回的 `next_revision` 作为下一次 `after_revision`；遇到 pending permission request 只用 `respond` 回复。进入 `TERMINAL` 后调用 `result`，最后调用 `close`。
+每次 `spawn` 保存返回的 `agent_id`。`write_manifest` 可省略；省略时 build/edit/yolo 使用受保护的工作区范围，也可传仓库相对路径例如 `write_manifest=["src"]` 缩小范围。成功后循环 `poll`，把返回的 `next_revision` 作为下一次 `after_revision`；遇到 pending permission request 只用 `respond` 回复。进入 `TERMINAL` 后调用 `result`，最后调用 `close`。
 
 CLI 请求形状如下（`<method>` 替换为表格中的方法，JSON 从 stdin 或 `--json` 传入）：
 

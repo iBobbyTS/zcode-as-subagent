@@ -17,13 +17,12 @@ use zcode_agent_preparation::{
     canonical_general_repository, GeneralTaskManifest, PreparedGeneralTask,
 };
 use zcode_agent_store::{
-    PendingRequestState, Store, StoreError, StoredPendingRequest,
-    StoredTaskResult, TaskOutcome, TaskPageFilter, TaskPhase, TaskQueryScope, TaskRecord,
-    TaskResult, TaskSubmissionDisposition,
+    PendingRequestState, Store, StoreError, StoredPendingRequest, StoredTaskResult, TaskOutcome,
+    TaskPageFilter, TaskPhase, TaskQueryScope, TaskRecord, TaskSubmissionDisposition,
 };
 
 pub const RPC_VERSION: u16 = 12;
-pub const MAX_FRAME_BYTES: usize = 128 * 1024;
+pub const MAX_FRAME_BYTES: usize = 512 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_LIST_TASKS: usize = 100;
 pub const MAX_PENDING_REQUESTS: usize = 100;
@@ -631,9 +630,8 @@ impl RpcService {
                         "task list limit is outside the allowed range",
                     ));
                 }
-                for (field, value, cap) in [
-                    ("repository", query.repository.as_deref(), 4096usize),
-                ] {
+                for (field, value, cap) in [("repository", query.repository.as_deref(), 4096usize)]
+                {
                     if let Some(value) = value {
                         validate_text(value, field, cap)?;
                     }
@@ -829,8 +827,7 @@ impl RpcService {
                 .map(|request| pending_request_view(policy.as_deref(), request))
                 .collect::<Vec<_>>();
             let command_pending_approval = pending_requests.iter().any(|request| {
-                request.kind == "permission"
-                    && request.state == PendingRequestStateView::Pending
+                request.kind == "permission" && request.state == PendingRequestStateView::Pending
             });
             let result_available = self
                 .store
@@ -862,10 +859,18 @@ impl RpcService {
                     pending_requests,
                     command_pending_approval,
                     result_available,
-                    latest_progress: self.scheduler.passive_activity_snapshot(&task.agent_id).and_then(|a| a.latest_progress),
+                    latest_progress: self
+                        .scheduler
+                        .passive_activity_snapshot(&task.agent_id)
+                        .and_then(|a| a.latest_progress),
                     result: if terminal {
-                        self.store.task_result(&task.agent_id).map_err(map_store)?.map(TaskResultView::from)
-                    } else { None },
+                        self.store
+                            .task_result(&task.agent_id)
+                            .map_err(map_store)?
+                            .map(TaskResultView::from)
+                    } else {
+                        None
+                    },
                     instruction: (!terminal).then(|| "Use poll for progress".to_owned()),
                     timed_out,
                 });
@@ -1012,36 +1017,6 @@ impl From<StoredTaskResult> for TaskResultView {
     }
 }
 
-pub(crate) fn terminal_result_response_fits(
-    task: &TaskRecord,
-    result: &TaskResult,
-) -> bool {
-    let worst_case_request_id = "\u{1}".repeat(MAX_REQUEST_ID_BYTES);
-    terminal_result_response_size(task, result, &worst_case_request_id)
-        .is_some_and(|size| size <= MAX_FRAME_BYTES)
-}
-
-fn terminal_result_response_size(
-    task: &TaskRecord,
-    result: &TaskResult,
-    request_id: &str,
-) -> Option<usize> {
-    let mut task = task_view(task.clone());
-    task.phase = "TERMINAL".into();
-    task.outcome = Some(result.outcome);
-    let response = RpcResponse::success(
-        request_id.into(),
-        RpcSuccess::TaskResult {
-            task,
-            result: Some(TaskResultView::from(StoredTaskResult {
-                result: result.clone(),
-                result_sha256: "0".repeat(64),
-            })),
-        },
-    );
-    serde_json::to_vec(&response).ok().map(|frame| frame.len())
-}
-
 fn pending_request_view(
     policy: Option<&zcode_agent_preparation::PolicyLauncher>,
     request: StoredPendingRequest,
@@ -1164,7 +1139,6 @@ fn validate_text(value: &str, field: &str, max: usize) -> Result<(), RpcError> {
     }
     Ok(())
 }
-
 
 fn map_scheduler(error: SchedulerError) -> RpcError {
     match error {

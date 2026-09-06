@@ -639,15 +639,19 @@ impl Store {
         )?;
         let ids = statement
             .query_map(
-                params![query.agent_id, query.workspace_path, query.start_ms, query.end_ms],
+                params![
+                    query.agent_id,
+                    query.workspace_path,
+                    query.start_ms,
+                    query.end_ms
+                ],
                 |row| row.get::<_, String>(0),
             )?
             .collect::<Result<Vec<_>, _>>()?;
         ids.into_iter()
             .map(|id| {
-                query_task(&connection, &id)?.ok_or_else(|| {
-                    StoreError::InvalidState("task disappeared during query".into())
-                })
+                query_task(&connection, &id)?
+                    .ok_or_else(|| StoreError::InvalidState("task disappeared during query".into()))
             })
             .collect()
     }
@@ -2147,7 +2151,6 @@ mod tests {
         assert!(!path.with_extension("sqlite3-shm").exists());
     }
 
-
     #[test]
     fn lifecycle_has_one_phase_and_terminal_outcome() {
         let (_directory, _path, store) = store();
@@ -2270,5 +2273,4 @@ mod tests {
         );
         assert!(reopened.task_result("agent").unwrap().is_none());
     }
-
 }
