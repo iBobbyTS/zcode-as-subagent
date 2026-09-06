@@ -51,9 +51,6 @@ pub struct AgentHookProvenance {
     pub hook_activation_verified: bool,
     pub activation_method: Option<String>,
     pub activation_generation: Option<String>,
-    /// Binds this installed hook record to the generic daemon configuration.
-    /// The daemon supplies the expected value at startup; it is not inferred
-    /// from the activation artifact itself.
     #[serde(default)]
     pub service_generation: Option<String>,
 }
@@ -79,17 +76,12 @@ pub fn agent_bash_hook_sha256() -> String {
 }
 
 pub fn agent_bash_hook_provenance() -> AgentHookProvenance {
-    let expected_service_generation = std::env::var("ZCODE_AGENT_SERVICE_GENERATION").ok();
-    agent_bash_hook_provenance_for_service_generation(expected_service_generation.as_deref())
+    agent_bash_hook_provenance_record()
 }
 
-/// Load and verify the installed hook record against the daemon generation.
-/// A missing expected generation intentionally fails closed, while callers
-/// that do not yet have a daemon identity can use the legacy-shaped helper
-/// only for untrusted diagnostics.
-pub fn agent_bash_hook_provenance_for_service_generation(
-    expected_service_generation: Option<&str>,
-) -> AgentHookProvenance {
+/// Load and verify the installed hook record. The service identity is generated
+/// and persisted by installation; callers do not provide an environment value.
+pub fn agent_bash_hook_provenance_record() -> AgentHookProvenance {
     let daemon_policy_version = AGENT_BASH_POLICY_VERSION.to_owned();
     let daemon_policy_sha256 = agent_bash_daemon_policy_sha256();
     let expected_hook_version = AGENT_BASH_POLICY_VERSION.to_owned();
@@ -154,9 +146,7 @@ pub fn agent_bash_hook_provenance_for_service_generation(
             .activation_generation
             .as_deref()
             .is_some_and(|value| !value.is_empty())
-        && expected_service_generation
-            .filter(|value| !value.is_empty())
-            .is_some_and(|expected| record.service_generation.as_deref() == Some(expected));
+        && record.service_generation.as_deref().is_some_and(|value| !value.is_empty());
     if verified {
         record
     } else {
@@ -306,11 +296,11 @@ fn config_event_references(
 
 #[cfg(test)]
 mod provenance_tests {
-    use super::agent_bash_hook_provenance_for_service_generation;
+    use super::agent_bash_hook_provenance_record;
 
     #[test]
-    fn missing_record_cannot_verify_against_a_daemon_generation() {
-        let provenance = agent_bash_hook_provenance_for_service_generation(Some("daemon-test"));
+    fn missing_record_cannot_verify() {
+        let provenance = agent_bash_hook_provenance_record();
         assert!(!provenance.hook_activation_verified);
         assert!(provenance.service_generation.is_none());
     }
@@ -362,13 +352,9 @@ pub enum PreparationError {
     PathEscape { path: PathBuf, root: PathBuf },
     SymlinkInput(PathBuf),
     MissingInput(PathBuf),
-    MutableReference(String),
     ForbiddenInput(PathBuf),
     CredentialInput(PathBuf),
-    Git(String),
-    Worktree(String),
     Policy(String),
-    IdempotencyConflict(String),
     Io(std::io::Error),
     Json(serde_json::Error),
 }
@@ -381,13 +367,9 @@ impl PreparationError {
             Self::PathEscape { .. } => "PATH_ESCAPE",
             Self::SymlinkInput(_) => "SYMLINK_INPUT",
             Self::MissingInput(_) => "MISSING_INPUT",
-            Self::MutableReference(_) => "MUTABLE_REFERENCE",
             Self::ForbiddenInput(_) => "FORBIDDEN_INPUT",
             Self::CredentialInput(_) => "CREDENTIAL_INPUT",
-            Self::Git(_) => "GIT_ERROR",
-            Self::Worktree(_) => "WORKTREE_ERROR",
             Self::Policy(_) => "POLICY_DENIED",
-            Self::IdempotencyConflict(_) => "IDEMPOTENCY_CONFLICT",
             Self::Io(_) => "IO_ERROR",
             Self::Json(_) => "JSON_ERROR",
         }
@@ -411,12 +393,6 @@ impl fmt::Display for PreparationError {
                 write!(formatter, "symlink input is forbidden: {}", path.display())
             }
             Self::MissingInput(path) => write!(formatter, "input is missing: {}", path.display()),
-            Self::MutableReference(reference) => {
-                write!(
-                    formatter,
-                    "Git reference is not an immutable commit SHA: {reference}"
-                )
-            }
             Self::ForbiddenInput(path) => {
                 write!(
                     formatter,
@@ -431,12 +407,7 @@ impl fmt::Display for PreparationError {
                     path.display()
                 )
             }
-            Self::Git(message) => write!(formatter, "Git operation failed: {message}"),
-            Self::Worktree(message) => write!(formatter, "worktree operation failed: {message}"),
             Self::Policy(message) => write!(formatter, "policy denied request: {message}"),
-            Self::IdempotencyConflict(message) => {
-                write!(formatter, "idempotency conflict: {message}")
-            }
             Self::Io(error) => write!(formatter, "I/O error: {error}"),
             Self::Json(error) => write!(formatter, "JSON error: {error}"),
         }

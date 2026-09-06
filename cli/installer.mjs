@@ -119,7 +119,6 @@ export function runInit(options = {}) {
   const prior = {
     files: {
       zcodeConfig: snapshotFile(paths.zcodeConfig),
-      provenance: snapshotFile(paths.provenance),
       hookProvenance: snapshotFile(paths.hookProvenance),
       state: snapshotFile(paths.state),
       config: snapshotFile(paths.config),
@@ -164,7 +163,6 @@ export function runInit(options = {}) {
     const rollbackErrors = [];
     for (const [name, file] of Object.entries({
       zcodeConfig: paths.zcodeConfig,
-      provenance: paths.provenance,
       hookProvenance: paths.hookProvenance,
       state: paths.state,
       config: paths.config,

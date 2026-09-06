@@ -24,7 +24,7 @@ test('Windows help and version work without creating anything', () => {
 });
 
 test('every business command is rejected structurally before filesystem side effects', () => {
-  const commands = ['init', 'config', 'status', 'diagnose', 'backup', 'restore', 'start', 'stop', 'uninstall', 'purge', 'cleanup-legacy', 'create', 'get', 'list', 'send', 'respond', 'cancel', 'result', 'close'];
+  const commands = ['init', 'status', 'diagnose', 'backup', 'restore', 'start', 'stop', 'uninstall', 'purge', 'cleanup-legacy', 'create', 'get', 'list', 'send', 'respond', 'cancel', 'result', 'close'];
   for (const command of commands) {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), `zcode-as-subagent-win-${command}-`));
     const result = run(home, [command]);

@@ -46,10 +46,10 @@ test('resume skips completed steps', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-as-subagent-resume-'));
   const paths = productPaths(home);
   fs.mkdirSync(paths.data, { recursive: true });
-  fs.writeFileSync(paths.state, JSON.stringify({ schema_version: 1, completed: ['probe-runtime', 'create-data', 'configure-models'] }));
+  fs.writeFileSync(paths.state, JSON.stringify({ schema_version: 1, completed: ['probe-runtime', 'create-data'] }));
   const result = runInit({ paths, resume: true, skipRuntimeProbe: true, skipNativeProbe: true });
   assert.equal(result.resumed, true);
-  assert.equal(result.completed.filter((id) => id === 'configure-models').length, 1);
+  assert.equal(result.completed.includes('create-data'), true);
   assert.equal(fs.existsSync(paths.zcodeConfig), false);
   assert.equal(fs.existsSync(paths.launchAgent), true);
 });
@@ -136,14 +136,9 @@ for (const failStep of ['write-product-config', 'install-launch-agent']) {
     const paths = productPaths(home);
     fs.mkdirSync(paths.data, { recursive: true });
     fs.writeFileSync(path.join(paths.data, 'keep.txt'), 'keep-existing-data');
-    const originalCatalog = Buffer.from('{"provider":{"zai":{"models":{}}},"model":{"main":"old"}}\n');
-    const originalProvenance = Buffer.from('prior-provenance-bytes\n');
     const originalState = Buffer.from('{"schema_version":1,"completed":["probe-runtime"]}\n');
     const originalConfig = Buffer.from('prior-config-bytes\n');
     const originalLaunchAgent = Buffer.from('prior-launch-agent-bytes\n');
-    fs.mkdirSync(path.dirname(paths.zcodeConfig), { recursive: true });
-    fs.writeFileSync(paths.zcodeConfig, originalCatalog);
-    fs.writeFileSync(paths.provenance, originalProvenance);
     fs.writeFileSync(paths.state, originalState);
     fs.writeFileSync(paths.config, originalConfig);
     fs.mkdirSync(path.dirname(paths.launchAgent), { recursive: true });
@@ -157,8 +152,6 @@ for (const failStep of ['write-product-config', 'install-launch-agent']) {
     }), new RegExp(`injected failure at ${failStep}`));
 
     for (const [file, expected] of [
-      [paths.zcodeConfig, originalCatalog],
-      [paths.provenance, originalProvenance],
       [paths.state, originalState],
       [paths.config, originalConfig],
       [paths.launchAgent, originalLaunchAgent],

@@ -23,7 +23,7 @@ const POLICY_DESCRIPTOR = Object.freeze({
   executableResolution: 'fixed trusted directories; never caller PATH',
   gitHardening: ['GIT_OPTIONAL_LOCKS=0', 'core.fsmonitor=false', 'core.untrackedCache=false', '--no-pager'],
   denialRecoveryClasses: [
-    'split_once', 'simplify_once', 'use_read', 'use_named_check', 'do_not_retry_equivalent'
+    'split_once', 'simplify_once', 'use_read', 'use_prepared_inputs', 'do_not_retry_equivalent'
   ],
 });
 
@@ -133,7 +133,7 @@ function denialRecovery(code, programFamily, operandClass) {
       'cargo', 'rustc', 'npm', 'npx', 'pnpm', 'yarn', 'bun', 'docker', 'make', 'cmake',
       'pytest', 'python', 'python3', 'go'
     ].includes(programFamily)) {
-      return ['use_named_check', 'use_named_check'];
+      return ['use_prepared_inputs', 'use_prepared_inputs'];
     }
     return ['use_read', 'use_read_or_prepared_inputs'];
   }
