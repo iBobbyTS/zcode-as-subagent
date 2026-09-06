@@ -32,14 +32,14 @@ function envRequired(env) {
   if (env?.ZCODE_AGENT_POLICY !== '1') return deny('policy_marker_missing');
   const rawRoot = env?.ZCODE_AGENT_WORKSPACE_ROOT;
   if (typeof rawRoot !== 'string' || rawRoot.length === 0 || !path.isAbsolute(rawRoot)) {
-    return deny('worktree_root_missing');
+    return deny('workspace_root_missing');
   }
   let root;
   try {
     root = fs.realpathSync.native(rawRoot);
-    if (!fs.statSync(root).isDirectory()) return deny('worktree_root_invalid');
+    if (!fs.statSync(root).isDirectory()) return deny('workspace_root_invalid');
   } catch {
-    return deny('worktree_root_invalid');
+    return deny('workspace_root_invalid');
   }
   let manifest = [];
   const rawManifest = env?.ZCODE_AGENT_WRITE_MANIFEST;
