@@ -71,16 +71,6 @@ pub struct BudgetLimits {
     pub model_stream_idle_timeout_ms: u64,
     pub tool_call_timeout_ms: u64,
     pub input_wait_timeout_ms: u64,
-    #[deprecated(note = "legacy field retained only for source compatibility; ignored")]
-    pub max_turns: u64,
-    #[deprecated(note = "legacy field retained only for source compatibility; ignored")]
-    pub max_tool_calls: u64,
-    #[deprecated(note = "legacy field retained only for source compatibility; ignored")]
-    pub max_context_bytes: u64,
-    #[deprecated(note = "legacy field retained only for source compatibility; ignored")]
-    pub max_result_bytes: u64,
-    #[deprecated(note = "legacy field retained only for source compatibility; ignored")]
-    pub max_artifact_bytes: u64,
 }
 
 impl AccessMode {
@@ -92,7 +82,6 @@ impl AccessMode {
                 model_stream_idle_timeout_ms: 90_000,
                 tool_call_timeout_ms: 120_000,
                 input_wait_timeout_ms: 300_000,
-                max_turns: u64::MAX, max_tool_calls: u64::MAX, max_context_bytes: u64::MAX, max_result_bytes: u64::MAX, max_artifact_bytes: u64::MAX,
             },
             Self::WorkspaceWrite => BudgetLimits {
                 absolute_wall_time_ms: 1_800_000,
@@ -100,7 +89,6 @@ impl AccessMode {
                 model_stream_idle_timeout_ms: 90_000,
                 tool_call_timeout_ms: 300_000,
                 input_wait_timeout_ms: 300_000,
-                max_turns: u64::MAX, max_tool_calls: u64::MAX, max_context_bytes: u64::MAX, max_result_bytes: u64::MAX, max_artifact_bytes: u64::MAX,
             },
         }
     }
@@ -113,7 +101,6 @@ fn hard_budget_cap() -> BudgetLimits {
         model_stream_idle_timeout_ms: 86_400_000,
         tool_call_timeout_ms: 86_400_000,
         input_wait_timeout_ms: 86_400_000,
-        max_turns: u64::MAX, max_tool_calls: u64::MAX, max_context_bytes: u64::MAX, max_result_bytes: u64::MAX, max_artifact_bytes: u64::MAX,
     }
 }
 

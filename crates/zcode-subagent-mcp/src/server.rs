@@ -116,7 +116,6 @@ impl From<PublicBudget> for BudgetLimits {
             model_stream_idle_timeout_ms: value.model_stream_idle_timeout_ms,
             tool_call_timeout_ms: value.tool_call_timeout_ms,
             input_wait_timeout_ms: value.input_wait_timeout_ms,
-            max_turns: u64::MAX, max_tool_calls: u64::MAX, max_context_bytes: u64::MAX, max_result_bytes: u64::MAX, max_artifact_bytes: u64::MAX,
         }
     }
 }
