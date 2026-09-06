@@ -18,6 +18,16 @@ test('packaged public schema is the reduced zcode_subagent catalog', () => {
   }
   assert.deepEqual(schema.properties.spawn.additionalProperties, false);
   assert.deepEqual(schema.properties.spawn.properties.write_manifest.items.type, 'string');
+  assert.equal(schema.properties.list.properties.limit.default, 100);
+  assert.equal(schema.properties.poll.properties.after_revision.default, 0);
+  assert.equal(schema.properties.poll.properties.timeout_ms.default, 0);
+  assert.equal(schema.properties.result.properties.offset.default, 0);
+  assert.equal(schema.properties.result.properties.limit.default, 81920);
+  assert.deepEqual(schema.properties.contracts.properties.zcode_subagent_result.output, ['task', 'result']);
+  assert.deepEqual(schema.properties.contracts.properties.zcode_subagent_spawn.idempotent, false);
+  assert.deepEqual(schema.properties.result_projection.required, [
+    'outcome', 'final_text', 'partial', 'offset', 'total_bytes', 'next_offset', 'complete',
+  ]);
   assert.deepEqual(Object.keys(schema.properties.contracts.properties).sort(), schema.properties.tools.const.slice().sort());
   for (const contract of Object.values(schema.properties.contracts.properties)) {
     assert.ok(Array.isArray(contract.input));

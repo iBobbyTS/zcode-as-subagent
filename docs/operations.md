@@ -28,7 +28,9 @@ Successful responses are structured JSON. Daemon errors preserve their `code`,
 6. Read final text through `zcode_subagent_result`; use poll for running progress.
 7. Use `zcode_subagent_cancel` for authoritative stop/kill/reap and `zcode_subagent_close` for idempotent cleanup.
 
-`zcode_subagent_list` requires repository, feature, or ownership scope. Filtering occurs in the Store before the limit.
+`zcode_subagent_list` requires a repository scope. The CLI also accepts
+`workspace` as a JSON-input alias and normalizes it to `repository`; neither is
+a direct command-line flag. Filtering occurs in the Store before the limit.
 
 ## Activity
 
@@ -36,10 +38,14 @@ Poll exposes bounded visible text, active tool classes, model request clocks, an
 
 Pending requests and terminal transitions wake long polls immediately. Unknown telemetry shapes degrade telemetry status without failing the Agent.
 
-## Completion and timeouts
+## Completion and bounded control waits
 
 A matching `turn.completed` converges the task to `TERMINAL` after runtime cleanup. The terminal response text is the authoritative final text.
 
-Timeout classes are `RUNTIME_ACTIVITY_IDLE_TIMEOUT`, `MODEL_STREAM_IDLE_TIMEOUT`, `TOOL_CALL_TIMEOUT`, and `INPUT_WAIT_TIMEOUT`. The adapter has no self-selected total task wall-clock deadline; timeout and cancellation fence late events before terminal persistence.
+The adapter does not stop a task because a tool, model stream, approval request,
+or the runtime has been quiet for an adapter-selected interval. Finite waits are
+limited to connection and handshake work, individual control RPCs, cancellation,
+and process recovery/reaping. Explicit cancellation still fences late events
+before terminal persistence.
 
 `COMPLETED` means the runtime turn ended and daemon finalization succeeded. It does not mean a review is clean, a patch is correct, or the change is mergeable.

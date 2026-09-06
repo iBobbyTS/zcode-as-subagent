@@ -51,7 +51,8 @@ test('permits explicitly configured bootstrap reads but never bootstrap writes',
   assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { file_path: path.join(bootstrap, 'runtime.js') }, cwd: root }, e).decision, 'allow');
   assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { file_path: '/etc/hosts' }, cwd: root }, e).decision, 'deny');
   assert.equal(evaluateAgentFileInput({ tool_name: 'Write', tool_input: { file_path: path.join(bootstrap, 'new.js') }, cwd: root }, e).code, 'write_not_allowlisted');
-  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { file_path: path.join(bootstrap, '.env') }, cwd: root }, e).decision, 'deny');
+  fs.writeFileSync(path.join(bootstrap, '.env'), 'ordinary bootstrap content');
+  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { file_path: path.join(bootstrap, '.env') }, cwd: root }, e).decision, 'allow');
   assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { file_path: path.join(bootstrap, 'missing') }, cwd: root }, { ...env(root), ZCODE_AGENT_BOOTSTRAP_ROOTS: JSON.stringify([path.join(root, '.zcode')]) }).code, 'bootstrap_roots_invalid');
 });
 
@@ -73,14 +74,18 @@ test('edit mode asks for external approval only for otherwise allowed writes', (
   assert.equal(evaluateAgentFileInput({ toolName: 'Edit', toolInput: { filePath: 'outside.txt' }, workingDirectory: root }, edit).decision, 'deny');
 });
 
-test('rejects protected metadata and secrets for reads and manifests', () => {
+test('rejects protected integration metadata without guessing sensitivity from filenames', () => {
   const root = fixture();
   fs.mkdirSync(path.join(root, '.git'), { recursive: true });
   fs.writeFileSync(path.join(root, '.env'), 'TOKEN=secret');
   const e = env(root);
   assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: '.git/config' }, cwd: root }, e).code, 'path_outside_root');
-  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: '.env' }, cwd: root }, e).code, 'path_outside_root');
-  assert.equal(evaluateAgentFileInput({ tool_name: 'Write', tool_input: { path: 'src/api_key.txt' }, cwd: root }, env(root, ['src'])).code, 'path_outside_root');
+  for (const filename of ['.env', 'session.ts', 'password.ts', 'oauth.ts', 'api_key.txt', 'client-secret.pem']) {
+    const target = path.join(root, 'src', filename);
+    fs.writeFileSync(target, 'ordinary workspace content');
+    assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: `src/${filename}` }, cwd: root }, e).decision, 'allow');
+    assert.equal(evaluateAgentFileInput({ tool_name: 'Write', tool_input: { path: `src/${filename}` }, cwd: root }, env(root, ['src'])).decision, 'allow');
+  }
 });
 
 test('standalone process hook skips malformed unmanaged input without echoing it', () => {

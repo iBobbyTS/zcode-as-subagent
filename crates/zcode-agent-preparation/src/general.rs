@@ -51,36 +51,6 @@ impl PermissionMode {
     }
 }
 
-/// Runtime timeouts retained as connection, control and liveness boundaries.
-/// The adapter never imposes a total task wall-clock budget.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeTimeouts {
-    pub runtime_activity_idle_timeout_ms: u64,
-    pub model_stream_idle_timeout_ms: u64,
-    pub tool_call_timeout_ms: u64,
-    pub input_wait_timeout_ms: u64,
-}
-
-impl AccessMode {
-    pub fn default_timeouts(self) -> RuntimeTimeouts {
-        match self {
-            Self::ReadOnly => RuntimeTimeouts {
-                runtime_activity_idle_timeout_ms: 90_000,
-                model_stream_idle_timeout_ms: 90_000,
-                tool_call_timeout_ms: 120_000,
-                input_wait_timeout_ms: 300_000,
-            },
-            Self::WorkspaceWrite => RuntimeTimeouts {
-                runtime_activity_idle_timeout_ms: 90_000,
-                model_stream_idle_timeout_ms: 90_000,
-                tool_call_timeout_ms: 300_000,
-                input_wait_timeout_ms: 300_000,
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeneralTaskManifest {
@@ -113,7 +83,6 @@ pub struct PreparedGeneralTask {
     pub prompt_path: PathBuf,
     pub prompt_sha256: String,
     pub write_manifest: Vec<PathBuf>,
-    pub timeouts: RuntimeTimeouts,
     pub manifest_sha256: String,
     pub prepared_sha256: String,
 }
@@ -273,7 +242,6 @@ impl GeneralTaskPreparer {
             prompt_path,
             prompt_sha256: hash(manifest.prompt.as_bytes()),
             write_manifest,
-            timeouts: permission_mode.access_mode().default_timeouts(),
             manifest_sha256: hash(&serde_json::to_vec(manifest)?),
             prepared_sha256: String::new(),
         };
@@ -575,5 +543,34 @@ mod tests {
         assert_ne!(first.workspace.scratch_root, second.workspace.scratch_root);
         assert!(first.prompt_path.exists());
         assert!(second.prompt_path.exists());
+    }
+
+    #[test]
+    fn prepared_task_contains_no_adapter_selected_runtime_deadlines() {
+        let repository = tempfile::tempdir().expect("repository");
+        let manifest = GeneralTaskManifest {
+            schema: GENERAL_TASK_SCHEMA.into(),
+            agent_id: "no-runtime-deadline".into(),
+            repository: repository.path().to_path_buf(),
+            permission_mode: PermissionMode::Plan,
+            prompt: "wait for the official runtime".into(),
+            write_manifest: Vec::new(),
+        };
+        let prepared = GeneralTaskPreparer::new(Vec::new())
+            .unwrap()
+            .prepare(&manifest)
+            .unwrap();
+        let encoded = serde_json::to_string(&prepared).unwrap();
+        for forbidden in [
+            "runtime_activity_idle_timeout_ms",
+            "model_stream_idle_timeout_ms",
+            "tool_call_timeout_ms",
+            "input_wait_timeout_ms",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "prepared task leaked {forbidden}"
+            );
+        }
     }
 }

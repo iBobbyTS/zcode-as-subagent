@@ -308,7 +308,12 @@ pub struct AgentListInput {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub cursor: Option<String>,
     #[schemars(range(min = 1, max = 100))]
+    #[serde(default = "default_list_limit")]
     pub limit: usize,
+}
+
+fn default_list_limit() -> usize {
+    100
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
@@ -370,7 +375,9 @@ pub struct AgentListOutput {
 #[serde(deny_unknown_fields)]
 pub struct AgentPollInput {
     pub agent_id: String,
+    #[serde(default)]
     pub after_revision: u64,
+    #[serde(default)]
     #[schemars(range(min = 0, max = 5000))]
     pub timeout_ms: u64,
 }
@@ -521,7 +528,8 @@ pub struct AgentPollOutput {
 #[serde(deny_unknown_fields)]
 pub struct AgentSendInput {
     pub agent_id: String,
-    pub message_id: String,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub message_id: Option<String>,
     pub content: String,
 }
 
@@ -573,11 +581,12 @@ pub struct AgentResultInput {
     #[serde(default)]
     pub offset: usize,
     #[serde(default = "default_result_limit")]
+    #[schemars(range(min = 1, max = 81920))]
     pub limit: usize,
 }
 
 fn default_result_limit() -> usize {
-    128 * 1024
+    zcode_agentd::rpc::MAX_RESULT_CHUNK_BYTES
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -631,8 +640,17 @@ impl SubagentMcp {
         }
     }
 
-    fn result(&self, agent_id: String, offset: usize, limit: usize) -> Result<(PublicTask, Option<PublicResult>), String> {
-        match self.rpc(RpcMethod::TaskResult { agent_id, offset, limit })? {
+    fn result(
+        &self,
+        agent_id: String,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(PublicTask, Option<PublicResult>), String> {
+        match self.rpc(RpcMethod::TaskResult {
+            agent_id,
+            offset,
+            limit,
+        })? {
             RpcSuccess::TaskResult { task, result, .. } => {
                 Ok((task.into(), result.map(TryInto::try_into).transpose()?))
             }
@@ -731,7 +749,7 @@ impl SubagentMcp {
         annotations(
             read_only_hint = true,
             destructive_hint = false,
-            idempotent_hint = false,
+            idempotent_hint = true,
             open_world_hint = false
         )
     )]
@@ -751,7 +769,7 @@ impl SubagentMcp {
         annotations(
             read_only_hint = false,
             destructive_hint = false,
-            idempotent_hint = true,
+            idempotent_hint = false,
             open_world_hint = false
         )
     )]
@@ -878,9 +896,15 @@ impl SubagentMcp {
         Parameters(input): Parameters<AgentSendInput>,
     ) -> Result<Json<AgentSendOutput>, String> {
         validate_text(&input.content, "content", MAX_MESSAGE_BYTES)?;
+        let message_id = input.message_id.unwrap_or_else(|| {
+            format!(
+                "subagent-message-{}",
+                self.next_request.fetch_add(1, Ordering::Relaxed)
+            )
+        });
         match self.rpc(RpcMethod::TaskMessage(MessageInput {
             agent_id: input.agent_id.clone(),
-            message_id: input.message_id,
+            message_id,
             mode: "queue".into(),
             content: input.content,
         }))? {
@@ -1011,4 +1035,40 @@ pub async fn serve_stdio(
         .waiting()
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod contract_default_tests {
+    use super::{
+        default_result_limit, AgentListInput, AgentPollInput, AgentResultInput, AgentSendInput,
+    };
+
+    #[test]
+    fn omitted_public_fields_use_the_frozen_defaults() {
+        let list: AgentListInput = serde_json::from_value(serde_json::json!({
+            "repository": "/tmp/repository"
+        }))
+        .unwrap();
+        assert_eq!(list.limit, 100);
+        assert!(list.phase.is_none());
+        assert!(list.outcome.is_none());
+        assert!(list.cursor.is_none());
+
+        let poll: AgentPollInput =
+            serde_json::from_value(serde_json::json!({"agent_id": "agent"})).unwrap();
+        assert_eq!(poll.after_revision, 0);
+        assert_eq!(poll.timeout_ms, 0);
+
+        let result: AgentResultInput =
+            serde_json::from_value(serde_json::json!({"agent_id": "agent"})).unwrap();
+        assert_eq!(result.offset, 0);
+        assert_eq!(result.limit, default_result_limit());
+
+        let send: AgentSendInput = serde_json::from_value(serde_json::json!({
+            "agent_id": "agent",
+            "content": "continue"
+        }))
+        .unwrap();
+        assert!(send.message_id.is_none());
+    }
 }

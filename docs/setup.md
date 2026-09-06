@@ -68,5 +68,5 @@ repository workspace as the write scope. A provided list narrows that scope to
 repository-relative paths. It is propagated to the runtime Hook through
 `ZCODE_AGENT_WRITE_MANIFEST`; writes outside the list are denied during tool
 execution. `plan` is read-only and must omit the list. Terminal results expose
-bounded result segments (`offset`/`limit`) for machine-readable reads. Callers cannot submit
+bounded result segments (`offset`/`limit`, default and maximum 81920 bytes) for machine-readable reads. Callers cannot submit
 programs, arguments, cwd, shell, or environment.
