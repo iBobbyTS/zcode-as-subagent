@@ -4,11 +4,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::Read,
     path::Path,
     sync::Arc,
     thread,
@@ -28,7 +27,6 @@ pub const MAX_FRAME_BYTES: usize = 128 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_LIST_TASKS: usize = 100;
 pub const MAX_PENDING_REQUESTS: usize = 100;
-pub const MAX_ARTIFACT_CHUNK_BYTES: usize = 8 * 1024;
 pub const MAX_WAIT: Duration = Duration::from_secs(5);
 pub const RPC_TRANSPORT_SUPPORTED: bool = cfg!(unix);
 
@@ -120,23 +118,10 @@ impl From<TaskPhaseFilter> for TaskPhase {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TaskArtifactQuery {
-    pub agent_id: String,
-    pub artifact_id: String,
-    pub offset_bytes: u64,
-    pub limit_bytes: usize,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeneralSubmitInput {
     pub manifest: GeneralTaskManifest,
-    #[serde(default)]
-    pub allowed_command_ids: Vec<String>,
-    #[serde(default)]
-    pub required_command_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,24 +384,6 @@ pub struct TaskResultView {
     pub result_sha256: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskArtifactMetadataView {
-    pub artifact_id: String,
-    pub kind: String,
-    pub sha256: String,
-    pub size_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskArtifactChunkView {
-    pub artifact_id: String,
-    pub sha256: String,
-    pub size_bytes: u64,
-    pub offset_bytes: u64,
-    pub bytes: Vec<u8>,
-    pub eof: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RpcErrorCode {
@@ -648,16 +615,9 @@ impl RpcService {
             }),
             RpcMethod::SubmitGeneral { input } => {
                 let manifest = input.manifest;
-                validate_command_ids(&input.allowed_command_ids, "allowed_command_ids")?;
-                validate_command_ids(&input.required_command_ids, "required_command_ids")?;
                 let submitted = self
                     .scheduler
-                    .enqueue_general_with_commands(
-                        &manifest,
-                        None,
-                        &input.allowed_command_ids,
-                        &input.required_command_ids,
-                    )
+                    .enqueue_general(&manifest)
                     .map_err(map_scheduler)?;
                 Ok(RpcSuccess::GeneralSubmitted {
                     task: task_view(submitted.task),
@@ -846,81 +806,8 @@ impl RpcService {
         Ok(task)
     }
 
-    #[cfg(any())]
-    fn task_artifact_metadata(
-        &self,
-        task: &TaskRecord,
-    ) -> Result<Vec<TaskArtifactMetadataView>, RpcError> {
-        let result = self.store.task_result(&task.agent_id).map_err(map_store)?;
-        let allowed = result
-            .as_ref()
-            .map(|stored| {
-                stored
-                    .result
-                    .artifacts
-                    .iter()
-                    .map(|artifact| (artifact.artifact_id.as_str(), artifact.sha256.as_str()))
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
-        let mut projected = Vec::new();
-        for artifact in self
-            .store
-            .artifacts(&task.agent_id, MAX_PENDING_REQUESTS)
-            .map_err(map_store)?
-        {
-            let permitted = allowed
-                .get(artifact.artifact_id.as_str())
-                .is_some_and(|sha| *sha == artifact.sha256);
-            if permitted {
-                projected.push(TaskArtifactMetadataView {
-                    artifact_id: artifact.artifact_id,
-                    kind: public_artifact_kind(&artifact.artifact_type)?.into(),
-                    sha256: artifact.sha256,
-                    size_bytes: artifact.bytes,
-                });
-            }
-        }
-        projected.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
-        Ok(projected)
-    }
-
     fn task_result_view(&self, stored: StoredTaskResult) -> Result<TaskResultView, RpcError> {
         Ok(TaskResultView::from(stored))
-    }
-
-    #[cfg(any())]
-    fn task_artifact_chunk(
-        &self,
-        task: &TaskRecord,
-        query: &TaskArtifactQuery,
-    ) -> Result<TaskArtifactChunkView, RpcError> {
-        validate_id(&query.artifact_id, "artifact_id")?;
-        if query.limit_bytes == 0 || query.limit_bytes > MAX_ARTIFACT_CHUNK_BYTES {
-            return Err(RpcError::new(
-                RpcErrorCode::Validation,
-                "artifact chunk size is outside the allowed range",
-            ));
-        }
-        let metadata = self.task_artifact_metadata(task)?;
-        let expected = metadata
-            .into_iter()
-            .find(|artifact| artifact.artifact_id == query.artifact_id)
-            .ok_or_else(|| RpcError::new(RpcErrorCode::NotFound, "artifact was not found"))?;
-        if query.offset_bytes >= expected.size_bytes {
-            return Err(RpcError::new(
-                RpcErrorCode::Validation,
-                "artifact offset does not permit non-empty progress",
-            ));
-        }
-        let stored = self
-            .store
-            .artifacts(&task.agent_id, MAX_PENDING_REQUESTS)
-            .map_err(map_store)?
-            .into_iter()
-            .find(|artifact| artifact.artifact_id == query.artifact_id)
-            .ok_or_else(|| RpcError::new(RpcErrorCode::NotFound, "artifact was not found"))?;
-        verified_artifact_chunk(stored, expected, query.offset_bytes, query.limit_bytes)
     }
 
     fn task_poll(&self, query: TaskPollQuery) -> Result<RpcSuccess, RpcError> {
@@ -1016,74 +903,6 @@ fn parse_task_cursor(cursor: &str) -> Result<u64, RpcError> {
 
 fn format_task_cursor(cursor: u64) -> String {
     format!("task:{cursor}")
-}
-
-#[cfg(any())]
-fn public_artifact_kind(stored: &str) -> Result<&'static str, RpcError> {
-    match stored {
-        "changes_patch" => Ok("changes_patch"),
-        _ => Err(RpcError::new(
-            RpcErrorCode::ResultInvalid,
-            "stored artifact kind is not supported",
-        )),
-    }
-}
-
-#[cfg(any())]
-fn verified_artifact_chunk(
-    stored: StoredArtifact,
-    expected: TaskArtifactMetadataView,
-    offset_bytes: u64,
-    limit_bytes: usize,
-) -> Result<TaskArtifactChunkView, RpcError> {
-    let metadata = std::fs::symlink_metadata(&stored.path)
-        .map_err(|_| RpcError::new(RpcErrorCode::ResultInvalid, "artifact is unavailable"))?;
-    if metadata.file_type().is_symlink()
-        || !metadata.file_type().is_file()
-        || metadata.len() != expected.size_bytes
-        || stored.bytes != expected.size_bytes
-        || stored.sha256 != expected.sha256
-    {
-        return Err(RpcError::new(
-            RpcErrorCode::ResultInvalid,
-            "artifact metadata does not match authoritative bytes",
-        ));
-    }
-    let mut file = File::open(&stored.path)
-        .map_err(|_| RpcError::new(RpcErrorCode::ResultInvalid, "artifact is unavailable"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|_| RpcError::new(RpcErrorCode::ResultInvalid, "artifact read failed"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let observed = format!("{:x}", hasher.finalize());
-    if observed != expected.sha256 {
-        return Err(RpcError::new(
-            RpcErrorCode::ResultInvalid,
-            "artifact digest does not match authoritative metadata",
-        ));
-    }
-    file.seek(SeekFrom::Start(offset_bytes))
-        .map_err(|_| RpcError::new(RpcErrorCode::ResultInvalid, "artifact seek failed"))?;
-    let remaining = expected.size_bytes - offset_bytes;
-    let requested = remaining.min(limit_bytes as u64) as usize;
-    let mut bytes = vec![0u8; requested];
-    file.read_exact(&mut bytes)
-        .map_err(|_| RpcError::new(RpcErrorCode::ResultInvalid, "artifact read failed"))?;
-    Ok(TaskArtifactChunkView {
-        artifact_id: expected.artifact_id,
-        sha256: expected.sha256,
-        size_bytes: expected.size_bytes,
-        offset_bytes,
-        eof: offset_bytes + bytes.len() as u64 == expected.size_bytes,
-        bytes,
-    })
 }
 
 fn task_view(task: TaskRecord) -> TaskView {
@@ -1196,17 +1015,15 @@ impl From<StoredTaskResult> for TaskResultView {
 pub(crate) fn terminal_result_response_fits(
     task: &TaskRecord,
     result: &TaskResult,
-    artifacts: &[TaskArtifactMetadataView],
 ) -> bool {
     let worst_case_request_id = "\u{1}".repeat(MAX_REQUEST_ID_BYTES);
-    terminal_result_response_size(task, result, artifacts, &worst_case_request_id)
+    terminal_result_response_size(task, result, &worst_case_request_id)
         .is_some_and(|size| size <= MAX_FRAME_BYTES)
 }
 
 fn terminal_result_response_size(
     task: &TaskRecord,
     result: &TaskResult,
-    artifacts: &[TaskArtifactMetadataView],
     request_id: &str,
 ) -> Option<usize> {
     let mut task = task_view(task.clone());

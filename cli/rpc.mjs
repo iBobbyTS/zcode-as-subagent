@@ -24,13 +24,13 @@ function manifest(input) {
   return {
     schema: 'zcode-general-task/v1', agent_id: 'daemon-prepared', repository: input.repository,
     permission_mode: input.permission_mode || 'build', prompt: input.prompt,
-    write_manifest: input.write_manifest || [], scratch_root: os.tmpdir(),
+    write_manifest: input.write_manifest || [],
   };
 }
 
 function methodFor(command, input) {
   switch (command) {
-    case 'create': case 'spawn': return { method: 'submit_general', params: { input: { manifest: manifest(input), allowed_command_ids: input.allowed_command_ids || [], required_command_ids: input.required_command_ids || [] } } };
+    case 'create': case 'spawn': return { method: 'submit_general', params: { input: { manifest: manifest(input) } } };
     case 'get': case 'poll': return { method: 'task_poll', params: { agent_id: input.agent_id, after_revision: input.after_revision || 0, timeout_ms: input.timeout_ms ?? 0 } };
     case 'list': {
       const repository = input.repository ?? input.workspace;

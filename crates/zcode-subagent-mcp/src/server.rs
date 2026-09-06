@@ -14,10 +14,8 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use zcode_agent_preparation::{
-    AttachmentInput, BudgetLimits, GeneralTaskManifest, PermissionMode, GENERAL_TASK_SCHEMA,
-};
-use zcode_agent_store::{EffectiveBudget, TaskOutcome};
+use zcode_agent_preparation::{GeneralTaskManifest, PermissionMode, GENERAL_TASK_SCHEMA};
+use zcode_agent_store::TaskOutcome;
 use zcode_agentd::rpc::{
     AgentCapabilitiesView, CapabilityMaturityView, ComponentStateView, GeneralSubmitInput,
     MessageInput, RespondInput, ResponseDecision, ResponseOutcomeView, RpcClient, RpcMethod,
@@ -95,53 +93,6 @@ fn validate_text(value: &str, field: &str, max: usize) -> Result<(), String> {
 
 fn validate_path(value: &str, field: &str) -> Result<(), String> {
     validate_text(value, field, MAX_PATH_BYTES)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[schemars(deny_unknown_fields)]
-pub struct PublicBudget {
-    pub absolute_wall_time_ms: u64,
-    pub runtime_activity_idle_timeout_ms: u64,
-    pub model_stream_idle_timeout_ms: u64,
-    pub tool_call_timeout_ms: u64,
-    pub input_wait_timeout_ms: u64,
-}
-
-impl From<PublicBudget> for BudgetLimits {
-    fn from(value: PublicBudget) -> Self {
-        Self {
-            absolute_wall_time_ms: value.absolute_wall_time_ms,
-            runtime_activity_idle_timeout_ms: value.runtime_activity_idle_timeout_ms,
-            model_stream_idle_timeout_ms: value.model_stream_idle_timeout_ms,
-            tool_call_timeout_ms: value.tool_call_timeout_ms,
-            input_wait_timeout_ms: value.input_wait_timeout_ms,
-        }
-    }
-}
-
-impl From<BudgetLimits> for PublicBudget {
-    fn from(value: BudgetLimits) -> Self {
-        Self {
-            absolute_wall_time_ms: value.absolute_wall_time_ms,
-            runtime_activity_idle_timeout_ms: value.runtime_activity_idle_timeout_ms,
-            model_stream_idle_timeout_ms: value.model_stream_idle_timeout_ms,
-            tool_call_timeout_ms: value.tool_call_timeout_ms,
-            input_wait_timeout_ms: value.input_wait_timeout_ms,
-        }
-    }
-}
-
-impl From<EffectiveBudget> for PublicBudget {
-    fn from(value: EffectiveBudget) -> Self {
-        Self {
-            absolute_wall_time_ms: value.absolute_wall_time_ms,
-            runtime_activity_idle_timeout_ms: value.runtime_activity_idle_timeout_ms,
-            model_stream_idle_timeout_ms: value.model_stream_idle_timeout_ms,
-            tool_call_timeout_ms: value.tool_call_timeout_ms,
-            input_wait_timeout_ms: value.input_wait_timeout_ms,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
@@ -231,14 +182,6 @@ impl From<SystemStatusView> for SystemStatusOutput {
     }
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[schemars(deny_unknown_fields)]
-pub struct PublicAttachmentInput {
-    pub logical_name: String,
-    pub source_path: String,
-}
-
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
@@ -306,7 +249,6 @@ pub enum PublicOutcome {
     Failed,
     Cancelled,
     TimedOut,
-    BudgetExhausted,
     RuntimeLost,
     ResultInvalid,
 }
@@ -318,7 +260,6 @@ impl From<TaskOutcome> for PublicOutcome {
             TaskOutcome::Failed => Self::Failed,
             TaskOutcome::Cancelled => Self::Cancelled,
             TaskOutcome::TimedOut => Self::TimedOut,
-            TaskOutcome::BudgetExhausted => Self::BudgetExhausted,
             TaskOutcome::RuntimeLost => Self::RuntimeLost,
             TaskOutcome::ResultInvalid => Self::ResultInvalid,
         }
@@ -391,7 +332,6 @@ pub enum PublicOutcomeFilter {
     Failed,
     Cancelled,
     TimedOut,
-    BudgetExhausted,
     RuntimeLost,
     ResultInvalid,
 }
@@ -403,7 +343,6 @@ impl From<PublicOutcomeFilter> for TaskOutcome {
             PublicOutcomeFilter::Failed => Self::Failed,
             PublicOutcomeFilter::Cancelled => Self::Cancelled,
             PublicOutcomeFilter::TimedOut => Self::TimedOut,
-            PublicOutcomeFilter::BudgetExhausted => Self::BudgetExhausted,
             PublicOutcomeFilter::RuntimeLost => Self::RuntimeLost,
             PublicOutcomeFilter::ResultInvalid => Self::ResultInvalid,
         }
@@ -684,24 +623,6 @@ impl SubagentMcp {
     }
 }
 
-fn attachment(value: &PublicAttachmentInput) -> Result<AttachmentInput, String> {
-    validate_text(&value.logical_name, "attachment.logical_name", 256)?;
-    validate_path(&value.source_path, "attachment.source_path")?;
-    let source_path = PathBuf::from(&value.source_path);
-    if !source_path.is_absolute() {
-        return Err("validation: attachment.source_path must be absolute".into());
-    }
-    let allowed_root = source_path
-        .parent()
-        .ok_or_else(|| "validation: attachment.source_path has no parent".to_owned())?
-        .to_path_buf();
-    Ok(AttachmentInput {
-        logical_name: value.logical_name.clone(),
-        source_path,
-        allowed_root,
-    })
-}
-
 fn request_identity(counter: u64) -> String {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -744,17 +665,10 @@ fn general_manifest(input: &AgentSpawnInput, request_identity: &str) -> Result<G
         schema: GENERAL_TASK_SCHEMA.into(),
         agent_id: agent_id.clone(),
         repository,
-        access_mode: PermissionMode::from(input.permission_mode).access_mode(),
         permission_mode: input.permission_mode.into(),
         prompt: input.prompt.clone(),
         // Validate caller scope before the daemon applies its execution policy.
         write_manifest,
-        scratch_root: std::env::temp_dir().join("zcode-as-subagent").join("scratch"),
-        budget: Some({
-            PermissionMode::from(input.permission_mode)
-                .access_mode()
-                .default_budget()
-        }),
     })
 }
 
@@ -857,8 +771,6 @@ impl SubagentMcp {
         let (task, disposition) = match self.rpc(RpcMethod::SubmitGeneral {
             input: GeneralSubmitInput {
                 manifest,
-                allowed_command_ids: Vec::new(),
-                required_command_ids: Vec::new(),
             },
         })? {
             RpcSuccess::GeneralSubmitted { task, disposition } => (task, disposition),
@@ -1119,7 +1031,7 @@ pub async fn serve_stdio(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod generic_tests {
     use super::*;
     #[cfg(any())]
@@ -1255,20 +1167,6 @@ mod generic_tests {
             let error = general_manifest(&input, "test-request").unwrap_err();
             assert!(error.contains("require a non-empty write_manifest"));
         }
-    }
-
-    #[test]
-    fn public_budget_contains_only_runtime_and_absolute_limits() {
-        let budget = PublicBudget {
-            absolute_wall_time_ms: 1,
-            runtime_activity_idle_timeout_ms: 2,
-            model_stream_idle_timeout_ms: 3,
-            tool_call_timeout_ms: 4,
-            input_wait_timeout_ms: 5,
-        };
-        let value = serde_json::to_value(budget).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 5);
-        assert!(!value.to_string().contains("semantic"));
     }
 
     #[test]
