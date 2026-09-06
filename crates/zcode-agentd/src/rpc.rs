@@ -304,6 +304,7 @@ pub struct TaskView {
     pub agent_id: String,
     pub phase: String,
     pub outcome: Option<TaskOutcome>,
+    pub reason_code: Option<String>,
     pub stop_requested: bool,
     pub close_requested: bool,
     pub closed: bool,
@@ -923,6 +924,7 @@ fn task_view(task: TaskRecord) -> TaskView {
         }
         .into(),
         outcome: task.outcome,
+        reason_code: task.failure_code,
         stop_requested: task.stop_requested,
         close_requested: task.close_requested,
         closed: task.closed_at.is_some(),
