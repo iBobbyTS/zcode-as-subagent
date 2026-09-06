@@ -1426,8 +1426,14 @@ fn validate_command_ids(values: &[String], field: &str) -> Result<(), RpcError> 
 fn map_scheduler(error: SchedulerError) -> RpcError {
     match error {
         SchedulerError::Store(error) => map_store(error),
-        SchedulerError::InvalidConfig(_) => {
-            RpcError::new(RpcErrorCode::Validation, "scheduler rejected the operation")
+        SchedulerError::InvalidConfig(message) => {
+            // Preserve the bounded, actionable preparation reason. The MCP
+            // facade may still redact it for callers, but RPC diagnostics
+            // must distinguish repository, path, budget, and state errors.
+            RpcError::new(
+                RpcErrorCode::Validation,
+                format!("scheduler rejected the operation: {message}"),
+            )
         }
         SchedulerError::RuntimeSpawn { .. } | SchedulerError::LifecycleSink { .. } => {
             RpcError::new(RpcErrorCode::RuntimeLost, "runtime operation failed")

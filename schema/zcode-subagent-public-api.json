@@ -20,6 +20,20 @@
         "prompt": { "type": "string", "minLength": 1 },
         "write_manifest": { "type": "array", "items": { "type": "string", "minLength": 1 } }
       },
+      "allOf": [
+        {
+          "if": { "properties": { "permission_mode": { "enum": ["build", "edit", "yolo"] } } },
+          "then": { "required": ["write_manifest"], "properties": { "write_manifest": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "permission_mode": { "const": "plan" } } },
+          "then": { "properties": { "write_manifest": { "maxItems": 0 } } }
+        },
+        {
+          "if": { "not": { "required": ["permission_mode"] } },
+          "then": { "required": ["write_manifest"], "properties": { "write_manifest": { "minItems": 1 } } }
+        }
+      ],
       "additionalProperties": false
     },
     "contracts": {
