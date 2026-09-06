@@ -27,18 +27,18 @@ function manifest(input) {
     permission_mode: input.permission_mode || 'build', prompt: input.prompt, repo_context: [], attachments: [],
     write_manifest: input.write_manifest || [], scratch_root: os.tmpdir(),
     artifact_root: os.tmpdir(), retain_partial: false,
-    idempotency_key: input.idempotency_key || requestId(),
+    idempotency_key: requestId(),
   };
 }
 
 function methodFor(command, input) {
   switch (command) {
-    case 'create': case 'spawn': return { method: 'submit_general', params: { input: { manifest: manifest(input), group_id: input.group_id ?? null, allowed_command_ids: input.allowed_command_ids || [], required_command_ids: input.required_command_ids || [] } } };
+    case 'create': case 'spawn': return { method: 'submit_general', params: { input: { manifest: manifest(input), allowed_command_ids: input.allowed_command_ids || [], required_command_ids: input.required_command_ids || [] } } };
     case 'get': case 'poll': return { method: 'task_poll', params: { agent_id: input.agent_id, after_revision: input.after_revision || 0, timeout_ms: input.timeout_ms ?? 0 } };
     case 'list': {
       const repository = input.repository ?? input.workspace;
       if (!repository) throw new CliError('INVALID_ARGUMENT', 'list requires repository or workspace scope', 2);
-      return { method: 'task_list', params: { repository, group_id: input.group_id ?? null, phase: input.phase ?? null, outcome: input.outcome ?? null, cursor: input.cursor ?? null, limit: input.limit ?? 100 } };
+      return { method: 'task_list', params: { repository, phase: input.phase ?? null, outcome: input.outcome ?? null, cursor: input.cursor ?? null, limit: input.limit ?? 100 } };
     }
     case 'send': return { method: 'task_message', params: { agent_id: input.agent_id, message_id: input.message_id || requestId(), mode: input.mode || 'queue', content: input.content } };
     case 'respond': return { method: 'task_respond', params: { agent_id: input.agent_id, request_id: input.request_id, decision: input.decision, content: input.reason ?? input.content ?? null } };
