@@ -755,8 +755,8 @@ fn general_manifest(input: &AgentSpawnInput, request_identity: &str) -> Result<G
         attachments: Vec::new(),
         // Validate caller scope before the daemon applies its execution policy.
         write_manifest,
-        scratch_root: PathBuf::from(".agent-work/scratch/general"),
-        artifact_root: PathBuf::from(".agent-work/artifacts").join(agent_id),
+        scratch_root: std::env::temp_dir().join("zcode-as-subagent").join("scratch"),
+        artifact_root: std::env::temp_dir().join("zcode-as-subagent").join("artifacts").join(agent_id),
         budget: Some({
             PermissionMode::from(input.permission_mode)
                 .access_mode()

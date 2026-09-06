@@ -1,6 +1,7 @@
 import net from 'node:net';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import { CliError } from './errors.mjs';
 
 export const RPC_VERSION = 12;
@@ -24,8 +25,8 @@ function manifest(input) {
   return {
     schema: 'zcode-general-task/v1', agent_id: 'daemon-prepared', repository: input.repository,
     permission_mode: input.permission_mode || 'build', prompt: input.prompt, repo_context: [], attachments: [],
-    write_manifest: input.write_manifest || [], scratch_root: '.agent-work/scratch/general',
-    artifact_root: '.agent-work/artifacts/daemon-prepared', retain_partial: false,
+    write_manifest: input.write_manifest || [], scratch_root: os.tmpdir(),
+    artifact_root: os.tmpdir(), retain_partial: false,
     idempotency_key: input.idempotency_key || requestId(),
   };
 }
