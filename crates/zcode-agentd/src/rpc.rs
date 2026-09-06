@@ -15,10 +15,10 @@ use std::{
     time::{Duration, Instant},
 };
 use zcode_agent_preparation::{
-    canonical_general_repository, BudgetLimits, GeneralTaskManifest, PreparedGeneralTask,
+    canonical_general_repository, GeneralTaskManifest, PreparedGeneralTask,
 };
 use zcode_agent_store::{
-    EffectiveBudget, PendingRequestState, Store, StoreError, StoredArtifact, StoredPendingRequest,
+    PendingRequestState, Store, StoreError, StoredPendingRequest,
     StoredTaskResult, TaskOutcome, TaskPageFilter, TaskPhase, TaskQueryScope, TaskRecord,
     TaskResult, TaskSubmissionDisposition,
 };
@@ -37,7 +37,7 @@ mod unix;
 #[cfg(unix)]
 pub use unix::{RpcClient, RpcServer, ServerOptions};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RpcRequest {
     pub version: u16,
     pub request_id: String,
@@ -45,7 +45,7 @@ pub struct RpcRequest {
     pub method: RpcMethod,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(
     tag = "method",
     content = "params",
@@ -62,7 +62,6 @@ pub enum RpcMethod {
     TaskRespond(RespondInput),
     TaskCancel { agent_id: String },
     TaskResult { agent_id: String },
-    TaskArtifact(TaskArtifactQuery),
     TaskClose { agent_id: String },
 }
 
@@ -78,19 +77,16 @@ impl RpcMethod {
                 | "task_respond"
                 | "task_cancel"
                 | "task_result"
-                | "task_artifact"
                 | "task_close"
         )
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskListQuery {
     #[serde(default)]
     pub repository: Option<String>,
-    #[serde(default)]
-    pub group_id: Option<String>,
     #[serde(default)]
     pub phase: Option<TaskPhaseFilter>,
     #[serde(default)]
@@ -133,12 +129,10 @@ pub struct TaskArtifactQuery {
     pub limit_bytes: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeneralSubmitInput {
     pub manifest: GeneralTaskManifest,
-    #[serde(default)]
-    pub group_id: Option<String>,
     #[serde(default)]
     pub allowed_command_ids: Vec<String>,
     #[serde(default)]
@@ -256,10 +250,6 @@ pub enum RpcSuccess {
     TaskResult {
         task: TaskView,
         result: Option<TaskResultView>,
-        artifacts: Vec<TaskArtifactMetadataView>,
-    },
-    TaskArtifact {
-        chunk: TaskArtifactChunkView,
     },
     Message {
         disposition: MessageDispositionView,
@@ -406,14 +396,6 @@ pub struct TaskResultView {
     pub outcome: TaskOutcome,
     pub final_text: String,
     pub partial: bool,
-    pub retained: bool,
-    pub base_commit: Option<String>,
-    pub head_commit: Option<String>,
-    pub changed_files: Vec<String>,
-    pub diff_stat: Option<String>,
-    pub checks: Vec<String>,
-    pub residual_gaps: Vec<String>,
-    pub artifacts: Vec<zcode_agent_store::ResultArtifact>,
     pub result_sha256: String,
 }
 
@@ -666,16 +648,13 @@ impl RpcService {
             }),
             RpcMethod::SubmitGeneral { input } => {
                 let manifest = input.manifest;
-                if let Some(group_id) = input.group_id.as_deref() {
-                    validate_text(group_id, "group_id", 256)?;
-                }
                 validate_command_ids(&input.allowed_command_ids, "allowed_command_ids")?;
                 validate_command_ids(&input.required_command_ids, "required_command_ids")?;
                 let submitted = self
                     .scheduler
                     .enqueue_general_with_commands(
                         &manifest,
-                        input.group_id.as_deref(),
+                        None,
                         &input.allowed_command_ids,
                         &input.required_command_ids,
                     )
@@ -694,7 +673,6 @@ impl RpcService {
                 }
                 for (field, value, cap) in [
                     ("repository", query.repository.as_deref(), 4096usize),
-                    ("group_id", query.group_id.as_deref(), 256usize),
                 ] {
                     if let Some(value) = value {
                         validate_text(value, field, cap)?;
@@ -703,7 +681,7 @@ impl RpcService {
                 if let Some(cursor) = query.cursor.as_deref() {
                     validate_text(cursor, "cursor", 64)?;
                 }
-                if query.repository.is_none() && query.group_id.is_none() {
+                if query.repository.is_none() {
                     return Err(RpcError::new(
                         RpcErrorCode::Validation,
                         "at least one task list scope is required",
@@ -723,7 +701,6 @@ impl RpcService {
                     .list_task_page(
                         TaskQueryScope {
                             repository: canonical_repository.as_deref(),
-                            group_id: query.group_id.as_deref(),
                         },
                         TaskPageFilter {
                             phase: query.phase.map(Into::into),
@@ -805,7 +782,6 @@ impl RpcService {
             }
             RpcMethod::TaskResult { agent_id } => {
                 let task = self.require_task(&agent_id)?;
-                let artifacts = self.task_artifact_metadata(&task)?;
                 let result = self
                     .store
                     .task_result(&task.agent_id)
@@ -815,13 +791,6 @@ impl RpcService {
                 Ok(RpcSuccess::TaskResult {
                     task: task_view(task),
                     result,
-                    artifacts,
-                })
-            }
-            RpcMethod::TaskArtifact(query) => {
-                let task = self.require_task(&query.agent_id)?;
-                Ok(RpcSuccess::TaskArtifact {
-                    chunk: self.task_artifact_chunk(&task, &query)?,
                 })
             }
             RpcMethod::TaskClose { agent_id } => {
@@ -877,6 +846,7 @@ impl RpcService {
         Ok(task)
     }
 
+    #[cfg(any())]
     fn task_artifact_metadata(
         &self,
         task: &TaskRecord,
@@ -919,6 +889,7 @@ impl RpcService {
         Ok(TaskResultView::from(stored))
     }
 
+    #[cfg(any())]
     fn task_artifact_chunk(
         &self,
         task: &TaskRecord,
@@ -1047,6 +1018,7 @@ fn format_task_cursor(cursor: u64) -> String {
     format!("task:{cursor}")
 }
 
+#[cfg(any())]
 fn public_artifact_kind(stored: &str) -> Result<&'static str, RpcError> {
     match stored {
         "changes_patch" => Ok("changes_patch"),
@@ -1057,6 +1029,7 @@ fn public_artifact_kind(stored: &str) -> Result<&'static str, RpcError> {
     }
 }
 
+#[cfg(any())]
 fn verified_artifact_chunk(
     stored: StoredArtifact,
     expected: TaskArtifactMetadataView,
@@ -1215,14 +1188,6 @@ impl From<StoredTaskResult> for TaskResultView {
             outcome: stored.result.outcome,
             final_text: stored.result.final_text,
             partial: stored.result.partial,
-            retained: stored.retained,
-            base_commit: stored.result.base_commit,
-            head_commit: stored.result.head_commit,
-            changed_files: stored.result.changed_files,
-            diff_stat: stored.result.diff_stat,
-            checks: stored.result.checks,
-            residual_gaps: stored.result.residual_gaps,
-            artifacts: stored.result.artifacts,
             result_sha256: stored.result_sha256,
         }
     }
@@ -1254,11 +1219,7 @@ fn terminal_result_response_size(
             result: Some(TaskResultView::from(StoredTaskResult {
                 result: result.clone(),
                 result_sha256: "0".repeat(64),
-                // `false` is the longer JSON spelling, so this remains safe
-                // for both retained and non-retained terminal results.
-                retained: false,
             })),
-            artifacts: artifacts.to_vec(),
         },
     );
     serde_json::to_vec(&response).ok().map(|frame| frame.len())
