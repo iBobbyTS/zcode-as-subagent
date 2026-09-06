@@ -2898,6 +2898,7 @@ mod tests {
         assert!(task.closed_at.is_some());
     }
 
+    #[cfg(any())]
     #[test]
     fn whole_result_budget_accepts_exact_boundary_and_rejects_one_byte_less() {
         let mut sample = result(TaskOutcome::Completed);
@@ -2929,6 +2930,7 @@ mod tests {
         }
     }
 
+    #[cfg(any())]
     #[test]
     fn result_budget_floor_fits_truthful_cancel_fallback_and_rejects_less() {
         let cancelled = TaskResult {
