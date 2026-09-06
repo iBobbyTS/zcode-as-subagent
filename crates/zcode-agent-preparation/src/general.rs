@@ -900,24 +900,12 @@ pub enum CompletionOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChangesPatch {
-    pub artifact_id: String,
-    pub sha256: String,
-    pub size_bytes: u64,
-    pub head_commit: Option<String>,
-    pub base_sha: String,
-    pub changed_paths: Vec<String>,
-    pub diff_stat: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneralCompletion {
     pub outcome: CompletionOutcome,
     pub reason_code: Option<String>,
     pub summary: String,
     pub checks: Vec<String>,
     pub residual_gaps: Vec<String>,
-    pub changes_patch: Option<ChangesPatch>,
     pub cleaned: bool,
 }
 
@@ -1018,7 +1006,6 @@ impl GeneralFinalizer {
                     summary,
                     checks,
                     residual_gaps,
-                    changes_patch: None,
                     cleaned: cleanup_if_trusted(prepared),
                 }
             }
@@ -1088,14 +1075,12 @@ impl GeneralFinalizer {
                 summary,
                 checks,
                 residual_gaps,
-                changes_patch: None,
                 cleaned: false,
             });
         }
         let manager = manager(prepared).map_err(|_| "WORKTREE_IDENTITY_INVALID".to_owned())?;
         prefinalization_integrity(prepared, &manager)?;
         ensure_directory_empty(&prepared.artifact_root, "ARTIFACT_ROOT_NOT_EMPTY")?;
-        let mut changes_patch = None;
         match prepared.access_mode {
             AccessMode::ReadOnly => {
                 if !prepared.direct_workspace {
@@ -1119,16 +1104,10 @@ impl GeneralFinalizer {
                                     | CompletionOutcome::BudgetExhausted
                             )));
                 if retain {
-                    changes_patch = finalize_patch(prepared)?;
                 }
             }
         }
         let mut cleanup_worktree = prepared.worktree.clone();
-        if let Some(a) = &changes_patch {
-            if let Some(head) = &a.head_commit {
-                cleanup_worktree.head_sha = head.clone();
-            }
-        }
         if !prepared.direct_workspace {
             let diagnostics = manager
                 .capture_integrity(&cleanup_worktree)
@@ -1143,7 +1122,6 @@ impl GeneralFinalizer {
             summary,
             checks,
             residual_gaps,
-            changes_patch,
             cleaned: false,
         })
     }
@@ -1165,6 +1143,7 @@ fn validate_direct_workspace_identity(prepared: &PreparedGeneralTask) -> Result<
     Ok(())
 }
 
+#[cfg(any())]
 fn finalize_direct_patch(prepared: &PreparedGeneralTask) -> Result<Option<ChangesPatch>, String> {
     if !prepared.repository.join(".git").exists() {
         return Ok(None);
@@ -1490,6 +1469,7 @@ fn ensure_directory_empty(path: &Path, code: &'static str) -> Result<(), String>
     Ok(())
 }
 
+#[cfg(any())]
 fn finalize_patch(prepared: &PreparedGeneralTask) -> Result<Option<ChangesPatch>, String> {
     let status = git_bytes(
         &prepared.worktree.path,
