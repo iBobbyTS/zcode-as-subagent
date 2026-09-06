@@ -744,24 +744,17 @@ fn general_manifest(input: &AgentSpawnInput, request_identity: &str) -> Result<G
         schema: GENERAL_TASK_SCHEMA.into(),
         agent_id: agent_id.clone(),
         repository,
-        base_ref: String::new(),
         access_mode: PermissionMode::from(input.permission_mode).access_mode(),
         permission_mode: input.permission_mode.into(),
         prompt: input.prompt.clone(),
-        repo_context: Vec::new(),
-        attachments: Vec::new(),
         // Validate caller scope before the daemon applies its execution policy.
         write_manifest,
         scratch_root: std::env::temp_dir().join("zcode-as-subagent").join("scratch"),
-        artifact_root: std::env::temp_dir().join("zcode-as-subagent").join("artifacts").join(agent_id),
         budget: Some({
             PermissionMode::from(input.permission_mode)
                 .access_mode()
                 .default_budget()
         }),
-        validation_commands: BTreeMap::new(),
-        retain_partial: false,
-        idempotency_key: request_identity.to_owned(),
     })
 }
 
