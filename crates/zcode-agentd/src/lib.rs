@@ -4801,27 +4801,6 @@ impl Scheduler {
             .cloned()
     }
 
-    /// Returns the bounded runtime stderr tail for an active task. This is a
-    /// diagnostic projection only; it is never used for task outcome or
-    /// persisted result text.
-    pub(crate) fn diagnostic_tail(&self, agent_id: &str) -> String {
-        self.inner
-            .state
-            .lock()
-            .unwrap()
-            .active
-            .get(agent_id)
-            .map(|active| {
-                active
-                    .runtime
-                    .diagnostic_tail()
-                    .chars()
-                    .take(4096)
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     pub fn shutdown_all(&self) {
         let agent_ids = self
             .inner
@@ -4854,6 +4833,10 @@ impl Scheduler {
     }
 
     fn record_failure(&self, agent_id: &str, message: String) {
+        eprintln!(
+            "[zcode-agentd] failure agent={agent_id}: {}",
+            bounded_error(&message)
+        );
         self.inner
             .state
             .lock()
@@ -4862,6 +4845,15 @@ impl Scheduler {
             .entry(agent_id.into())
             .or_insert(message);
     }
+}
+
+fn bounded_error(message: &str) -> String {
+    const MAX_ERROR_BYTES: usize = 4096;
+    let mut value = message.chars().take(MAX_ERROR_BYTES).collect::<String>();
+    if message.chars().count() > MAX_ERROR_BYTES {
+        value.push_str("…");
+    }
+    value
 }
 
 #[cfg(unix)]
