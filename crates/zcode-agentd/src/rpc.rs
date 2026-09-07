@@ -1012,6 +1012,7 @@ fn task_activity_view(
     phase: TaskPhase,
     snapshot: Option<PassiveActivitySnapshot>,
 ) -> TaskActivityView {
+    let terminal = phase == TaskPhase::Terminal;
     let state = match phase {
         TaskPhase::Queued => TaskActivityStateView::Queued,
         TaskPhase::Preparing => TaskActivityStateView::Preparing,
@@ -1041,8 +1042,12 @@ fn task_activity_view(
         state,
         last_runtime_event_at: snapshot.last_runtime_event_at,
         last_activity_age_ms: snapshot.last_activity_age_ms,
-        model_request_active: snapshot.model_request_active,
-        model_request_age_ms: snapshot.model_request_age_ms,
+        model_request_active: !terminal && snapshot.model_request_active,
+        model_request_age_ms: if terminal {
+            None
+        } else {
+            snapshot.model_request_age_ms
+        },
         model_last_delta_age_ms: snapshot.model_last_delta_age_ms,
         latest_text_tail: snapshot.latest_text_tail,
         latest_text_updated_at: snapshot.latest_text_updated_at,
@@ -1066,6 +1071,73 @@ fn task_activity_view(
         } else {
             TelemetryStatusView::Healthy
         },
+    }
+}
+
+#[cfg(test)]
+mod activity_projection_tests {
+    use super::{task_activity_view, TaskActivityStateView};
+    use crate::{PassiveActivitySnapshot, PassiveActivityWindow};
+    use zcode_agent_store::TaskPhase;
+
+    fn active_model_request_snapshot() -> PassiveActivitySnapshot {
+        PassiveActivitySnapshot {
+            revision: 7,
+            last_runtime_event_at: Some(1_000),
+            last_activity_age_ms: Some(250),
+            model_request_active: true,
+            model_request_age_ms: Some(900),
+            model_last_delta_age_ms: Some(300),
+            latest_text_tail: "preserved tail".into(),
+            latest_text_updated_at: Some(950),
+            latest_text_truncated: false,
+            latest_progress: Some("preserved progress".into()),
+            active_tools: Vec::new(),
+            oldest_active_tool_age_ms: None,
+            window_60s: PassiveActivityWindow {
+                reasoning_delta_events: 2,
+                ..PassiveActivityWindow::default()
+            },
+            telemetry_degraded: true,
+        }
+    }
+
+    #[test]
+    fn terminal_phase_clears_stale_model_request_activity_and_preserves_history() {
+        let activity =
+            task_activity_view(TaskPhase::Terminal, Some(active_model_request_snapshot()));
+
+        assert_eq!(activity.state, TaskActivityStateView::Terminal);
+        assert!(!activity.model_request_active);
+        assert_eq!(activity.model_request_age_ms, None);
+        assert_eq!(activity.last_runtime_event_at, Some(1_000));
+        assert_eq!(activity.last_activity_age_ms, Some(250));
+        assert_eq!(activity.model_last_delta_age_ms, Some(300));
+        assert_eq!(activity.latest_text_tail, "preserved tail");
+        assert_eq!(
+            activity.latest_progress.as_deref(),
+            Some("preserved progress")
+        );
+        assert_eq!(activity.window_60s.reasoning_delta_events, 2);
+    }
+
+    #[test]
+    fn running_phase_preserves_live_model_request_activity() {
+        let activity =
+            task_activity_view(TaskPhase::Running, Some(active_model_request_snapshot()));
+
+        assert_eq!(activity.state, TaskActivityStateView::Active);
+        assert!(activity.model_request_active);
+        assert_eq!(activity.model_request_age_ms, Some(900));
+    }
+
+    #[test]
+    fn terminal_phase_without_runtime_snapshot_is_inactive() {
+        let activity = task_activity_view(TaskPhase::Terminal, None);
+
+        assert_eq!(activity.state, TaskActivityStateView::Terminal);
+        assert!(!activity.model_request_active);
+        assert_eq!(activity.model_request_age_ms, None);
     }
 }
 
