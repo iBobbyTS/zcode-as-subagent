@@ -24,30 +24,40 @@ function output(valueToWrite) {
 }
 
 const DIAGNOSTIC_TAIL_BYTES = 16 * 1024;
+const DIAGNOSTIC_TOTAL_BYTES = 32 * 1024;
+const DIAGNOSTIC_LOG_NAMES = ['daemon.log', 'daemon-error.log'];
+
+function redactDiagnosticText(text) {
+  return text
+    .replace(/((?:token|secret|password|api[_-]?key|authorization|private[_-]?key)\s*[=:]\s*)([^\s,;"']+)/giu, '$1[REDACTED]')
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gu, '[REDACTED_PRIVATE_KEY]');
+}
 
 function diagnosticLogs(logDirectory) {
   const incomplete = [];
   if (!fs.existsSync(logDirectory)) return { directory: logDirectory, complete: false, incomplete: ['log_directory_missing'], files: [] };
-  let entries;
-  try { entries = fs.readdirSync(logDirectory, { withFileTypes: true }); }
-  catch (error) { return { directory: logDirectory, complete: false, incomplete: [`log_directory_unreadable:${error.code || 'error'}`], files: [] }; }
   const files = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || entry.isSymbolicLink()) continue;
-    const name = entry.name;
-    const rotated = /(?:\.\d+|\.gz|\.old)$/u.test(name);
+  let totalBytes = 0;
+  for (const name of DIAGNOSTIC_LOG_NAMES) {
+    const target = path.join(logDirectory, name);
+    const rotated = ['.1', '.old', '.gz'].some((suffix) => fs.existsSync(`${target}${suffix}`));
     if (rotated) incomplete.push(`log_rotated:${name}`);
+    if (!fs.existsSync(target)) continue;
     try {
-      const target = path.join(logDirectory, name);
       const stat = fs.statSync(target);
       const bytes = fs.readFileSync(target);
-      const start = Math.max(0, bytes.length - DIAGNOSTIC_TAIL_BYTES);
-      files.push({ name, bytes: stat.size, modified_at_ms: stat.mtimeMs, rotated, truncated: start > 0, tail: bytes.subarray(start).toString('utf8') });
+      const remaining = Math.max(0, DIAGNOSTIC_TOTAL_BYTES - totalBytes);
+      const take = Math.min(DIAGNOSTIC_TAIL_BYTES, remaining);
+      const start = Math.max(0, bytes.length - take);
+      const tail = redactDiagnosticText(bytes.subarray(start).toString('utf8'));
+      totalBytes += Buffer.byteLength(tail);
+      files.push({ name, bytes: stat.size, modified_at_ms: stat.mtimeMs, rotated, truncated: start > 0 || take < bytes.length, tail });
       if (start > 0) incomplete.push(`log_tail_truncated:${name}`);
     } catch (error) { incomplete.push(`log_unreadable:${name}:${error.code || 'error'}`); }
   }
   if (files.length === 0) incomplete.push('log_files_missing');
-  return { directory: logDirectory, complete: incomplete.length === 0, incomplete, files };
+  return { directory: logDirectory, complete: incomplete.length === 0, incomplete, total_bytes: totalBytes, files };
 }
 
 function diagnoseInput(args) {
@@ -79,6 +89,9 @@ async function diagnose(paths, args) {
       report.agent = {
         task: snapshot.task,
         activity: snapshot.activity,
+        session_id: snapshot.session_id ?? snapshot.zcode_session_id ?? snapshot.task?.session_id ?? snapshot.task?.zcode_session_id ?? null,
+        turn_id: snapshot.turn_id ?? snapshot.task?.turn_id ?? null,
+        request_ids: Array.isArray(snapshot.pending_requests) ? snapshot.pending_requests.map((request) => request.request_id).filter(Boolean) : [],
         pending_request_count: Array.isArray(snapshot.pending_requests) ? snapshot.pending_requests.length : null,
         result_available: snapshot.result_available ?? false,
         observed_at_ms: Date.now(),
@@ -92,10 +105,14 @@ async function diagnose(paths, args) {
   }
   if (outputDirectory) {
     const destination = path.resolve(outputDirectory);
-    fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
     const target = path.join(destination, 'diagnose.json');
     report.output = { path: target, complete: report.logs.complete && !report.agent?.unavailable };
-    fs.writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    try {
+      fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    } catch (error) {
+      report.output = { path: target, complete: false, error: { code: error.code || 'OUTPUT_WRITE_FAILED', message: error.message } };
+    }
   }
   return report;
 }
