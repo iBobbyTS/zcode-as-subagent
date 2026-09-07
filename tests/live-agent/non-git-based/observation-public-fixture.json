@@ -1,0 +1,106 @@
+[
+  {
+    "method": "session/event",
+    "params": {
+      "type": "model.streaming",
+      "eventId": "c1993dc1-2d0a-44e4-a25e-17ad30449549",
+      "seq": 6,
+      "sessionId": "probe-session",
+      "turnId": "turn_30e04b5e-afe3-41d8-981b-2dfddfb96d6f",
+      "payload": { "kind": "reasoning_delta", "delta": "The" }
+    }
+  },
+  {
+    "method": "session/event",
+    "params": {
+      "type": "model.streaming",
+      "eventId": "02611112-681b-4f51-a915-d24f0878476d",
+      "seq": 7,
+      "sessionId": "probe-session",
+      "turnId": "turn_30e04b5e-afe3-41d8-981b-2dfddfb96d6f",
+      "payload": {
+        "kind": "reasoning_delta",
+        "delta": " user wants a simple read-only verification: read sample.txt with the Read tool, run `pwd` via Bash, and report the first three words of the file. Plan mode is active, but these are read-only operations which are allowed. The plan workflow is for implementation planning, but this is just a quick read-only task — no planning needed. I should just do the read-only actions and report.\n\nThe instructions say in plan mode I must not make edits or run non-readonly tools. Read and pwd are both read-only, so"
+      }
+    }
+  },
+  {
+    "method": "session/event",
+    "params": {
+      "type": "model.streaming",
+      "eventId": "5f9cc431-da27-46ad-bfd1-0189ad032f24",
+      "seq": 8,
+      "sessionId": "probe-session",
+      "turnId": "turn_30e04b5e-afe3-41d8-981b-2dfddfb96d6f",
+      "payload": { "kind": "reasoning_delta", "delta": " they're fine.\n\nLet me do both in parallel: Read sample.txt and run pwd." }
+    }
+  },
+  {
+    "method": "session/event",
+    "params": {
+      "type": "model.streaming",
+      "eventId": "f23a4b1c-b242-4a25-b478-c6990dc5ccf5",
+      "seq": 14,
+      "sessionId": "probe-session",
+      "turnId": "turn_30e04b5e-afe3-41d8-981b-2dfddfb96d6f",
+      "payload": {
+        "kind": "tool_call",
+        "toolCallId": "call_6b20acbea1fd46479c98694a",
+        "toolName": "Read",
+        "input": { "file_path": "<probe-workspace>/sample.txt" }
+      }
+    }
+  },
+  {
+    "method": "session/event",
+    "params": {
+      "type": "model.streaming",
+      "eventId": "337e68e8-765d-4a2b-b9d5-b56d47d9f6f3",
+      "seq": 20,
+      "sessionId": "probe-session",
+      "turnId": "turn_30e04b5e-afe3-41d8-981b-2dfddfb96d6f",
+      "payload": {
+        "kind": "tool_call",
+        "toolCallId": "call_08532364582a4d2684124c91",
+        "toolName": "Bash",
+        "input": { "command": "pwd", "description": "Print current working directory" }
+      }
+    }
+  },
+  {
+    "method": "session/event",
+    "params": {
+      "type": "model.streaming",
+      "eventId": "5d722de5-419c-4ed7-86ae-d30a159a5e19",
+      "seq": 33,
+      "sessionId": "probe-session",
+      "turnId": "turn_30e04b5e-afe3-41d8-981b-2dfddfb96d6f",
+      "payload": { "kind": "reasoning_delta", "delta": "Both" }
+    }
+  },
+  {
+    "method": "session/event",
+    "params": {
+      "type": "model.streaming",
+      "eventId": "3ab183c0-64ab-4616-94a1-9f8f2cf7f3ee",
+      "seq": 34,
+      "sessionId": "probe-session",
+      "turnId": "turn_30e04b5e-afe3-41d8-981b-2dfddfb96d6f",
+      "payload": {
+        "kind": "reasoning_delta",
+        "delta": " done. First three words: \"Observation probe fixture\". Report concisely. No plan needed since this was a read-only verification task, not an implementation task. The plan workflow says to end with AskUserQuestion or ExitPlanMode, but this is a pure research/verification task, not implementation planning — ExitPlanMode is only for implementation plans. The task is complete; I just report findings. The guidance says \"Only use this tool when the task requires planning the implementation steps of a task that requires writing code. For research"
+      }
+    }
+  },
+  {
+    "method": "session/event",
+    "params": {
+      "type": "model.streaming",
+      "eventId": "35438301-ed7d-471c-9c0a-bc6ecf662520",
+      "seq": 35,
+      "sessionId": "probe-session",
+      "turnId": "turn_30e04b5e-afe3-41d8-981b-2dfddfb96d6f",
+      "payload": { "kind": "reasoning_delta", "delta": " tasks... do NOT use this tool.\" So I just answer." }
+    }
+  }
+]

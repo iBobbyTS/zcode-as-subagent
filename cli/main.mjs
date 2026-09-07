@@ -9,7 +9,7 @@ import { startService, stopService } from './service.mjs';
 import { callDaemon, parseDaemonInput } from './rpc.mjs';
 
 const HELP = `zas ${VERSION}\n\nUsage: zas <command> [options]\n\nCommands:\n  help, version               Show basic product information\n  init [--dry-run] [--resume] [--install-hooks] Install and configure the local service\n  hooks install [--dry-run]  Install ZCode policy hooks explicitly\n  install-mcp [codex] [--dry-run|--uninstall] Install or remove the Codex MCP configuration\n  status, diagnose            Inspect local service and runtime state\n  backup --output <dir>       Back up retained product data\n  restore --input <dir>       Verify and restore product data\n  uninstall                   Remove service registration; retain data\n  purge --yes                 Explicitly delete new product data\n  cleanup-legacy --yes        Delete old unpublished installation (no migration)\n`;
-const DAEMON_HELP = `  create/spawn, get/poll, list, send, respond, cancel, result, close\n                             Daemon calls accept --json '<object>' or JSON stdin\n                             list JSON requires repository (workspace is an alias)\n`;
+const DAEMON_HELP = `  create/spawn, get/poll, list, send, respond, cancel, result, close, observe\n                             Daemon calls accept --json '<object>' or JSON stdin\n                             list JSON requires repository (workspace is an alias)\n                             observe JSON requires only agent_id\n`;
 
 function value(args, name) {
   const index = args.indexOf(name);
@@ -289,7 +289,13 @@ export async function main(args) {
     output(installMcp(paths, { dryRun: args.includes('--dry-run'), uninstall: args.includes('--uninstall') })); return;
   }
   if (command === 'status') {
-    output({ installed: fs.existsSync(paths.state), launch_agent: fs.existsSync(paths.launchAgent), data: fs.existsSync(paths.data) }); return;
+    const local = { installed: fs.existsSync(paths.state), launch_agent: fs.existsSync(paths.launchAgent), data: fs.existsSync(paths.data) };
+    try {
+      output({ ...local, daemon_status: await callDaemon(process.env.ZCODE_AGENTD_SOCKET || paths.socket, 'status', {}) });
+    } catch (error) {
+      output({ ...local, daemon_status: null, daemon_error: { code: error.code || 'DAEMON_ERROR', message: error.message } });
+    }
+    return;
   }
   if (command === 'diagnose') {
     const report = await diagnose(paths, args.slice(1));

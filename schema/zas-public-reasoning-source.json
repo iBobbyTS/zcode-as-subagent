@@ -1,0 +1,14 @@
+{
+  "schema": "zas-public-reasoning-source/1",
+  "status": "VERIFIED_RUNTIME_PUBLIC",
+  "runtime_path": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+  "runtime_version": "3.11.2",
+  "runtime_sha256": "e9f1868c0fdb863537ed910ee3828b9be96b8c2fd805473f63b439e1113266b8",
+  "wire_method": "session/event",
+  "event_type_pointer": "/params/type",
+  "event_type": "model.streaming",
+  "event_discriminator_pointer": "/params/payload/kind",
+  "event_discriminator_value": "reasoning_delta",
+  "delta_pointer": "/params/payload/delta",
+  "explicitly_excluded_key": "encrypted_content"
+}

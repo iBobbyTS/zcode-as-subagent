@@ -35,8 +35,8 @@ supervisor.
 
 ## Public MCP catalog
 
-The nine tools are `zcode_subagent_status`, `zcode_subagent_spawn`,
-`zcode_subagent_poll`, `zcode_subagent_list`, `zcode_subagent_send`,
+The ten tools are `zcode_subagent_status`, `zcode_subagent_spawn`,
+`zcode_subagent_poll`, `zcode_subagent_list`, `zcode_subagent_observe`, `zcode_subagent_send`,
 `zcode_subagent_respond`, `zcode_subagent_cancel`, `zcode_subagent_result`,
 and `zcode_subagent_close`. Spawn accepts only `build`, `edit`, `plan`, or
 `yolo` permission modes (default `build`). `write_manifest` is optional for
@@ -46,6 +46,17 @@ read-only. A canonical workspace has one active Agent; a collision is reported
 as `WORKSPACE_BUSY` with the active id. Terminal results expose stable outcome,
 partial status, task reason code, and bounded result segments; use
 `offset`/`limit` (default and maximum 81920 bytes) for large text.
+
+`zcode_subagent_observe` is a suspicion-only, read-only snapshot. Call it with
+only `agent_id` when recent behavior may be looping; ordinary progress remains
+on `poll`. It returns at most the top three tool names by lifetime invocation
+count, the latest five calls per returned tool with bounded redacted arguments
+and no results, plus the newest 200 Unicode characters from the locally
+verified public reasoning stream. It does not classify progress or cancel a
+task. The same daemon projection is available as
+`zas observe --json '{"agent_id":"..."}'`. Status reports the observation
+protocol, bounds, default public collection, and whether the configured runtime
+source matches the verified local path and SHA-256.
 
 ## 已知限制：暂不支持恢复已结束的 session
 

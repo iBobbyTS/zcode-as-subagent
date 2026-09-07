@@ -31,6 +31,7 @@ use zcode_protocol::{
     SESSION_SUBSCRIBE,
 };
 
+pub mod observation;
 pub mod rpc;
 use zcode_agent_preparation::{
     general_launch_prompt, CompletionOutcome, GeneralCompletion, GeneralFinalizer,
@@ -231,19 +232,22 @@ struct PassiveActivityState {
     samples: HashMap<String, ActivitySample>,
     sample_order: VecDeque<String>,
     telemetry_degraded: bool,
+    observation: observation::ObservationState,
 }
 
 struct PassiveActivityTracker {
     state: Mutex<PassiveActivityState>,
     changed: Condvar,
+    runtime_source_verified: AtomicBool,
 }
 
 impl PassiveActivityTracker {
-    fn new() -> Self {
+    fn new(runtime_source_verified: bool) -> Self {
         let state = PassiveActivityState::default();
         Self {
             state: Mutex::new(state),
             changed: Condvar::new(),
+            runtime_source_verified: AtomicBool::new(runtime_source_verified),
         }
     }
 
@@ -253,6 +257,22 @@ impl PassiveActivityTracker {
 
     fn observe_at(&self, event: &RuntimeEvent, now: Instant, wall_now_ms: u64) {
         let mut state = self.state.lock().unwrap();
+        match event {
+            RuntimeEvent::Driver(Inbound::Message(WireMessage::Event(event))) => {
+                state.observation.observe_message(
+                    &event.method,
+                    &event.params,
+                    redact_sensitive_text,
+                );
+            }
+            RuntimeEvent::Driver(Inbound::Message(WireMessage::UnknownEvent { method, raw })) => {
+                let params = raw.get("params").unwrap_or(&serde_json::Value::Null);
+                state
+                    .observation
+                    .observe_message(method, params, redact_sensitive_text);
+            }
+            _ => {}
+        }
         state.revision = state.revision.saturating_add(1);
         state.last_runtime_event_at = Some((now, wall_now_ms));
         let parsed = parse_passive_activity(event);
@@ -468,6 +488,16 @@ impl PassiveActivityTracker {
             TerminalText::Missing
         } else {
             TerminalText::Visible(std::mem::take(&mut state.terminal_text))
+        }
+    }
+
+    fn observation_snapshot(&self) -> observation::ObservationSnapshot {
+        self.state.lock().unwrap().observation.snapshot()
+    }
+
+    fn confirm_runtime_source(&self, still_verified: bool) {
+        if !still_verified {
+            self.runtime_source_verified.store(false, Ordering::Release);
         }
     }
 }
@@ -840,6 +870,10 @@ impl RuntimeCommandError {
 // Keep only the remote code/message, never error.data or provider configuration.
 // Redact before clipping so a budget boundary cannot expose a credential suffix.
 fn redact_remote_message(message: &str) -> String {
+    bounded_prefix(&redact_sensitive_text(message), 1024)
+}
+
+fn redact_sensitive_text(message: &str) -> String {
     static PATTERNS: OnceLock<Vec<regex::Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| [
         r"(?s)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
@@ -851,7 +885,7 @@ fn redact_remote_message(message: &str) -> String {
     for pattern in patterns {
         redacted = pattern.replace_all(&redacted, "[REDACTED]").into_owned();
     }
-    bounded_prefix(&redacted, 1024)
+    redacted
 }
 
 impl std::error::Error for RuntimeCommandError {}
@@ -2195,13 +2229,14 @@ fn general_initial_prompt(prepared: &PreparedGeneralTask) -> Result<String, Sche
         .map_err(|error| SchedulerError::InvalidConfig(error.to_string()))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedulerConfig {
     pub global_max_agents: usize,
     pub per_workspace_max_agents: usize,
     pub stop_grace: Duration,
     pub bootstrap_timeout: Duration,
     pub control_timeout: Duration,
+    pub runtime_source: Option<PathBuf>,
 }
 
 impl Default for SchedulerConfig {
@@ -2212,6 +2247,7 @@ impl Default for SchedulerConfig {
             stop_grace: Duration::from_secs(1),
             bootstrap_timeout: Duration::from_secs(2),
             control_timeout: Duration::from_secs(2),
+            runtime_source: None,
         }
     }
 }
@@ -3423,7 +3459,9 @@ impl Scheduler {
         };
         let runtime_agent_id = format!("{}:{}", claim.task.agent_id, claim.owner_epoch);
         let runtime_lifecycle = Arc::new(RuntimeLifecycle::new(claim.owner_epoch));
-        let activity = Arc::new(PassiveActivityTracker::new());
+        let activity = Arc::new(PassiveActivityTracker::new(
+            observation::runtime_source_verified(self.inner.config.runtime_source.as_deref()),
+        ));
         let sink = Arc::new(StoreLifecycleSink::new(
             Arc::clone(&self.inner.store),
             claim.task.agent_id.clone(),
@@ -3465,6 +3503,9 @@ impl Scheduler {
                 });
             }
         };
+        activity.confirm_runtime_source(observation::runtime_source_verified(
+            self.inner.config.runtime_source.as_deref(),
+        ));
         let mcp_servers = Vec::new();
         let bootstrap_timeout = self.inner.config.bootstrap_timeout;
         let session = match if claim.task.zcode_session_id.is_some() {
@@ -4946,6 +4987,34 @@ impl Scheduler {
             .activities
             .get(agent_id)
             .map(|activity| activity.snapshot())
+    }
+
+    pub(crate) fn observation_snapshot(
+        &self,
+        agent_id: &str,
+    ) -> (observation::ObservationSnapshot, bool) {
+        let activity = self
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .activities
+            .get(agent_id)
+            .cloned();
+        match activity {
+            Some(activity) => (
+                activity.observation_snapshot(),
+                activity.runtime_source_verified.load(Ordering::Acquire),
+            ),
+            None => (
+                observation::ObservationSnapshot::unavailable(),
+                observation::runtime_source_verified(self.inner.config.runtime_source.as_deref()),
+            ),
+        }
+    }
+
+    pub(crate) fn runtime_source_verified(&self) -> bool {
+        observation::runtime_source_verified(self.inner.config.runtime_source.as_deref())
     }
 
     pub fn last_error(&self, agent_id: &str) -> Option<String> {
