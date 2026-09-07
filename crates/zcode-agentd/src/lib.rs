@@ -271,6 +271,9 @@ impl PassiveActivityTracker {
                     .observation
                     .observe_message(method, params, redact_sensitive_text);
             }
+            RuntimeEvent::Driver(Inbound::Malformed(_) | Inbound::OversizedLine { .. }) => {
+                state.observation.observe_loss();
+            }
             _ => {}
         }
         state.revision = state.revision.saturating_add(1);
@@ -5602,6 +5605,83 @@ sleep 2
             assert!(!record.contains(secret));
         }
         assert!(redact_remote_message(&"界".repeat(5000)).len() <= 1024);
+    }
+
+    #[test]
+    fn known_driver_loss_marks_observation_coverage_without_query_side_effects() {
+        let tracker = PassiveActivityTracker::new(true);
+        tracker.observe(&RuntimeEvent::Driver(Inbound::Message(WireMessage::Event(
+            zcode_protocol::EventEnvelope {
+                method: "session/event".into(),
+                params: serde_json::json!({
+                    "type":"model.streaming",
+                    "eventId":"reasoning-1",
+                    "turnId":"turn-1",
+                    "payload":{"kind":"reasoning_delta", "delta":"visible"}
+                }),
+            },
+        ))));
+        let before = tracker.observation_snapshot();
+        assert!(before.coverage.tool_history_complete);
+        assert!(before.coverage.reasoning_complete);
+
+        tracker.observe(&RuntimeEvent::Driver(Inbound::Malformed(
+            "invalid JSON".into(),
+        )));
+        tracker.observe(&RuntimeEvent::Driver(Inbound::OversizedLine {
+            bytes: 1024 * 1024 + 1,
+        }));
+        let after = tracker.observation_snapshot();
+        assert!(!after.coverage.tool_history_complete);
+        assert!(!after.coverage.reasoning_complete);
+        assert_eq!(after.coverage.dropped_events, 2);
+        assert_eq!(after.snapshot_seq, before.snapshot_seq + 2);
+        assert_eq!(tracker.observation_snapshot(), after);
+        assert_eq!(tracker.observation_snapshot(), after);
+    }
+
+    #[test]
+    fn near_limit_observation_does_not_starve_the_shared_cancel_lifecycle_lock() {
+        let lifecycle = Arc::new(RuntimeLifecycle::new(1));
+        let tracker = Arc::new(PassiveActivityTracker::new(true));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let worker_lifecycle = Arc::clone(&lifecycle);
+        let worker_tracker = Arc::clone(&tracker);
+        let worker_barrier = Arc::clone(&barrier);
+        let worker = thread::spawn(move || {
+            let _admission = worker_lifecycle.admit_event().unwrap();
+            worker_barrier.wait();
+            worker_tracker.observe(&RuntimeEvent::Driver(Inbound::Message(WireMessage::Event(
+                zcode_protocol::EventEnvelope {
+                    method: "session/event".into(),
+                    params: serde_json::json!({
+                        "type":"model.streaming",
+                        "eventId":"large-tool-1",
+                        "turnId":"turn-1",
+                        "payload":{
+                            "kind":"tool_call",
+                            "toolCallId":"call-1",
+                            "toolName":"Bash",
+                            "input":{"command":"x".repeat(900 * 1024)}
+                        }
+                    }),
+                },
+            ))));
+        });
+        barrier.wait();
+        let started = Instant::now();
+        lifecycle.request_stop(&TurnSnapshot {
+            generation: 1,
+            active: true,
+            boundary: None,
+        });
+        let elapsed = started.elapsed();
+        worker.join().unwrap();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cancel lifecycle lock waited {elapsed:?}"
+        );
+        assert!(tracker.observation_snapshot().tools[0].recent_calls[0].arguments_truncated);
     }
 
     #[test]

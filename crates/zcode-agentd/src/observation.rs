@@ -19,8 +19,13 @@ const MAX_IDENTITIES: usize = 65_536;
 const MAX_TOOL_TYPES: usize = 64;
 const MAX_RECENT_CALLS: usize = 5;
 const MAX_REASONING_CHARS: usize = 200;
+const MAX_REASONING_REDACTION_BYTES: usize = 64 * 1024;
 const MAX_ID_BYTES: usize = 512;
 const MAX_ARGUMENT_BYTES: usize = 4 * 1024;
+// The serialized argument JSON is embedded as one JSON string. Quotes and
+// backslashes can at most double this already-escaped prefix, leaving room for
+// the projection key and object envelope below the 4 KiB public cap.
+const MAX_ARGUMENT_PREVIEW_BYTES: usize = 2_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservationSnapshot {
@@ -113,8 +118,10 @@ pub struct ObservationState {
     seen_source_events: HashSet<String>,
     seen_calls: HashMap<String, (String, u64)>,
     tools: HashMap<String, ToolGroup>,
-    reasoning_tail: VecDeque<char>,
+    reasoning_raw: String,
+    reasoning_text: String,
     reasoning_truncated: bool,
+    reasoning_redaction_overflow: bool,
     tool_history_complete: bool,
     reasoning_complete: bool,
     dropped_events: u64,
@@ -128,8 +135,10 @@ impl Default for ObservationState {
             seen_source_events: HashSet::new(),
             seen_calls: HashMap::new(),
             tools: HashMap::new(),
-            reasoning_tail: VecDeque::new(),
+            reasoning_raw: String::new(),
+            reasoning_text: String::new(),
             reasoning_truncated: false,
+            reasoning_redaction_overflow: false,
             tool_history_complete: true,
             reasoning_complete: true,
             dropped_events: 0,
@@ -174,14 +183,31 @@ impl ObservationState {
                     self.bump_snapshot();
                     return;
                 };
-                let redacted = redact_text(delta);
-                for character in redacted.chars() {
-                    if self.reasoning_tail.len() == MAX_REASONING_CHARS {
-                        self.reasoning_tail.pop_front();
-                        self.reasoning_truncated = true;
-                    }
-                    self.reasoning_tail.push_back(character);
+                if self.reasoning_redaction_overflow
+                    || self.reasoning_raw.len().saturating_add(delta.len())
+                        > MAX_REASONING_REDACTION_BYTES
+                {
+                    self.reasoning_raw.clear();
+                    self.reasoning_text.clear();
+                    self.reasoning_truncated = true;
+                    self.reasoning_redaction_overflow = true;
+                    self.reasoning_complete = false;
+                    self.dropped_events = self.dropped_events.saturating_add(1);
+                    self.bump_snapshot();
+                    return;
                 }
+                self.reasoning_raw.push_str(delta);
+                let redacted = redact_text(&self.reasoning_raw);
+                let redacted_chars = redacted.chars().count();
+                self.reasoning_text = redacted
+                    .chars()
+                    .rev()
+                    .take(MAX_REASONING_CHARS)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                self.reasoning_truncated |= redacted_chars > MAX_REASONING_CHARS;
                 self.bump_snapshot();
             }
             Some("tool_call") => self.observe_tool(params, payload, redact_text),
@@ -257,6 +283,13 @@ impl ObservationState {
         self.bump_snapshot();
     }
 
+    pub fn observe_loss(&mut self) {
+        self.tool_history_complete = false;
+        self.reasoning_complete = false;
+        self.dropped_events = self.dropped_events.saturating_add(1);
+        self.bump_snapshot();
+    }
+
     fn bump_snapshot(&mut self) {
         self.snapshot_seq = self.snapshot_seq.saturating_add(1);
     }
@@ -279,7 +312,7 @@ impl ObservationState {
                 recent_calls: group.recent_calls.iter().cloned().collect(),
             })
             .collect();
-        let text = self.reasoning_tail.iter().collect::<String>();
+        let text = self.reasoning_text.clone();
         ObservationSnapshot {
             snapshot_seq: self.snapshot_seq,
             tools,
@@ -363,25 +396,21 @@ fn sanitize_arguments(
         })
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
-    if serde_json::to_vec(&sanitized).is_ok_and(|encoded| encoded.len() <= MAX_ARGUMENT_BYTES) {
+    let serialized = serde_json::to_string(&sanitized).unwrap_or_default();
+    if serialized.len() <= MAX_ARGUMENT_BYTES {
         return (sanitized, false, redacted_fields);
     }
-    let serialized = serde_json::to_string(&sanitized).unwrap_or_default();
-    let mut preview = serialized.chars().collect::<Vec<_>>();
+    let mut preview_end = serialized.len().min(MAX_ARGUMENT_PREVIEW_BYTES);
+    while !serialized.is_char_boundary(preview_end) {
+        preview_end -= 1;
+    }
     let mut projected = Map::new();
-    loop {
-        projected.insert(
-            "_truncated_preview".into(),
-            Value::String(preview.iter().collect()),
-        );
-        if serde_json::to_vec(&projected).is_ok_and(|encoded| encoded.len() <= MAX_ARGUMENT_BYTES) {
-            break;
-        }
-        if preview.is_empty() {
-            projected.clear();
-            break;
-        }
-        preview.pop();
+    projected.insert(
+        "_truncated_preview".into(),
+        Value::String(serialized[..preview_end].to_owned()),
+    );
+    if serde_json::to_vec(&projected).map_or(true, |encoded| encoded.len() > MAX_ARGUMENT_BYTES) {
+        projected.clear();
     }
     (projected, true, redacted_fields)
 }
@@ -417,6 +446,10 @@ mod tests {
 
     fn redact(value: &str) -> String {
         value.replace("secret-value", "[REDACTED]")
+    }
+
+    fn production_redact(value: &str) -> String {
+        crate::redact_sensitive_text(value)
     }
 
     fn event(id: &str, kind: &str, payload: Value) -> Value {
@@ -457,6 +490,107 @@ mod tests {
         );
         assert!(snapshot.reasoning.truncated);
         assert_eq!(snapshot.snapshot_seq, 2);
+    }
+
+    #[test]
+    fn reasoning_redacts_production_patterns_across_delta_boundaries() {
+        let cases = [
+            (vec!["api_key=", "abcdefgh tail"], vec!["abcdefgh"]),
+            (
+                vec!["Authorization: Bearer abc", "defgh tail"],
+                vec!["abcdefgh"],
+            ),
+            (
+                vec!["visit https://user:", "pass@example.test/path tail"],
+                vec!["user:pass", "example.test/path"],
+            ),
+            (
+                vec![
+                    "-----BEGIN PRIVATE KEY-----\nabc",
+                    "def\n-----END PRIVATE KEY----- tail",
+                ],
+                vec!["abcdef", "BEGIN PRIVATE KEY", "END PRIVATE KEY"],
+            ),
+        ];
+        for (case, (chunks, forbidden)) in cases.into_iter().enumerate() {
+            let mut state = ObservationState::default();
+            for (index, chunk) in chunks.into_iter().enumerate() {
+                state.observe_message(
+                    "session/event",
+                    &event(
+                        &format!("{case}-{index}"),
+                        "reasoning_delta",
+                        serde_json::json!({"delta":chunk}),
+                    ),
+                    production_redact,
+                );
+            }
+            let snapshot = state.snapshot();
+            assert!(snapshot.reasoning.text.contains("[REDACTED]"));
+            for secret in forbidden {
+                assert!(
+                    !snapshot.reasoning.text.contains(secret),
+                    "case {case} leaked {secret}"
+                );
+            }
+            assert!(snapshot.coverage.reasoning_complete);
+        }
+    }
+
+    #[test]
+    fn reasoning_redacts_before_applying_the_unicode_tail() {
+        let mut state = ObservationState::default();
+        state.observe_message(
+            "session/event",
+            &event(
+                "1",
+                "reasoning_delta",
+                serde_json::json!({"delta":format!("{} api_key=", "中🙂".repeat(130))}),
+            ),
+            production_redact,
+        );
+        state.observe_message(
+            "session/event",
+            &event(
+                "2",
+                "reasoning_delta",
+                serde_json::json!({"delta":"abcdefgh tail"}),
+            ),
+            production_redact,
+        );
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.reasoning.char_count, 200);
+        assert!(snapshot.reasoning.truncated);
+        assert!(snapshot.reasoning.text.ends_with("[REDACTED] tail"));
+        assert!(!snapshot.reasoning.text.contains("abcdefgh"));
+    }
+
+    #[test]
+    fn reasoning_redaction_budget_fails_closed_with_explicit_coverage_loss() {
+        let mut state = ObservationState::default();
+        state.observe_message(
+            "session/event",
+            &event(
+                "1",
+                "reasoning_delta",
+                serde_json::json!({"delta":"x".repeat(MAX_REASONING_REDACTION_BYTES)}),
+            ),
+            production_redact,
+        );
+        state.observe_message(
+            "session/event",
+            &event(
+                "2",
+                "reasoning_delta",
+                serde_json::json!({"delta":"api_key=must-not-leak"}),
+            ),
+            production_redact,
+        );
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.reasoning.text, "");
+        assert!(snapshot.reasoning.truncated);
+        assert!(!snapshot.coverage.reasoning_complete);
+        assert_eq!(snapshot.coverage.dropped_events, 1);
     }
 
     #[test]
@@ -535,6 +669,36 @@ mod tests {
         let call = &state.snapshot().tools[0].recent_calls[0];
         assert!(call.arguments_truncated);
         assert!(serde_json::to_vec(&call.arguments).unwrap().len() <= MAX_ARGUMENT_BYTES);
+    }
+
+    #[test]
+    fn near_driver_limit_arguments_use_bounded_linear_projection_work() {
+        for size in [256 * 1024, 900 * 1024] {
+            let mut state = ObservationState::default();
+            let payload = serde_json::json!({
+                "toolCallId":"1",
+                "toolName":"Bash",
+                "input":{"command":"x".repeat(size), "token":"must-not-copy"}
+            });
+            let started = std::time::Instant::now();
+            state.observe_message(
+                "session/event",
+                &event("1", "tool_call", payload),
+                production_redact,
+            );
+            let elapsed = started.elapsed();
+            let snapshot = state.snapshot();
+            let call = &snapshot.tools[0].recent_calls[0];
+            assert!(call.arguments_truncated);
+            assert!(serde_json::to_vec(&call.arguments).unwrap().len() <= MAX_ARGUMENT_BYTES);
+            assert!(!serde_json::to_string(&call.arguments)
+                .unwrap()
+                .contains("must-not-copy"));
+            assert!(
+                elapsed < std::time::Duration::from_secs(5),
+                "{size} bytes took {elapsed:?}"
+            );
+        }
     }
 
     #[test]
