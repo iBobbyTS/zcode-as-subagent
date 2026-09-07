@@ -96,10 +96,10 @@ async function diagnose(paths, args) {
       report.agent = {
         task: snapshot.task,
         activity: snapshot.activity,
-        session_id: snapshot.session_id ?? snapshot.zcode_session_id ?? snapshot.task?.session_id ?? snapshot.task?.zcode_session_id ?? null,
-        turn_id: snapshot.turn_id ?? snapshot.task?.turn_id ?? null,
+        session_id: snapshot.task?.session_id ?? null,
+        turn_id: snapshot.task?.turn_id ?? null,
         request_ids: [snapshot.__request_id, ...(Array.isArray(snapshot.pending_requests) ? snapshot.pending_requests.map((request) => request.request_id).filter(Boolean) : [])].filter(Boolean),
-        identifiers_complete: Boolean(snapshot.__request_id),
+        identifiers_complete: Boolean(snapshot.task?.session_id || snapshot.task?.turn_id || (Array.isArray(snapshot.pending_requests) && snapshot.pending_requests.some((request) => request.request_id))),
         pending_request_count: Array.isArray(snapshot.pending_requests) ? snapshot.pending_requests.length : null,
         result_available: snapshot.result_available ?? false,
         observed_at_ms: Date.now(),

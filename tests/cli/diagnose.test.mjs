@@ -49,7 +49,7 @@ test('agent diagnose reads only the public poll projection and exports a bounded
     assert.equal(report.agent.task.agent_id, 'agent-1');
     assert.equal(report.agent.request_ids.length, 1);
     assert.match(report.agent.request_ids[0], /^cli-/u);
-    assert.equal(report.agent.identifiers_complete, true);
+    assert.equal(report.agent.identifiers_complete, false);
     assert.equal(report.logs.complete, false);
     assert.ok(report.logs.incomplete.some((reason) => reason.startsWith('log_rotated:')));
     assert.ok(report.logs.incomplete.includes('log_rotated:daemon-error.log'));
