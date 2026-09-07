@@ -1676,9 +1676,6 @@ fn spawn_event_pump(
                 if is_exit_boundary {
                     driver.wait_diagnostics(Duration::from_secs(1));
                 }
-                if is_exit_boundary {
-                    driver.wait_diagnostics(Duration::from_secs(1));
-                }
                 let terminal = match &event {
                     Inbound::ChildExited(exit) => {
                         match observe_process_group(driver.identity().pgid) {
