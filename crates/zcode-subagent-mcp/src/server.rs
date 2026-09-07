@@ -14,6 +14,7 @@ use std::{
     },
     time::Duration,
 };
+use uuid::Uuid;
 use zcode_agent_preparation::{GeneralTaskManifest, PermissionMode, GENERAL_TASK_SCHEMA};
 use zcode_agent_store::TaskOutcome;
 use zcode_agentd::rpc::{
@@ -614,6 +615,10 @@ impl SubagentMcp {
         }
     }
 
+    fn generated_message_id(&self) -> String {
+        format!("subagent-message-{}", Uuid::new_v4())
+    }
+
     fn rpc(&self, method: RpcMethod) -> Result<RpcSuccess, String> {
         let request = RpcRequest {
             version: RPC_VERSION,
@@ -883,11 +888,11 @@ impl SubagentMcp {
 
     #[tool(
         name = "zcode_subagent_send",
-        description = "Queue an idempotent bounded message for a running task",
+        description = "Queue a bounded message for a running task",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
-            idempotent_hint = true,
+            idempotent_hint = false,
             open_world_hint = false
         )
     )]
@@ -896,12 +901,9 @@ impl SubagentMcp {
         Parameters(input): Parameters<AgentSendInput>,
     ) -> Result<Json<AgentSendOutput>, String> {
         validate_text(&input.content, "content", MAX_MESSAGE_BYTES)?;
-        let message_id = input.message_id.unwrap_or_else(|| {
-            format!(
-                "subagent-message-{}",
-                self.next_request.fetch_add(1, Ordering::Relaxed)
-            )
-        });
+        let message_id = input
+            .message_id
+            .unwrap_or_else(|| self.generated_message_id());
         match self.rpc(RpcMethod::TaskMessage(MessageInput {
             agent_id: input.agent_id.clone(),
             message_id,
@@ -1041,7 +1043,9 @@ pub async fn serve_stdio(
 mod contract_default_tests {
     use super::{
         default_result_limit, AgentListInput, AgentPollInput, AgentResultInput, AgentSendInput,
+        SubagentMcp,
     };
+    use std::{collections::HashSet, path::PathBuf, time::Duration};
 
     #[test]
     fn omitted_public_fields_use_the_frozen_defaults() {
@@ -1070,5 +1074,27 @@ mod contract_default_tests {
         }))
         .unwrap();
         assert!(send.message_id.is_none());
+    }
+
+    #[test]
+    fn generated_message_ids_are_unique_across_facades_and_restart() {
+        let facade_a = SubagentMcp::new(PathBuf::from("/tmp/a.sock"), Duration::from_secs(1));
+        let facade_b = SubagentMcp::new(PathBuf::from("/tmp/b.sock"), Duration::from_secs(1));
+        let id_a = facade_a.generated_message_id();
+        let id_b = facade_b.generated_message_id();
+        let restarted = SubagentMcp::new(PathBuf::from("/tmp/a.sock"), Duration::from_secs(1));
+        let ids = [
+            id_a,
+            id_b,
+            restarted.generated_message_id(),
+            restarted.generated_message_id(),
+        ];
+        assert_eq!(ids.len(), ids.iter().collect::<HashSet<_>>().len());
+        assert_eq!(
+            restarted
+                .next_request
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 }
