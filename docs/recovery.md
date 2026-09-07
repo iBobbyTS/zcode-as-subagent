@@ -18,6 +18,13 @@ as a complete empty lifetime. A runtime path or SHA-256 mismatch makes the
 observation source unavailable and sets the status capability to false. Use
 `poll` and `result` for durable lifecycle facts.
 
+Within one daemon lifetime, observation retains at most 64 KiB of accumulated
+public reasoning source so cross-delta redaction can be applied before the
+200-character projection. If the next delta would exceed that budget, the
+tracker clears its reasoning text, sets `reasoning_complete=false`, increments
+`dropped_events`, and keeps later reasoning text disabled for that tracker.
+This is a bounded fail-closed limit, not an unlimited rolling reasoning tail.
+
 ## Data and terminal history
 
 For a consistent SQLite backup, stop the sole daemon and preserve the database with any WAL/SHM companions. Terminal history is read through `zcode_subagent_result` and running state through poll. 恢复已结束的 session 暂不可用；发送恢复失败时保留原终态历史，具体限制见下文。 Never read private stored locators directly.
