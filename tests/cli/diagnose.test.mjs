@@ -106,7 +106,7 @@ test('diagnostic redacts quoted bearer and JSON secret values', () => {
   assert.match(report.files[0].tail, /REDACTED/u);
 });
 
-test('diagnostic preserves legacy multiline redaction and partial tail text', () => {
+test('diagnostic preserves legacy multiline redaction and marks partial failure records', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-partial-'));
   const logs = path.join(home, 'logs');
   fs.mkdirSync(logs);
@@ -117,7 +117,8 @@ test('diagnostic preserves legacy multiline redaction and partial tail text', ()
   assert.equal(report.files[0].truncated, true);
   assert.match(report.files[0].tail, /\[REDACTED_PRIVATE_KEY\]/);
   assert.doesNotMatch(report.files[0].tail, /LEGACY_PRIVATE_VALUE/);
-  assert.ok(report.files[0].tail.endsWith('"message":"unfinished'));
+  assert.ok(report.files[0].tail.endsWith('[INCOMPLETE_FAILURE_RECORD]'));
+  assert.ok(report.incomplete.includes('record_incomplete:daemon.log'));
   assert.ok(Buffer.byteLength(report.files[0].tail) <= 16 * 1024);
 });
 
@@ -201,6 +202,59 @@ test('recent structured failures are redacted in global and agent diagnostic tai
       assert.match(decoded.stderr_tail, /REDACTED/);
       assert.ok(Buffer.byteLength(tail) <= 16 * 1024);
       if (scope.length) assert.equal(report.agent.diagnostics.status, 'found');
+    }
+  });
+});
+
+test('complete producer records larger than the display window are redacted before clipping', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-large-secret-'));
+  const paths = pathsFor(home);
+  fs.mkdirSync(paths.logs);
+  await withDaemon(paths, statusOrTask, async () => {
+    for (const padding of ['x', '\u0001']) {
+      const failure = {
+        agent_id: 'Agent-A', session_id: null, stage: 'bootstrap', error_code: 'SESSION_START_FAILED',
+        message: padding.repeat(3000),
+        stderr_tail: padding.repeat(16000) + JSON.stringify({ api_key: 'LONG_RECORD_SECRET' }),
+      };
+      assert.ok(Buffer.byteLength(failure.message) <= 4096);
+      assert.ok(Buffer.byteLength(failure.stderr_tail) <= 16384);
+      const line = '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify(failure) + '\n';
+      assert.ok(Buffer.byteLength(line) > 16 * 1024 + 256);
+      assert.ok(Buffer.byteLength(line) < 192 * 1024);
+      // Force a nonzero bounded read offset while retaining the complete failure.
+      fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), 'old-log\n'.repeat(40000) + line);
+      for (const scope of [[], ['--agent', 'Agent-A']]) {
+        const report = await diagnose(paths, [...scope, '--output', path.join(home, 'export')]);
+        const tail = report.logs.files[0].tail;
+        assert.equal(report.logs.files[0].truncated, true);
+        assert.ok(Buffer.byteLength(tail) <= 16 * 1024);
+        assert.match(tail, /REDACTED/);
+        assert.doesNotMatch(JSON.stringify(report), /LONG_RECORD_SECRET/);
+        assert.doesNotMatch(fs.readFileSync(report.output.path, 'utf8'), /LONG_RECORD_SECRET/);
+        if (scope.length) assert.equal(report.agent.diagnostics.status, 'found');
+      }
+    }
+  });
+});
+
+test('unfinished structured failure records never fall back to escaped raw secrets', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-partial-secret-'));
+  const paths = pathsFor(home);
+  fs.mkdirSync(paths.logs);
+  const record = { agent_id: 'Agent-A', message: 'x'.repeat(3000), stderr_tail: 'x'.repeat(16000) + JSON.stringify({ api_key: 'PARTIAL_RECORD_SECRET' }) };
+  // A possible intermediate append: the embedded credential is written, but
+  // the outer JSON closing quote/brace and terminating newline are not yet.
+  fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify(record).slice(0, -2));
+  await withDaemon(paths, statusOrTask, async () => {
+    for (const scope of [[], ['--agent', 'Agent-A']]) {
+      const report = await diagnose(paths, [...scope, '--output', path.join(home, 'export')]);
+      assert.equal(report.logs.complete, false);
+      assert.ok(report.logs.incomplete.includes('record_incomplete:daemon-error.log'));
+      assert.match(report.logs.files[0].tail, /INCOMPLETE_FAILURE_RECORD/);
+      assert.doesNotMatch(JSON.stringify(report), /PARTIAL_RECORD_SECRET/);
+      assert.doesNotMatch(fs.readFileSync(report.output.path, 'utf8'), /PARTIAL_RECORD_SECRET/);
+      if (scope.length) assert.equal(report.agent.diagnostics.status, 'target_record_missing');
     }
   });
 });

@@ -45,17 +45,21 @@ function redactFailureFields(record) {
 }
 
 function redactDiagnosticTail(text) {
+  let incomplete = false;
   const decoded = text.split('\n').map((line) => {
     const match = line.match(/^(\[zcode-agentd\] failure agent=[^:\r\n]+: )(.+)$/u);
-    if (match) {
+    if (match && match[2].startsWith('{')) {
       try {
         const record = JSON.parse(match[2]);
         if (record && typeof record.agent_id === 'string') return redactDiagnosticText(match[1]) + redactFailureFields(record);
-      } catch { /* Keep legacy and partial records on the existing text path. */ }
+      } catch {
+        incomplete = true;
+        return match[1] + '[INCOMPLETE_FAILURE_RECORD]';
+      }
     }
     return line;
   }).join('\n');
-  return redactDiagnosticText(decoded);
+  return { text: redactDiagnosticText(decoded), incomplete };
 }
 
 function diagnosticLogs(logDirectory) {
@@ -81,14 +85,24 @@ function diagnosticLogs(logDirectory) {
       const remaining = Math.max(0, DIAGNOSTIC_TOTAL_BYTES - totalBytes);
       const take = Math.min(DIAGNOSTIC_TAIL_BYTES, remaining);
       const start = Math.max(0, stat.size - take);
-      const readStart = Math.max(0, start - 256);
+      // A complete producer record can exceed the display window. Keep a
+      // bounded record-sized lookbehind so its prefix survives until decoding.
+      const readStart = Math.max(0, start - DIAGNOSTIC_RECORD_BYTES);
       const readLength = Math.min(take + (start - readStart), stat.size - readStart);
       const fd = fs.openSync(target, 'r');
       const buffer = Buffer.alloc(readLength);
       const read = fs.readSync(fd, buffer, 0, readLength, readStart);
       fs.closeSync(fd);
-      const redacted = redactDiagnosticTail(buffer.subarray(0, read).toString('utf8'));
-      const encoded = Buffer.from(redacted, 'utf8');
+      let decodeStart = Math.max(0, start - 256) - readStart;
+      if (decodeStart > 0) {
+        const lineStart = buffer.lastIndexOf(0x0a, decodeStart - 1) + 1;
+        if (buffer.subarray(lineStart, read).toString('utf8').startsWith('[zcode-agentd] failure agent=')) decodeStart = lineStart;
+      }
+      // Legacy text keeps its original lookbehind; known records are decoded
+      // (or marked incomplete) before any display clipping can hide the prefix.
+      const redacted = redactDiagnosticTail(buffer.subarray(decodeStart, read).toString('utf8'));
+      if (redacted.incomplete) incomplete.push(`record_incomplete:${name}`);
+      const encoded = Buffer.from(redacted.text, 'utf8');
       let tailStart = Math.max(0, encoded.length - Math.min(take, remaining));
       while (tailStart < encoded.length && (encoded[tailStart] & 0xc0) === 0x80) tailStart += 1;
       const bounded = encoded.subarray(tailStart);
