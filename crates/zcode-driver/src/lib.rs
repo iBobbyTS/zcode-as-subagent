@@ -392,7 +392,7 @@ impl Driver {
         String::from_utf8_lossy(&self.diagnostics.lock().unwrap()).into_owned()
     }
 
-    fn wait_diagnostics(&self, timeout: Duration) {
+    pub fn wait_diagnostics(&self, timeout: Duration) {
         let (done, cvar) = &*self.diagnostics_done;
         let guard = done.lock().unwrap();
         let _ = cvar.wait_timeout_while(guard, timeout, |finished| !*finished);

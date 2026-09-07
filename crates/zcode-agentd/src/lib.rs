@@ -1673,6 +1673,12 @@ fn spawn_event_pump(
                 }
                 turn_tracker.observe(&event);
                 let is_exit_boundary = matches!(event, Inbound::ChildExited(_));
+                if is_exit_boundary {
+                    driver.wait_diagnostics(Duration::from_secs(1));
+                }
+                if is_exit_boundary {
+                    driver.wait_diagnostics(Duration::from_secs(1));
+                }
                 let terminal = match &event {
                     Inbound::ChildExited(exit) => {
                         match observe_process_group(driver.identity().pgid) {
@@ -1839,6 +1845,7 @@ pub trait ManagedRuntime: Send + Sync + 'static {
     fn diagnostic_tail(&self) -> String {
         String::new()
     }
+    fn wait_diagnostics(&self, _timeout: Duration) {}
     fn bootstrap_session(
         &self,
         _job: &TaskRecord,
@@ -1933,6 +1940,10 @@ impl ManagedRuntime for RuntimeOwner {
 
     fn diagnostic_tail(&self) -> String {
         self.driver.diagnostic_tail()
+    }
+
+    fn wait_diagnostics(&self, timeout: Duration) {
+        self.driver.wait_diagnostics(timeout);
     }
 
     fn bootstrap_session(
@@ -4835,13 +4846,11 @@ impl Scheduler {
 
     fn record_failure(&self, agent_id: &str, message: String) {
         let bounded = bounded_error(&message);
-        self.inner
-            .state
-            .lock()
-            .unwrap()
-            .failures
-            .entry(agent_id.into())
-            .or_insert(message);
+        update_latest_failure(
+            &mut self.inner.state.lock().unwrap().failures,
+            agent_id,
+            message,
+        );
         let line = format!("[zcode-agentd] failure agent={agent_id}: {bounded}\n");
         let _ = spawn_failure_log(line, || io::stderr());
     }
@@ -4863,6 +4872,10 @@ fn bounded_error(message: &str) -> String {
     format!("{}{}", &message[..end], MARKER)
 }
 
+fn update_latest_failure(failures: &mut HashMap<String, String>, agent_id: &str, message: String) {
+    failures.insert(agent_id.into(), message);
+}
+
 fn spawn_failure_log<W, F>(line: String, writer: F) -> io::Result<std::thread::JoinHandle<()>>
 where
     W: Write + Send + 'static,
@@ -4878,7 +4891,8 @@ where
 
 #[cfg(test)]
 mod failure_log_tests {
-    use super::{bounded_error, spawn_failure_log};
+    use super::{bounded_error, spawn_failure_log, update_latest_failure};
+    use std::collections::HashMap;
     use std::io::{self, Write};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -4931,6 +4945,14 @@ mod failure_log_tests {
         assert!(started.elapsed() < Duration::from_millis(100));
         release_tx.send(()).unwrap();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn latest_failure_replaces_previous_failure() {
+        let mut failures = HashMap::new();
+        update_latest_failure(&mut failures, "agent", "first".into());
+        update_latest_failure(&mut failures, "agent", "latest".into());
+        assert_eq!(failures.get("agent").map(String::as_str), Some("latest"));
     }
 }
 
