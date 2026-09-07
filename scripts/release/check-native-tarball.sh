@@ -22,6 +22,11 @@ esac
 mkdir -p "$evidence_dir"
 
 tar -tzf "$package_file" > "$evidence_dir/contents.txt"
+grep -qx 'package/bin/zas.mjs' "$evidence_dir/contents.txt"
+if grep -qx 'package/bin/zcode-as-subagent.mjs' "$evidence_dir/contents.txt"; then
+  echo 'removed CLI entry found in release material' >&2
+  exit 1
+fi
 grep -qx 'package/npm/native/darwin-arm64/zcode-as-subagentd' .agent-work/evidence/npm-tarball/contents.txt
 grep -qx 'package/npm/native/darwin-arm64/zcode-as-subagent-mcp' .agent-work/evidence/npm-tarball/contents.txt
 if grep -Eq '(^|/)(\.agent-work|workspace|target|node_modules|\.npm|.*\.sqlite3|.*\.log|.*credentials|.*runtime)' .agent-work/evidence/npm-tarball/contents.txt; then

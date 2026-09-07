@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-CLI = ROOT / "bin" / "zcode-as-subagent.mjs"
+CLI = ROOT / "bin" / "zas.mjs"
 
 
 def cli_call(method: str, payload: dict) -> dict:

@@ -25,9 +25,11 @@ test_home=$(mktemp -d)
 trap 'rm -rf "$prefix" "$test_home"' EXIT INT TERM
 
 HOME="$test_home" npm install --global --prefix "$prefix" "$package_file" > "$evidence_dir/install.log"
-HOME="$test_home" "$prefix/bin/zcode-as-subagent" status > "$evidence_dir/status.json"
-HOME="$test_home" "$prefix/bin/zcode-as-subagent" init --dry-run > "$evidence_dir/dry-run.json"
-HOME="$test_home" "$prefix/bin/zcode-as-subagent" init > "$evidence_dir/init.json"
+test -x "$prefix/bin/zas"
+test ! -e "$prefix/bin/zcode-as-subagent"
+HOME="$test_home" "$prefix/bin/zas" status > "$evidence_dir/status.json"
+HOME="$test_home" "$prefix/bin/zas" init --dry-run > "$evidence_dir/dry-run.json"
+HOME="$test_home" "$prefix/bin/zas" init > "$evidence_dir/init.json"
 
 daemon="$prefix/lib/node_modules/zcode-as-subagent/npm/native/darwin-arm64/zcode-as-subagentd"
 facade="$prefix/lib/node_modules/zcode-as-subagent/npm/native/darwin-arm64/zcode-as-subagent-mcp"
