@@ -3839,7 +3839,7 @@ impl Scheduler {
             agent_id,
             sink,
             route,
-            runtime,
+            runtime: _runtime,
         } = target;
         let TerminalDecision {
             terminal,
@@ -3926,20 +3926,6 @@ impl Scheduler {
                     && completion.outcome != CompletionOutcome::Completed
                 {
                     completion.reason_code = Some(reason);
-                }
-                if completion.outcome != CompletionOutcome::Completed {
-                    let diagnostics = runtime
-                        .diagnostic_tail()
-                        .chars()
-                        .filter(|character| {
-                            !character.is_control() || *character == '\n' || *character == '\t'
-                        })
-                        .take(4096)
-                        .collect::<String>();
-                    if !diagnostics.trim().is_empty() {
-                        completion.summary.push_str("\n[diagnostic] ");
-                        completion.summary.push_str(diagnostics.trim());
-                    }
                 }
                 let reap_after_persist = completion.cleaned && process_group_reaped;
                 #[cfg(test)]

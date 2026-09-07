@@ -1089,16 +1089,18 @@ fn platform_observe_process_group(_pgid: i32) -> io::Result<Vec<ProcessIdentity>
 
 fn drain_stderr(mut stderr: impl Read + Send + 'static, diagnostics: Arc<Mutex<Vec<u8>>>) {
     const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
-    let mut retained = Vec::with_capacity(MAX_DIAGNOSTIC_BYTES);
     let mut buffer = [0u8; 4096];
     while let Ok(count) = stderr.read(&mut buffer) {
         if count == 0 {
             break;
         }
-        let remaining = MAX_DIAGNOSTIC_BYTES.saturating_sub(retained.len());
-        retained.extend_from_slice(&buffer[..count.min(remaining)]);
+        let mut retained = diagnostics.lock().unwrap();
+        retained.extend_from_slice(&buffer[..count]);
+        if retained.len() > MAX_DIAGNOSTIC_BYTES {
+            let split = retained.len() - MAX_DIAGNOSTIC_BYTES;
+            retained.drain(..split);
+        }
     }
-    *diagnostics.lock().unwrap() = retained;
 }
 impl Drop for Driver {
     fn drop(&mut self) {
@@ -1627,6 +1629,45 @@ mod tests {
             .unwrap();
         assert_eq!(response.id, WireId::Integer(1));
         d.stop().unwrap();
+    }
+
+    #[test]
+    fn diagnostic_tail_is_live_and_retains_latest_bytes() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "printf 'first' >&2; sleep 1; printf 'second' >&2; sleep 1",
+        ]);
+        let driver = Driver::spawn(command).unwrap();
+        let first_deadline = Instant::now() + Duration::from_secs(1);
+        while !driver.diagnostic_tail().contains("first") {
+            assert!(
+                Instant::now() < first_deadline,
+                "stderr tail was not readable while running"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let second_deadline = Instant::now() + Duration::from_secs(2);
+        while !driver.diagnostic_tail().contains("second") {
+            assert!(
+                Instant::now() < second_deadline,
+                "stderr tail did not include later chunk"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(driver.diagnostic_tail().ends_with("firstsecond"));
+        driver.stop().unwrap();
+    }
+
+    #[test]
+    fn diagnostic_tail_is_bounded_to_latest_output_after_fast_exit() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "head -c 20000 /dev/zero | tr '\\0' x >&2"]);
+        let driver = Driver::spawn(command).unwrap();
+        assert_eq!(driver.wait().unwrap(), Some(0));
+        let tail = driver.diagnostic_tail();
+        assert_eq!(tail.len(), 16 * 1024);
+        assert!(tail.bytes().all(|byte| byte == b'x'));
     }
 
     #[test]
