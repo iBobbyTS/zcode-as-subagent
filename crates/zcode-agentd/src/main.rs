@@ -14,13 +14,15 @@ use std::{
 };
 use zcode_agent_store::Store;
 use zcode_agentd::{
-    rpc::ServerOptions, CommandRuntimeFactory, Daemon, RuntimeFactory, Scheduler, SchedulerConfig,
+    configure_diagnostic_log, rpc::ServerOptions, CommandRuntimeFactory, Daemon, RuntimeFactory,
+    Scheduler, SchedulerConfig,
 };
 
 struct Config {
     database: PathBuf,
     socket: PathBuf,
     runtime: Option<PathBuf>,
+    diagnostic_log: Option<PathBuf>,
 }
 
 const PRODUCTION_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(90);
@@ -31,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     signal_hook::flag::register(SIGINT, Arc::clone(&shutdown_requested))?;
     signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown_requested))?;
     let config = parse_config()?;
+    configure_diagnostic_log(config.diagnostic_log.clone());
     wait_for_startup_test_gate(&shutdown_requested)?;
     if shutdown_requested.load(std::sync::atomic::Ordering::Acquire) {
         return Ok(());
@@ -109,6 +112,7 @@ fn parse_config() -> io::Result<Config> {
     let mut database = env::var_os("ZCODE_AGENTD_STORE").map(PathBuf::from);
     let mut socket = env::var_os("ZCODE_AGENTD_SOCKET").map(PathBuf::from);
     let mut runtime = env::var_os("ZCODE_RUNTIME_PATH").map(PathBuf::from);
+    let mut diagnostic_log = None;
     let mut arguments = env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         let value = arguments.next().ok_or_else(|| {
@@ -121,6 +125,7 @@ fn parse_config() -> io::Result<Config> {
             "--database" => database = Some(PathBuf::from(value)),
             "--socket" => socket = Some(PathBuf::from(value)),
             "--runtime" => runtime = Some(PathBuf::from(value)),
+            "--diagnostic-log" => diagnostic_log = Some(absolute_path(PathBuf::from(value))?),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -152,6 +157,7 @@ fn parse_config() -> io::Result<Config> {
         database,
         socket,
         runtime,
+        diagnostic_log,
     })
 }
 

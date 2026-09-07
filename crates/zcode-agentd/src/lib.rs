@@ -1,12 +1,14 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt, fs, io,
-    io::Write,
-    path::Path,
+    io::{Read, Seek, SeekFrom, Write},
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
     process::Command,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Condvar, Mutex, MutexGuard, TryLockError,
+        mpsc::{sync_channel, SyncSender},
+        Arc, Condvar, Mutex, MutexGuard, OnceLock, TryLockError,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -4935,7 +4937,11 @@ impl Scheduler {
             "[zcode-agentd] failure agent={}: {record}\n",
             bounded_error(agent_id)
         );
-        let _ = spawn_failure_log(line, || io::stderr());
+        if let Some(logger) =
+            FAILURE_LOGGER.get_or_init(|| DiagnosticLogger::start(io::stderr()).ok())
+        {
+            logger.submit(line);
+        }
     }
 
     fn record_failure(&self, agent_id: &str, message: String) {
@@ -4993,17 +4999,110 @@ fn update_latest_failure(failures: &mut HashMap<String, String>, agent_id: &str,
     failures.insert(agent_id.into(), message);
 }
 
-fn spawn_failure_log<W, F>(line: String, writer: F) -> io::Result<std::thread::JoinHandle<()>>
-where
-    W: Write + Send + 'static,
-    F: FnOnce() -> W + Send + 'static,
-{
-    std::thread::Builder::new()
-        .name("zcode-diagnostic-write".into())
-        .spawn(move || {
-            let mut writer = writer();
-            let _ = writer.write_all(line.as_bytes());
-        })
+const DIAGNOSTIC_QUEUE_CAPACITY: usize = 32;
+const DIAGNOSTIC_RECORD_BYTES: usize = 192 * 1024;
+const DIAGNOSTIC_FILE_BYTES: u64 = 1024 * 1024;
+static FAILURE_LOGGER: OnceLock<Option<DiagnosticLogger>> = OnceLock::new();
+
+// Installed LaunchAgents pass their existing stderr path here. There is only
+// one writer per process; a broken diagnostic sink never prevents startup.
+pub fn configure_diagnostic_log(path: Option<PathBuf>) {
+    FAILURE_LOGGER.get_or_init(|| match path {
+        Some(path) => DiagnosticLogger::start(RotatingDiagnosticWriter { path }).ok(),
+        None => DiagnosticLogger::start(io::stderr()).ok(),
+    });
+}
+
+struct DiagnosticLogger {
+    sender: SyncSender<String>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl DiagnosticLogger {
+    fn start<W: Write + Send + 'static>(mut writer: W) -> io::Result<Self> {
+        let (sender, receiver) = sync_channel::<String>(DIAGNOSTIC_QUEUE_CAPACITY);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending_drops = Arc::clone(&dropped);
+        thread::Builder::new()
+            .name("zcode-diagnostic-write".into())
+            .spawn(move || {
+                while let Ok(line) = receiver.recv() {
+                    let count = pending_drops.swap(0, Ordering::Relaxed);
+                    if count > 0 {
+                        let marker = format!("[zcode-agentd] diagnostic_writes_dropped={count}\n");
+                        if writer.write_all(marker.as_bytes()).is_err() {
+                            pending_drops.fetch_add(count, Ordering::Relaxed);
+                        }
+                    }
+                    if writer.write_all(line.as_bytes()).is_err() {
+                        pending_drops.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            })?;
+        Ok(Self { sender, dropped })
+    }
+
+    fn submit(&self, line: String) {
+        // Bound both the queue length and each entry before enqueueing. Logging
+        // never blocks scheduler control, even when the sink stops consuming.
+        if line.len() > DIAGNOSTIC_RECORD_BYTES || self.sender.try_send(line).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+struct RotatingDiagnosticWriter {
+    path: PathBuf,
+}
+
+impl RotatingDiagnosticWriter {
+    fn copy_tail(source: &Path, destination: &Path) -> io::Result<()> {
+        let mut input = match fs::File::open(source) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let size = input.metadata()?.len();
+        input.seek(SeekFrom::Start(size.saturating_sub(DIAGNOSTIC_FILE_BYTES)))?;
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(destination)?;
+        io::copy(&mut input.take(DIAGNOSTIC_FILE_BYTES), &mut output)?;
+        Ok(())
+    }
+}
+
+impl Write for RotatingDiagnosticWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > DIAGNOSTIC_FILE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "diagnostic record exceeds file cap",
+            ));
+        }
+        let mut output = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(&self.path)?;
+        if output.metadata()?.len().saturating_add(bytes.len() as u64) > DIAGNOSTIC_FILE_BYTES {
+            let first = PathBuf::from(format!("{}.1", self.path.display()));
+            let second = PathBuf::from(format!("{}.2", self.path.display()));
+            Self::copy_tail(&first, &second)?;
+            Self::copy_tail(&self.path, &first)?;
+            // Keep the inode: launchd still owns an open stderr descriptor.
+            // Renaming would strand that descriptor on an old rotation.
+            output.set_len(0)?;
+        }
+        output.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -5287,45 +5386,136 @@ sleep 2
     }
 
     #[test]
-    fn failure_log_write_errors_are_ignored() {
-        struct FailingWriter;
-        impl Write for FailingWriter {
-            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-                Err(io::Error::other("synthetic log failure"))
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Err(io::Error::other("synthetic log failure"))
-            }
-        }
-        let handle =
-            spawn_failure_log::<FailingWriter, _>("failure\n".into(), || FailingWriter).unwrap();
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn detached_failure_log_does_not_wait_for_blocking_writer() {
+    fn failure_log_queue_is_bounded_and_reports_dropped_writes_after_recovery() {
         struct BlockingWriter {
+            entered: mpsc::Sender<()>,
             release: mpsc::Receiver<()>,
+            output: mpsc::Sender<String>,
+            blocked: bool,
         }
         impl Write for BlockingWriter {
-            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-                let _ = self.release.recv();
-                Ok(0)
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                if !self.blocked {
+                    self.blocked = true;
+                    self.entered.send(()).unwrap();
+                    self.release.recv().unwrap();
+                }
+                self.output
+                    .send(String::from_utf8_lossy(buf).into_owned())
+                    .unwrap();
+                Ok(buf.len())
             }
             fn flush(&mut self) -> io::Result<()> {
                 Ok(())
             }
         }
+        let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let started = std::time::Instant::now();
-        let handle =
-            spawn_failure_log::<BlockingWriter, _>("failure\n".into(), move || BlockingWriter {
-                release: release_rx,
-            })
-            .unwrap();
+        let (output_tx, output_rx) = mpsc::channel();
+        let logger = DiagnosticLogger::start(BlockingWriter {
+            entered: entered_tx,
+            release: release_rx,
+            output: output_tx,
+            blocked: false,
+        })
+        .unwrap();
+        logger.submit("first\n".into());
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let started = Instant::now();
+        for _ in 0..DIAGNOSTIC_QUEUE_CAPACITY + 100 {
+            logger.submit("queued\n".into());
+        }
         assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(logger.dropped.load(Ordering::Relaxed), 100);
         release_tx.send(()).unwrap();
-        handle.join().unwrap();
+        assert_eq!(
+            output_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "first\n"
+        );
+        assert_eq!(
+            output_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "[zcode-agentd] diagnostic_writes_dropped=100\n"
+        );
+        for _ in 0..DIAGNOSTIC_QUEUE_CAPACITY {
+            output_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+    }
+
+    #[test]
+    fn failure_log_write_errors_are_ignored_and_reported_on_next_success() {
+        struct FailingOnce {
+            output: mpsc::Sender<String>,
+            failed: bool,
+        }
+        impl Write for FailingOnce {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                if !self.failed {
+                    self.failed = true;
+                    return Err(io::Error::other("synthetic log failure"));
+                }
+                self.output
+                    .send(String::from_utf8_lossy(buf).into_owned())
+                    .unwrap();
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (output_tx, output_rx) = mpsc::channel();
+        let logger = DiagnosticLogger::start(FailingOnce {
+            output: output_tx,
+            failed: false,
+        })
+        .unwrap();
+        logger.submit("fails\n".into());
+        logger.submit("succeeds\n".into());
+        assert_eq!(
+            output_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "[zcode-agentd] diagnostic_writes_dropped=1\n"
+        );
+        assert_eq!(
+            output_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "succeeds\n"
+        );
+    }
+
+    #[test]
+    fn failure_log_rotates_with_finite_files_and_preserves_open_stderr_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon-error.log");
+        let mut stderr = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&path)
+            .unwrap();
+        let mut writer = RotatingDiagnosticWriter { path: path.clone() };
+        let record = vec![b'x'; DIAGNOSTIC_RECORD_BYTES];
+        for _ in 0..100 {
+            writer.write_all(&record).unwrap();
+        }
+        stderr.write_all(b"launchd-stderr-still-current\n").unwrap();
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .ends_with("launchd-stderr-still-current\n"));
+        let entries = fs::read_dir(directory.path())
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 3);
+        for entry in entries {
+            assert!(entry.metadata().unwrap().len() <= DIAGNOSTIC_FILE_BYTES);
+        }
+        // Pre-existing oversized logs are trimmed to the same retention cap.
+        stderr.set_len(DIAGNOSTIC_FILE_BYTES * 3).unwrap();
+        writer.write_all(b"recovered\n").unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), 10);
+        assert_eq!(
+            fs::metadata(directory.path().join("daemon-error.log.1"))
+                .unwrap()
+                .len(),
+            DIAGNOSTIC_FILE_BYTES
+        );
     }
 
     #[test]

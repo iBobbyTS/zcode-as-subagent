@@ -32,6 +32,7 @@ function manifest(input) {
 
 function methodFor(command, input) {
   switch (command) {
+    case 'status': return { method: 'system_status', params: {} };
     case 'create': case 'spawn': return { method: 'submit_general', params: { input: { manifest: manifest(input) } } };
     case 'get': case 'poll': return { method: 'task_poll', params: { agent_id: input.agent_id, after_revision: input.after_revision || 0, timeout_ms: input.timeout_ms ?? 0 } };
     case 'list': {
@@ -78,6 +79,7 @@ function publicResult(result) {
 
 export function projectDaemonResult(command, result) {
   switch (command) {
+    case 'status': return result.status;
     case 'create': case 'spawn':
       return { agent_id: result.task.agent_id, submission_disposition: result.disposition, phase: result.task.phase };
     case 'get': case 'poll': {
@@ -117,7 +119,7 @@ export function callDaemon(socketPath, command, input, timeoutMs = 6000) {
       try {
         const response = JSON.parse(line);
         if (response.version !== RPC_VERSION || response.request_id !== request_id) finish(reject, new CliError('PROTOCOL_ERROR', 'daemon returned an RPC response for a different version or request'));
-        else if (response.outcome === 'error') { const daemon = response.error || {}; const error = new CliError(daemon.code || 'DAEMON_ERROR', daemon.message || 'daemon request failed'); error.agentId = daemon.active_agent_id; finish(reject, error); }
+        else if (response.outcome === 'error') { const daemon = response.error || {}; const error = new CliError(daemon.code || 'DAEMON_ERROR', daemon.message || 'daemon request failed'); error.agentId = daemon.active_agent_id; error.daemonResponded = true; finish(reject, error); }
         else if (response.outcome === 'success') {
           try {
             const projected = projectDaemonResult(command, response.result);
