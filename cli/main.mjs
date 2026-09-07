@@ -35,6 +35,29 @@ function redactDiagnosticText(text) {
     .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gu, '[REDACTED_PRIVATE_KEY]');
 }
 
+function redactFailureFields(record) {
+  // Decode known fields before redacting embedded JSON credential values.
+  return JSON.stringify(Object.fromEntries(
+    ['agent_id', 'session_id', 'stage', 'error_code', 'message', 'stderr_tail']
+      .filter((field) => typeof record[field] === 'string' || record[field] === null)
+      .map((field) => [field, typeof record[field] === 'string' ? redactDiagnosticText(record[field]) : null]),
+  ));
+}
+
+function redactDiagnosticTail(text) {
+  const decoded = text.split('\n').map((line) => {
+    const match = line.match(/^(\[zcode-agentd\] failure agent=[^:\r\n]+: )(.+)$/u);
+    if (match) {
+      try {
+        const record = JSON.parse(match[2]);
+        if (record && typeof record.agent_id === 'string') return redactDiagnosticText(match[1]) + redactFailureFields(record);
+      } catch { /* Keep legacy and partial records on the existing text path. */ }
+    }
+    return line;
+  }).join('\n');
+  return redactDiagnosticText(decoded);
+}
+
 function diagnosticLogs(logDirectory) {
   const incomplete = [];
   if (!fs.existsSync(logDirectory)) return { directory: logDirectory, complete: false, incomplete: ['log_directory_missing'], files: [] };
@@ -64,7 +87,7 @@ function diagnosticLogs(logDirectory) {
       const buffer = Buffer.alloc(readLength);
       const read = fs.readSync(fd, buffer, 0, readLength, readStart);
       fs.closeSync(fd);
-      const redacted = redactDiagnosticText(buffer.subarray(0, read).toString('utf8'));
+      const redacted = redactDiagnosticTail(buffer.subarray(0, read).toString('utf8'));
       const encoded = Buffer.from(redacted, 'utf8');
       let tailStart = Math.max(0, encoded.length - Math.min(take, remaining));
       while (tailStart < encoded.length && (encoded[tailStart] & 0xc0) === 0x80) tailStart += 1;
@@ -111,13 +134,7 @@ function agentDiagnosticLogs(logDirectory, agentId) {
         let structured;
         try { structured = JSON.parse(raw); } catch { structured = null; }
         if (structured && structured.agent_id !== agentId) continue;
-        // Decode the known failure fields before redacting: stderr/message can
-        // contain JSON whose quotes were escaped by the outer log record.
-        const redacted = structured ? JSON.stringify(Object.fromEntries(
-          ['agent_id', 'session_id', 'stage', 'error_code', 'message', 'stderr_tail']
-            .filter((field) => typeof structured[field] === 'string' || structured[field] === null)
-            .map((field) => [field, typeof structured[field] === 'string' ? redactDiagnosticText(structured[field]) : null]),
-        )) : redactDiagnosticText(raw);
+        const redacted = structured ? redactFailureFields(structured) : redactDiagnosticText(raw);
         const encoded = Buffer.from(redacted);
         let end = Math.min(encoded.length, DIAGNOSTIC_TAIL_BYTES);
         while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
