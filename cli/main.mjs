@@ -70,7 +70,6 @@ function diagnosticLogs(logDirectory) {
       const tail = bounded.toString('utf8');
       totalBytes += Buffer.byteLength(tail);
       files.push({ name, bytes: stat.size, modified_at_ms: stat.mtimeMs, rotated, truncated: start > 0 || take < stat.size || bounded.length < encoded.length, tail });
-      if (start > 0) incomplete.push(`log_tail_truncated:${name}`);
     } catch (error) { incomplete.push(`log_unreadable:${name}:${error.code || 'error'}`); }
   }
   if (files.length === 0) incomplete.push('log_files_missing');

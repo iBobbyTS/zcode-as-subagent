@@ -61,13 +61,13 @@ test('agent diagnose reads only the public poll projection and exports a bounded
   } finally { await new Promise((resolve) => server.close(resolve)); }
 });
 
-test('diagnostic tail is bounded and reports truncation', () => {
+test('diagnostic tail is bounded without treating a normal long log as incomplete', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-tail-'));
   const logs = path.join(home, 'logs');
   fs.mkdirSync(logs);
   fs.writeFileSync(path.join(logs, 'daemon.log'), 'x'.repeat(20 * 1024));
   const report = diagnosticLogs(logs);
-  assert.equal(report.complete, false);
+  assert.equal(report.complete, true);
   assert.equal(report.files[0].truncated, true);
   assert.ok(Buffer.byteLength(report.files[0].tail) <= 16 * 1024);
 });
