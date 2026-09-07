@@ -25,6 +25,19 @@ Source scenarios are immutable inputs. Test code must use
 materialize a scenario. Results, transcripts, logs, stores, temporary Git
 repositories, and imported historical evidence stay under `workspace/`.
 
+`non-git-based/real_completion_case.py` is an explicit real-runtime evidence
+flow. Run it only when the local daemon and official ZCode runtime are ready:
+
+```sh
+python3 tests/live-agent/non-git-based/real_completion_case.py
+```
+
+It performs one isolated read-only `plan` lifecycle (`spawn`, repeated `poll`,
+`result`, `close`) and emits the observed task/activity/result payloads. The
+harness does not classify the outcome or decide goal success; that decision is
+left to the executing Agent or human. It exits non-zero only when a transport or
+protocol call fails.
+
 The runner records observable runtime facts and safety invariants; it does not
 replace the task executor's or human evaluator's judgment of whether a goal was
 achieved. A task that achieves its stated goal may be classified as success or
