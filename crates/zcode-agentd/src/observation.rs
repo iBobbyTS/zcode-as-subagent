@@ -449,7 +449,7 @@ mod tests {
     }
 
     fn production_redact(value: &str) -> String {
-        crate::redact_sensitive_text(value)
+        crate::redact_observation_text(value)
     }
 
     fn event(id: &str, kind: &str, payload: Value) -> Value {
@@ -534,6 +534,55 @@ mod tests {
                 );
             }
             assert!(snapshot.coverage.reasoning_complete);
+        }
+    }
+
+    #[test]
+    fn incomplete_private_key_is_hidden_from_every_intermediate_snapshot() {
+        let mut state = ObservationState::default();
+        let chunks = [
+            "ordinary\n-----BEGIN PRIVATE KEY-----\n",
+            &"SYNTHETIC_KEY_BODY".repeat(30),
+            "\n-----END PRIVATE KEY----- tail",
+        ];
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            state.observe_message(
+                "session/event",
+                &event(
+                    &index.to_string(),
+                    "reasoning_delta",
+                    serde_json::json!({"delta":chunk}),
+                ),
+                production_redact,
+            );
+            let snapshot = state.snapshot();
+            assert!(snapshot.reasoning.text.contains("[REDACTED]"));
+            assert!(!snapshot.reasoning.text.contains("SYNTHETIC_KEY_BODY"));
+            assert!(snapshot.reasoning.char_count <= MAX_REASONING_CHARS);
+        }
+        assert!(state.snapshot().reasoning.text.ends_with("[REDACTED] tail"));
+    }
+
+    #[test]
+    fn ordinary_reasoning_remains_visible_during_streaming() {
+        let mut state = ObservationState::default();
+        for (index, (chunk, expected)) in [
+            ("ordinary ", "ordinary "),
+            ("streaming text", "ordinary streaming text"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            state.observe_message(
+                "session/event",
+                &event(
+                    &index.to_string(),
+                    "reasoning_delta",
+                    serde_json::json!({"delta":chunk}),
+                ),
+                production_redact,
+            );
+            assert_eq!(state.snapshot().reasoning.text, expected);
         }
     }
 

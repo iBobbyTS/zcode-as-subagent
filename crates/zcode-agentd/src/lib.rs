@@ -262,14 +262,14 @@ impl PassiveActivityTracker {
                 state.observation.observe_message(
                     &event.method,
                     &event.params,
-                    redact_sensitive_text,
+                    redact_observation_text,
                 );
             }
             RuntimeEvent::Driver(Inbound::Message(WireMessage::UnknownEvent { method, raw })) => {
                 let params = raw.get("params").unwrap_or(&serde_json::Value::Null);
                 state
                     .observation
-                    .observe_message(method, params, redact_sensitive_text);
+                    .observe_message(method, params, redact_observation_text);
             }
             RuntimeEvent::Driver(Inbound::Malformed(_) | Inbound::OversizedLine { .. }) => {
                 state.observation.observe_loss();
@@ -889,6 +889,30 @@ fn redact_sensitive_text(message: &str) -> String {
         redacted = pattern.replace_all(&redacted, "[REDACTED]").into_owned();
     }
     redacted
+}
+
+// The shared diagnostic redactor deliberately requires a complete PEM block.
+// Observation snapshots are incremental, so suppress an unmatched public PEM
+// block immediately; a later END marker can never undo an earlier disclosure.
+fn redact_observation_text(message: &str) -> String {
+    static PEM_MARKERS: OnceLock<(regex::Regex, regex::Regex)> = OnceLock::new();
+    let (begin, end) = PEM_MARKERS.get_or_init(|| {
+        (
+            regex::Regex::new(r"-----BEGIN [^-]*PRIVATE KEY-----").unwrap(),
+            regex::Regex::new(r"-----END [^-]*PRIVATE KEY-----").unwrap(),
+        )
+    });
+    let mut cursor = 0;
+    while let Some(start) = begin.find_at(message, cursor) {
+        if let Some(finish) = end.find_at(message, start.end()) {
+            cursor = finish.end();
+            continue;
+        }
+        let mut safe = redact_sensitive_text(&message[..start.start()]);
+        safe.push_str("[REDACTED]");
+        return safe;
+    }
+    redact_sensitive_text(message)
 }
 
 impl std::error::Error for RuntimeCommandError {}
