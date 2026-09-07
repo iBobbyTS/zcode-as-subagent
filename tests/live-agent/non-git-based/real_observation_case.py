@@ -199,13 +199,20 @@ def main() -> int:
             raise RuntimeError("status observation protocol mismatch")
 
         prompt = (
-            "Use Glob once to list read-*.txt. Then call Read separately for read-1.txt through "
-            "read-6.txt in numeric order. Run Bash `pwd` six separate times. Do not combine or skip "
-            "these calls and do not read other paths. Finally report the six short file contents."
+            "First use the Write tool to create probe-note.txt with exactly `alpha`. Then use the "
+            "Edit tool to replace `alpha` with `beta` in probe-note.txt. Next call Read separately "
+            "for read-1.txt through read-6.txt in numeric order. Run Bash `pwd` six separate times. "
+            "Do not combine or skip these calls and do not read or write other paths. Finally report "
+            "the six short read-* file contents."
         )
         spawned = client.call(
             "spawn",
-            {"repository": str(repository), "permission_mode": "plan", "prompt": prompt},
+            {
+                "repository": str(repository),
+                "permission_mode": "yolo",
+                "prompt": prompt,
+                "write_manifest": ["probe-note.txt"],
+            },
         )
         agent_id = spawned["agent_id"]
         agents.append(agent_id)
