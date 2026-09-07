@@ -422,7 +422,7 @@ pub enum ParseError {
 }
 
 pub fn parse_line(line: &str) -> Result<WireMessage, ParseError> {
-    let value: Value =
+    let mut value: Value =
         serde_json::from_str(line).map_err(|e| ParseError::InvalidJson(e.to_string()))?;
     let obj = value.as_object().ok_or(ParseError::NotObject)?;
     if obj.contains_key("jsonrpc") {
@@ -449,6 +449,13 @@ pub fn parse_line(line: &str) -> Result<WireMessage, ParseError> {
     }
     if let Some(method) = obj.get("method").and_then(Value::as_str) {
         if obj.contains_key("id") {
+            // Official resumed sessions attach persisted trace metadata to
+            // reverse requests (including requestRuntimePreferences). It has
+            // no command semantics; keep all other envelope fields strict.
+            value
+                .as_object_mut()
+                .expect("object checked above")
+                .remove("trace");
             return serde_json::from_value(value)
                 .map(WireMessage::Request)
                 .map_err(|e| ParseError::InvalidEnvelope(e.to_string()));
@@ -521,6 +528,32 @@ mod tests {
         .unwrap()
         .contains("jsonrpc"));
     }
+    #[test]
+    fn resumed_runtime_preferences_accept_trace_without_changing_request_semantics() {
+        let params =
+            serde_json::json!({"sessionId":"persisted-session", "scope":"runtime-materialization"});
+        let request = serde_json::json!({
+            "id":"server-1", "method":SESSION_REQUEST_RUNTIME_PREFERENCES,
+            "params":params, "trace":{"traceId":"persisted-trace"}
+        });
+        let parsed = parse_line(&request.to_string()).unwrap();
+        assert_eq!(
+            parsed,
+            WireMessage::Request(RequestEnvelope::new(
+                WireId::String("server-1".into()),
+                SESSION_REQUEST_RUNTIME_PREFERENCES,
+                params
+            ))
+        );
+        // Accept only this observed metadata extension, not arbitrary envelope fields.
+        let mut unsupported = request;
+        unsupported["unexpected"] = serde_json::json!(true);
+        assert!(matches!(
+            parse_line(&unsupported.to_string()),
+            Err(ParseError::InvalidEnvelope(_))
+        ));
+    }
+
     #[test]
     fn unknown_preserved() {
         let msg = parse_line(r#"{"method":"new/event","params":{"a":2}}"#).unwrap();

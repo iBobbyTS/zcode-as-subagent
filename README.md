@@ -47,6 +47,18 @@ as `WORKSPACE_BUSY` with the active id. Terminal results expose stable outcome,
 partial status, task reason code, and bounded result segments; use
 `offset`/`limit` (default and maximum 81920 bytes) for large text.
 
+## 已知限制：暂不支持恢复已结束的 session
+
+当前版本不能通过 `zcode_subagent_send` 恢复已结束的 Agent 并继续执行，
+包括 `COMPLETED` 但尚未调用 `close` 的情况。首次任务结束后 runtime 已回收，
+追加消息会进入冷恢复路径；发送失败时仍可查询原终态结果。请新建 Agent
+并显式提供所需上下文，不要把旧 `COMPLETED` 结果视为追加消息执行成功。
+
+此限制在 ZCode Desktop 3.11.2 / 内置 CLI 0.16.5 上仍可复现；官方 CLI
+`--resume` 的同会话对照成功，失败范围是本产品使用的 app-server 冷恢复路径。
+运行中发送消息及重启 MCP facade 后读取历史不属于此限制。
+详见 [恢复限制与复现说明](docs/recovery.md#session-恢复暂不可用)。
+
 ## Data, cleanup, and safety
 
 `uninstall` removes service registration but retains data. `purge --yes` is the

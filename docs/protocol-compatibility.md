@@ -73,6 +73,10 @@ Observed client request parameters are:
 The fake rejects unobserved extra keys, including `afterSeq`, `inputId`, and
 `queryId`.
 
+**当前产品限制：恢复已结束的 session 暂不可用。** ZCode 3.11.2 的真实
+app-server 冷恢复发送仍被拒绝；下述内容是失败处理契约，不是恢复能力
+已通过真实验收的声明。详见 [恢复限制](recovery.md#session-恢复暂不可用)。
+
 Closed-session message recovery is deliberately fail-closed. The daemon only
 queues the new message after `session/resume` succeeds, `session/subscribe`
 with `includeSnapshot: true` is accepted, and the synchronous `session/send`
