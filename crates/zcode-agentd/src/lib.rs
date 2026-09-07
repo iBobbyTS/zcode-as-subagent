@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt, fs, io,
+    io::Write,
     path::Path,
     process::Command,
     sync::{
@@ -4833,10 +4834,8 @@ impl Scheduler {
     }
 
     fn record_failure(&self, agent_id: &str, message: String) {
-        eprintln!(
-            "[zcode-agentd] failure agent={agent_id}: {}",
-            bounded_error(&message)
-        );
+        let bounded = bounded_error(&message);
+        write_failure_log(&mut io::stderr().lock(), agent_id, &bounded);
         self.inner
             .state
             .lock()
@@ -4849,11 +4848,50 @@ impl Scheduler {
 
 fn bounded_error(message: &str) -> String {
     const MAX_ERROR_BYTES: usize = 4096;
-    let mut value = message.chars().take(MAX_ERROR_BYTES).collect::<String>();
-    if message.chars().count() > MAX_ERROR_BYTES {
-        value.push_str("…");
+    if message.len() <= MAX_ERROR_BYTES {
+        return message.to_owned();
     }
-    value
+    const MARKER: &str = "…";
+    let limit = MAX_ERROR_BYTES - MARKER.len();
+    let end = message
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= limit)
+        .last()
+        .unwrap_or(0);
+    format!("{}{}", &message[..end], MARKER)
+}
+
+fn write_failure_log(writer: &mut impl Write, agent_id: &str, message: &str) {
+    let _ = writeln!(writer, "[zcode-agentd] failure agent={agent_id}: {message}");
+}
+
+#[cfg(test)]
+mod failure_log_tests {
+    use super::{bounded_error, write_failure_log};
+    use std::io::{self, Write};
+
+    #[test]
+    fn bounded_error_respects_utf8_byte_limit() {
+        let value = bounded_error(&"界".repeat(5000));
+        assert!(value.len() <= 4096);
+        assert!(value.ends_with('…'));
+        assert!(std::str::from_utf8(value.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn failure_log_write_errors_are_ignored() {
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("synthetic log failure"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("synthetic log failure"))
+            }
+        }
+        write_failure_log(&mut FailingWriter, "agent", "failure");
+    }
 }
 
 #[cfg(unix)]
