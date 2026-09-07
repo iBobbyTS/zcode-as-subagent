@@ -29,6 +29,7 @@ test('agent diagnose reads only the public poll projection and exports a bounded
   fs.mkdirSync(paths.logs, { recursive: true });
   fs.writeFileSync(path.join(paths.logs, 'daemon.log'), 'observed fact\n');
   fs.writeFileSync(path.join(paths.logs, 'daemon.log.1'), 'rotated fact\n');
+  fs.writeFileSync(path.join(paths.logs, 'daemon-error.log.2'), 'rotated error\n');
   fs.writeFileSync(path.join(paths.logs, 'secret-extra.log'), 'password=do-not-read\n');
   const server = net.createServer((socket) => socket.once('data', (chunk) => {
     const request = JSON.parse(chunk);
@@ -46,9 +47,12 @@ test('agent diagnose reads only the public poll projection and exports a bounded
     const report = await diagnose(paths, ['--agent', 'agent-1', '--output', destination]);
     assert.equal(report.daemon.available, true);
     assert.equal(report.agent.task.agent_id, 'agent-1');
-    assert.deepEqual(report.agent.request_ids, []);
+    assert.equal(report.agent.request_ids.length, 1);
+    assert.match(report.agent.request_ids[0], /^cli-/u);
+    assert.equal(report.agent.identifiers_complete, true);
     assert.equal(report.logs.complete, false);
     assert.ok(report.logs.incomplete.some((reason) => reason.startsWith('log_rotated:')));
+    assert.ok(report.logs.incomplete.includes('log_rotated:daemon-error.log'));
     assert.equal(report.output.path, path.join(destination, 'diagnose.json'));
     const exported = JSON.parse(fs.readFileSync(report.output.path, 'utf8'));
     assert.equal(exported.agent.task.agent_id, 'agent-1');
