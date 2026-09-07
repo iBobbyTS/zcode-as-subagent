@@ -24,7 +24,7 @@ Successful responses are structured JSON. Daemon errors preserve their `code`,
 2. Call `zcode_subagent_poll` with the returned `agent_id`, `after_revision`, and bounded `timeout_ms`.
 3. Reuse `next_revision`; do not restart polling from zero.
 4. Answer only daemon-published typed requests through `zcode_subagent_respond`.
-5. Queue clarification with `zcode_subagent_send`. For a closed session the daemon attempts a send-based resume; a failed resume returns a typed error and preserves the terminal history.
+5. Queue clarification for a running Agent with `zcode_subagent_send`. 恢复已结束的 session 暂不可用（包括尚未 close 的 COMPLETED 任务）；继续工作请新建 Agent 并提供所需上下文。失败的追加发送不改变原终态结果，详见 [恢复限制](recovery.md#session-恢复暂不可用)。
 6. Read final text through `zcode_subagent_result`; use poll for running progress.
 7. Use `zcode_subagent_cancel` for authoritative stop/kill/reap and `zcode_subagent_close` for idempotent cleanup.
 
