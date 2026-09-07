@@ -29,9 +29,9 @@ const DIAGNOSTIC_LOG_NAMES = ['daemon.log', 'daemon-error.log'];
 
 function redactDiagnosticText(text) {
   return text
-    .replace(/(Authorization\s*:\s*Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
-    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
-    .replace(/((?:token|secret|password|api[_-]?key|authorization|private[_-]?key)\s*[=:]\s*)([^\s,;"']+)/giu, '$1[REDACTED]')
+    .replace(/(Authorization\s*:\s*(?:Bearer\s+)?)(["']?)[A-Za-z0-9._~+/=-]+\2/giu, '$1$2[REDACTED]$2')
+    .replace(/(Bearer\s+)(["']?)[A-Za-z0-9._~+/=-]+\2/giu, '$1$2[REDACTED]$2')
+    .replace(/((?:["']?)(?:token|secret|password|api[_-]?key|authorization|private[_-]?key)(?:["']?)\s*[=:]\s*)(["']?)([^\s,;"']+)\2/giu, '$1$2[REDACTED]$2')
     .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gu, '[REDACTED_PRIVATE_KEY]');
 }
 
@@ -42,21 +42,31 @@ function diagnosticLogs(logDirectory) {
   let totalBytes = 0;
   for (const name of DIAGNOSTIC_LOG_NAMES) {
     const target = path.join(logDirectory, name);
-    const rotated = ['.1', '.2', '.old', '.gz'].some((suffix) => fs.existsSync(`${target}${suffix}`));
+    let targetStat;
+    try { targetStat = fs.lstatSync(target); } catch (error) { targetStat = null; }
+    const rotated = ['.1', '.2', '.old', '.gz'].some((suffix) => {
+      try { return fs.lstatSync(`${target}${suffix}`) != null; } catch { return false; }
+    });
     if (rotated) incomplete.push(`log_rotated:${name}`);
     if (!fs.existsSync(target)) continue;
+    if (!targetStat || !targetStat.isFile() || targetStat.isSymbolicLink()) {
+      incomplete.push(`log_unreadable:${name}:symlink_or_non_file`);
+      continue;
+    }
     try {
       const stat = fs.statSync(target);
       const remaining = Math.max(0, DIAGNOSTIC_TOTAL_BYTES - totalBytes);
       const take = Math.min(DIAGNOSTIC_TAIL_BYTES, remaining);
       const start = Math.max(0, stat.size - take);
+      const readStart = Math.max(0, start - 256);
+      const readLength = Math.min(take + (start - readStart), stat.size - readStart);
       const fd = fs.openSync(target, 'r');
-      const buffer = Buffer.alloc(take);
-      const read = fs.readSync(fd, buffer, 0, take, start);
+      const buffer = Buffer.alloc(readLength);
+      const read = fs.readSync(fd, buffer, 0, readLength, readStart);
       fs.closeSync(fd);
       const redacted = redactDiagnosticText(buffer.subarray(0, read).toString('utf8'));
       const encoded = Buffer.from(redacted, 'utf8');
-      const bounded = encoded.subarray(0, remaining);
+      const bounded = encoded.subarray(Math.max(0, encoded.length - Math.min(take, remaining)));
       const tail = bounded.toString('utf8');
       totalBytes += Buffer.byteLength(tail);
       files.push({ name, bytes: stat.size, modified_at_ms: stat.mtimeMs, rotated, truncated: start > 0 || take < stat.size || bounded.length < encoded.length, tail });
@@ -98,8 +108,9 @@ async function diagnose(paths, args) {
         activity: snapshot.activity,
         session_id: snapshot.task?.session_id ?? null,
         turn_id: snapshot.task?.turn_id ?? null,
-        request_ids: [snapshot.__request_id, ...(Array.isArray(snapshot.pending_requests) ? snapshot.pending_requests.map((request) => request.request_id).filter(Boolean) : [])].filter(Boolean),
-        identifiers_complete: Boolean(snapshot.task?.session_id || snapshot.task?.turn_id || (Array.isArray(snapshot.pending_requests) && snapshot.pending_requests.some((request) => request.request_id))),
+        request_ids: Array.isArray(snapshot.pending_requests) ? snapshot.pending_requests.map((request) => request.request_id).filter(Boolean) : [],
+        query_request_id: snapshot.__request_id ?? null,
+        identifiers_complete: Boolean(snapshot.task?.turn_id || (Array.isArray(snapshot.pending_requests) && snapshot.pending_requests.some((request) => request.request_id))),
         pending_request_count: Array.isArray(snapshot.pending_requests) ? snapshot.pending_requests.length : null,
         result_available: snapshot.result_available ?? false,
         observed_at_ms: Date.now(),
