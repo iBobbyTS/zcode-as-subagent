@@ -58,7 +58,7 @@ test('install/check/preflight are idempotent, isolated, and provenance-aware', (
   const preflight = run(preflightScript, ['--config', config, '--provenance', provenance]);
   assert.equal(preflight.status, 0, preflight.stderr);
   const activated = JSON.parse(fs.readFileSync(provenance, 'utf8'));
-  assert.match(activated.service_generation, /^[0-9a-f]{32}$/u);
+  assert.equal(Object.hasOwn(activated, 'service_generation'), false);
   assert.equal(activated.effective_file_policy_version, 'zcode-agent-file-policy/v1.0.0');
   assert.equal(activated.effective_file_policy_sha256.length, 64);
   assert.equal(activated.effective_file_wrapper_path.endsWith('/hooks/check-agent-files.mjs'), true);

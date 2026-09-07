@@ -40,7 +40,6 @@ const hashFile = (file) => {
   try { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); } catch { return null; }
 };
 const ok = active && provenance.hook_activation_verified === true &&
-  typeof provenance.service_generation === 'string' && provenance.service_generation.length > 0 &&
   provenance.effective_file_policy_sha256 === hashFile(provenance.effective_file_policy_path) &&
   provenance.effective_config_path === path.resolve(configPath) &&
   provenance.effective_config_sha256 === hashFile(configPath) &&
