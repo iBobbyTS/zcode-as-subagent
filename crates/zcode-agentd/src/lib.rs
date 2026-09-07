@@ -4835,7 +4835,6 @@ impl Scheduler {
 
     fn record_failure(&self, agent_id: &str, message: String) {
         let bounded = bounded_error(&message);
-        write_failure_log(&mut io::stderr().lock(), agent_id, &bounded);
         self.inner
             .state
             .lock()
@@ -4843,6 +4842,8 @@ impl Scheduler {
             .failures
             .entry(agent_id.into())
             .or_insert(message);
+        let line = format!("[zcode-agentd] failure agent={agent_id}: {bounded}\n");
+        let _ = spawn_failure_log(line, || io::stderr());
     }
 }
 
@@ -4862,14 +4863,25 @@ fn bounded_error(message: &str) -> String {
     format!("{}{}", &message[..end], MARKER)
 }
 
-fn write_failure_log(writer: &mut impl Write, agent_id: &str, message: &str) {
-    let _ = writeln!(writer, "[zcode-agentd] failure agent={agent_id}: {message}");
+fn spawn_failure_log<W, F>(line: String, writer: F) -> io::Result<std::thread::JoinHandle<()>>
+where
+    W: Write + Send + 'static,
+    F: FnOnce() -> W + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("zcode-diagnostic-write".into())
+        .spawn(move || {
+            let mut writer = writer();
+            let _ = writer.write_all(line.as_bytes());
+        })
 }
 
 #[cfg(test)]
 mod failure_log_tests {
-    use super::{bounded_error, write_failure_log};
+    use super::{bounded_error, spawn_failure_log};
     use std::io::{self, Write};
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     #[test]
     fn bounded_error_respects_utf8_byte_limit() {
@@ -4890,7 +4902,35 @@ mod failure_log_tests {
                 Err(io::Error::other("synthetic log failure"))
             }
         }
-        write_failure_log(&mut FailingWriter, "agent", "failure");
+        let handle =
+            spawn_failure_log::<FailingWriter, _>("failure\n".into(), || FailingWriter).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn detached_failure_log_does_not_wait_for_blocking_writer() {
+        struct BlockingWriter {
+            release: mpsc::Receiver<()>,
+        }
+        impl Write for BlockingWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                let _ = self.release.recv();
+                Ok(0)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (release_tx, release_rx) = mpsc::channel();
+        let started = std::time::Instant::now();
+        let handle =
+            spawn_failure_log::<BlockingWriter, _>("failure\n".into(), move || BlockingWriter {
+                release: release_rx,
+            })
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        release_tx.send(()).unwrap();
+        handle.join().unwrap();
     }
 }
 
