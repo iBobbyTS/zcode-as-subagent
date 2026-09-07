@@ -29,8 +29,9 @@ const DIAGNOSTIC_LOG_NAMES = ['daemon.log', 'daemon-error.log'];
 
 function redactDiagnosticText(text) {
   return text
-    .replace(/((?:token|secret|password|api[_-]?key|authorization|private[_-]?key)\s*[=:]\s*)([^\s,;"']+)/giu, '$1[REDACTED]')
+    .replace(/(Authorization\s*:\s*Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
+    .replace(/((?:token|secret|password|api[_-]?key|authorization|private[_-]?key)\s*[=:]\s*)([^\s,;"']+)/giu, '$1[REDACTED]')
     .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gu, '[REDACTED_PRIVATE_KEY]');
 }
 
@@ -41,18 +42,24 @@ function diagnosticLogs(logDirectory) {
   let totalBytes = 0;
   for (const name of DIAGNOSTIC_LOG_NAMES) {
     const target = path.join(logDirectory, name);
-    const rotated = ['.1', '.old', '.gz'].some((suffix) => fs.existsSync(`${target}${suffix}`));
+    const rotated = ['.1', '.2', '.old', '.gz'].some((suffix) => fs.existsSync(`${target}${suffix}`));
     if (rotated) incomplete.push(`log_rotated:${name}`);
     if (!fs.existsSync(target)) continue;
     try {
       const stat = fs.statSync(target);
-      const bytes = fs.readFileSync(target);
       const remaining = Math.max(0, DIAGNOSTIC_TOTAL_BYTES - totalBytes);
       const take = Math.min(DIAGNOSTIC_TAIL_BYTES, remaining);
-      const start = Math.max(0, bytes.length - take);
-      const tail = redactDiagnosticText(bytes.subarray(start).toString('utf8'));
+      const start = Math.max(0, stat.size - take);
+      const fd = fs.openSync(target, 'r');
+      const buffer = Buffer.alloc(take);
+      const read = fs.readSync(fd, buffer, 0, take, start);
+      fs.closeSync(fd);
+      const redacted = redactDiagnosticText(buffer.subarray(0, read).toString('utf8'));
+      const encoded = Buffer.from(redacted, 'utf8');
+      const bounded = encoded.subarray(0, remaining);
+      const tail = bounded.toString('utf8');
       totalBytes += Buffer.byteLength(tail);
-      files.push({ name, bytes: stat.size, modified_at_ms: stat.mtimeMs, rotated, truncated: start > 0 || take < bytes.length, tail });
+      files.push({ name, bytes: stat.size, modified_at_ms: stat.mtimeMs, rotated, truncated: start > 0 || take < stat.size || bounded.length < encoded.length, tail });
       if (start > 0) incomplete.push(`log_tail_truncated:${name}`);
     } catch (error) { incomplete.push(`log_unreadable:${name}:${error.code || 'error'}`); }
   }
@@ -91,7 +98,8 @@ async function diagnose(paths, args) {
         activity: snapshot.activity,
         session_id: snapshot.session_id ?? snapshot.zcode_session_id ?? snapshot.task?.session_id ?? snapshot.task?.zcode_session_id ?? null,
         turn_id: snapshot.turn_id ?? snapshot.task?.turn_id ?? null,
-        request_ids: Array.isArray(snapshot.pending_requests) ? snapshot.pending_requests.map((request) => request.request_id).filter(Boolean) : [],
+        request_ids: [snapshot.__request_id, ...(Array.isArray(snapshot.pending_requests) ? snapshot.pending_requests.map((request) => request.request_id).filter(Boolean) : [])].filter(Boolean),
+        identifiers_complete: Boolean(snapshot.__request_id),
         pending_request_count: Array.isArray(snapshot.pending_requests) ? snapshot.pending_requests.length : null,
         result_available: snapshot.result_available ?? false,
         observed_at_ms: Date.now(),

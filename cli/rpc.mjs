@@ -117,7 +117,11 @@ export function callDaemon(socketPath, command, input, timeoutMs = 6000) {
         if (response.version !== RPC_VERSION || response.request_id !== request_id) finish(reject, new CliError('PROTOCOL_ERROR', 'daemon returned an RPC response for a different version or request'));
         else if (response.outcome === 'error') { const daemon = response.error || {}; const error = new CliError(daemon.code || 'DAEMON_ERROR', daemon.message || 'daemon request failed'); error.agentId = daemon.active_agent_id; finish(reject, error); }
         else if (response.outcome === 'success') {
-          try { finish(resolve, projectDaemonResult(command, response.result)); }
+          try {
+            const projected = projectDaemonResult(command, response.result);
+            Object.defineProperty(projected, '__request_id', { value: request_id, enumerable: false });
+            finish(resolve, projected);
+          }
           catch (error) { finish(reject, error instanceof CliError ? error : new CliError('PROTOCOL_ERROR', 'daemon returned an invalid public result')); }
         }
         else finish(reject, new CliError('PROTOCOL_ERROR', 'daemon returned an invalid RPC response'));
