@@ -318,6 +318,8 @@ pub struct AgentCapabilitiesView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskView {
     pub agent_id: String,
+    pub session_id: Option<String>,
+    pub turn_id: Option<String>,
     pub phase: String,
     pub outcome: Option<TaskOutcome>,
     pub reason_code: Option<String>,
@@ -986,6 +988,8 @@ fn format_task_cursor(cursor: u64) -> String {
 fn task_view(task: TaskRecord) -> TaskView {
     TaskView {
         agent_id: task.agent_id,
+        session_id: task.zcode_session_id,
+        turn_id: None,
         phase: match task.phase {
             TaskPhase::Queued => "QUEUED",
             TaskPhase::Preparing => "PREPARING",
@@ -1153,6 +1157,8 @@ mod result_paging_tests {
     fn task() -> TaskView {
         TaskView {
             agent_id: "a".repeat(256),
+            session_id: None,
+            turn_id: None,
             phase: "TERMINAL".into(),
             outcome: Some(TaskOutcome::Completed),
             reason_code: Some("r".repeat(256)),

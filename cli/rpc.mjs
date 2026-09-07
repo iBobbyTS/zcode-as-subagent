@@ -51,6 +51,8 @@ function methodFor(command, input) {
 function publicTask(task) {
   return {
     agent_id: task.agent_id,
+    session_id: task.session_id ?? null,
+    turn_id: task.turn_id ?? null,
     phase: task.phase,
     outcome: task.outcome ?? null,
     reason_code: task.reason_code ?? null,
