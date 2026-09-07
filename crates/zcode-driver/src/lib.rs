@@ -181,6 +181,8 @@ pub struct Driver {
     identity: ProcessIdentity,
     pending: Arc<Mutex<PendingMap>>,
     subscribers: Arc<Mutex<Vec<Sender<Inbound>>>>,
+    diagnostics: Arc<Mutex<Vec<u8>>>,
+    diagnostics_done: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl Driver {
@@ -223,10 +225,20 @@ impl Driver {
         let (read_done_tx, read_done_rx) = mpsc::channel();
         thread::spawn(move || read_loop(stdout, read_tx, read_done_tx));
         // Always drain diagnostics independently of the protocol stream. A
-        // noisy runtime must not block on its stderr pipe and prevent a
-        // response from reaching stdout. Diagnostics are intentionally
-        // discarded so they can never contaminate stdout or leak secrets.
-        thread::spawn(move || drain_stderr(stderr));
+        // noisy runtime must not block stdout. The bounded diagnostic tail is
+        // retained for the daemon's failure projection, never raw-unbounded.
+        let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let diagnostics_done = Arc::new((Mutex::new(false), Condvar::new()));
+        thread::spawn({
+            let diagnostics = Arc::clone(&diagnostics);
+            let diagnostics_done = Arc::clone(&diagnostics_done);
+            move || {
+                drain_stderr(stderr, diagnostics);
+                let (done, cvar) = &*diagnostics_done;
+                *done.lock().unwrap() = true;
+                cvar.notify_all();
+            }
+        });
         let child_ref = Arc::new(Mutex::new(Some(child)));
         let monitor_ref = Arc::clone(&child_ref);
         let termination = Arc::new((Mutex::new(None), Condvar::new()));
@@ -252,6 +264,8 @@ impl Driver {
             identity,
             pending,
             subscribers,
+            diagnostics,
+            diagnostics_done,
         })
     }
     #[cfg(test)]
@@ -373,6 +387,16 @@ impl Driver {
     pub fn identity(&self) -> ProcessIdentity {
         self.identity.clone()
     }
+
+    pub fn diagnostic_tail(&self) -> String {
+        String::from_utf8_lossy(&self.diagnostics.lock().unwrap()).into_owned()
+    }
+
+    pub fn wait_diagnostics(&self, timeout: Duration) {
+        let (done, cvar) = &*self.diagnostics_done;
+        let guard = done.lock().unwrap();
+        let _ = cvar.wait_timeout_while(guard, timeout, |finished| !*finished);
+    }
     pub fn stop_and_reap(&self, timeout: Duration) -> std::io::Result<StopOutcome> {
         let generation = match self.begin_stop()? {
             BeginStop::Perform(generation) => generation,
@@ -472,6 +496,9 @@ impl Driver {
             }
         }
         ready.notify_all();
+        if result.is_ok() {
+            self.wait_diagnostics(Duration::from_secs(1));
+        }
         result.map_err(|failure| failure.to_error())
     }
 
@@ -527,12 +554,13 @@ impl Driver {
         while guard.is_none() {
             guard = cvar.wait(guard).unwrap();
         }
-        Ok(
-            match guard.as_ref().expect("child monitor publishes before wake") {
-                ChildExit::Exited(code) => *code,
-                _ => None,
-            },
-        )
+        let exit_code = match guard.as_ref().expect("child monitor publishes before wake") {
+            ChildExit::Exited(code) => *code,
+            _ => None,
+        };
+        drop(guard);
+        self.wait_diagnostics(Duration::from_secs(1));
+        Ok(exit_code)
     }
 }
 
@@ -1078,8 +1106,20 @@ fn platform_observe_process_group(_pgid: i32) -> io::Result<Vec<ProcessIdentity>
     ))
 }
 
-fn drain_stderr(mut stderr: impl Read + Send + 'static) {
-    let _ = io::copy(&mut stderr, &mut io::sink());
+fn drain_stderr(mut stderr: impl Read + Send + 'static, diagnostics: Arc<Mutex<Vec<u8>>>) {
+    const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
+    let mut buffer = [0u8; 4096];
+    while let Ok(count) = stderr.read(&mut buffer) {
+        if count == 0 {
+            break;
+        }
+        let mut retained = diagnostics.lock().unwrap();
+        retained.extend_from_slice(&buffer[..count]);
+        if retained.len() > MAX_DIAGNOSTIC_BYTES {
+            let split = retained.len() - MAX_DIAGNOSTIC_BYTES;
+            retained.drain(..split);
+        }
+    }
 }
 impl Drop for Driver {
     fn drop(&mut self) {
@@ -1608,6 +1648,45 @@ mod tests {
             .unwrap();
         assert_eq!(response.id, WireId::Integer(1));
         d.stop().unwrap();
+    }
+
+    #[test]
+    fn diagnostic_tail_is_live_and_retains_latest_bytes() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "printf 'first' >&2; sleep 1; printf 'second' >&2; sleep 1",
+        ]);
+        let driver = Driver::spawn(command).unwrap();
+        let first_deadline = Instant::now() + Duration::from_secs(1);
+        while !driver.diagnostic_tail().contains("first") {
+            assert!(
+                Instant::now() < first_deadline,
+                "stderr tail was not readable while running"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let second_deadline = Instant::now() + Duration::from_secs(2);
+        while !driver.diagnostic_tail().contains("second") {
+            assert!(
+                Instant::now() < second_deadline,
+                "stderr tail did not include later chunk"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(driver.diagnostic_tail().ends_with("firstsecond"));
+        driver.stop().unwrap();
+    }
+
+    #[test]
+    fn diagnostic_tail_is_bounded_to_latest_output_after_fast_exit() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "head -c 20000 /dev/zero | tr '\\0' x >&2"]);
+        let driver = Driver::spawn(command).unwrap();
+        assert_eq!(driver.wait().unwrap(), Some(0));
+        let tail = driver.diagnostic_tail();
+        assert_eq!(tail.len(), 16 * 1024);
+        assert!(tail.bytes().all(|byte| byte == b'x'));
     }
 
     #[test]

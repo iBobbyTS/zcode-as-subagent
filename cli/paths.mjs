@@ -13,7 +13,6 @@ export function productPaths(home = os.homedir()) {
     data,
     config: path.join(data, 'config.json'),
     state: path.join(data, 'install-state.json'),
-    provenance: path.join(data, 'model-catalog-provenance.json'),
     hookProvenance: path.join(data, 'zcode-agent-hook-provenance.json'),
     database: path.join(data, 'zcode-as-subagent.sqlite3'),
     socket: path.join(data, 'zcode-as-subagent.sock'),
@@ -21,6 +20,11 @@ export function productPaths(home = os.homedir()) {
     launchAgent: path.join(home, 'Library', 'LaunchAgents', `${LAUNCH_AGENT_LABEL}.plist`),
     zcodeConfig: path.join(home, '.zcode', 'cli', 'config.json'),
   };
+}
+
+export function codexConfigPath(home = os.homedir()) {
+  const codexHome = process.env.CODEX_HOME || path.join(home, '.codex');
+  return path.join(codexHome, 'config.toml');
 }
 
 export function legacyPaths(home = os.homedir()) {

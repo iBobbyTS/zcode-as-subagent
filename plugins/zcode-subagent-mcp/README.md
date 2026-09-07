@@ -15,12 +15,9 @@ invoke a second supervisor, provide old aliases, or migrate legacy data.
 .codex-plugin/plugin.json
 .mcp.json
 hooks/hooks.json
-hooks/check-bash-readonly.mjs
 hooks/check-agent-files.mjs
 hooks/audit-bash-result.mjs
-lib/bash-policy.mjs
 lib/agent-file-policy.mjs
-policy-corpus.json
 scripts/install-agent-hooks.mjs
 scripts/check-agent-hooks.mjs
 scripts/preflight-agent-hooks.mjs
@@ -48,11 +45,10 @@ node scripts/check-agent-hooks.mjs --config /absolute/config.json \
 
 The installer is idempotent and preserves unrelated hook matchers. It refuses
 to replace an unknown managed Bash or file hook. Preflight invokes a safe read,
-denies a destructive canary, and records the installed artifact identity.
-`ZCODE_AGENT_HOOK_PROVENANCE` is the only provenance path consumed by the
-daemon. Export the installer's `service_generation` result as
-`ZCODE_AGENT_SERVICE_GENERATION` for the daemon. A missing, stale, tampered,
-or generation-mismatched record prevents daemon startup.
+denies a destructive canary, and records the installed policy identity.
+`ZCODE_AGENT_HOOK_PROVENANCE` is consumed only by explicit hook checks. Hooks
+are optional and a missing or stale record does not prevent daemon startup.
+The installer generates and persists the service identity automatically.
 
 ## Security contract
 
@@ -60,7 +56,7 @@ The Bash policy allows only a closed set of simple read-only commands with
 canonical path confinement. Shell composition, writes, executable wrappers,
 secrets, Git mutations, path traversal, symlink escape, and ambiguous options
 are denied. The file policy requires `ZCODE_AGENT_POLICY=1`, a canonical
-`ZCODE_AGENT_WORKTREE_ROOT`, and a frozen `ZCODE_AGENT_WRITE_MANIFEST` for
+the canonical workspace and a frozen `ZCODE_AGENT_WRITE_MANIFEST` for
 mutations. Bootstrap roots are explicit read-only inputs.
 
 The policy never trusts the caller's `PATH`, command arguments are bounded, and

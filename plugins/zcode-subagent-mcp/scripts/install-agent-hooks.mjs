@@ -48,27 +48,14 @@ const hashFile = (file) => crypto.createHash('sha256').update(fs.readFileSync(fi
 // Resolve every shipped decision owner before mutating the caller's config.
 // A copied or incomplete plugin must fail without leaving a partial install.
 const effectiveConfigPath = path.resolve(configPath);
-const effectiveHookPath = path.join(hookRoot, 'lib', 'bash-policy.mjs');
 const effectiveFilePolicyPath = path.join(hookRoot, 'lib', 'agent-file-policy.mjs');
-const guardWrapperPath = path.join(hookRoot, 'hooks', 'check-bash-readonly.mjs');
 const auditWrapperPath = path.join(hookRoot, 'hooks', 'audit-bash-result.mjs');
 const fileWrapperPath = path.join(hookRoot, 'hooks', 'check-agent-files.mjs');
 const daemonSourcePath = path.join(pluginRoot, '..', '..', 'crates', 'zcode-agent-preparation', 'src', 'policy.rs');
-const hookSource = fs.readFileSync(effectiveHookPath);
-const hookSha256 = crypto.createHash('sha256').update(hookSource).digest('hex');
 const filePolicySha256 = hashFile(effectiveFilePolicyPath);
-const daemonSource = fs.readFileSync(daemonSourcePath);
-const daemonSha256 = crypto.createHash('sha256').update(daemonSource).digest('hex');
-const priorProvenance = readJson(provenancePath, null);
-const serviceGeneration = typeof priorProvenance?.service_generation === 'string' && priorProvenance.service_generation.length > 0
-  ? priorProvenance.service_generation
-  : crypto.randomBytes(16).toString('hex');
 if (effectiveConfigPath === path.resolve(provenancePath)) throw new Error('config and provenance paths must differ');
 const events = {
-  PreToolUse: [
-    { matcher: 'Bash', script: 'hooks/check-bash-readonly.mjs' },
-    { matcher: '^(Read|Grep|Glob|Write|Edit|Delete|Move)$', script: 'hooks/check-agent-files.mjs' },
-  ],
+  PreToolUse: [{ matcher: '^(Read|Grep|Glob|Write|Edit|Delete|Move)$', script: 'hooks/check-agent-files.mjs' }],
   PostToolUse: [{ matcher: 'Bash', script: 'hooks/audit-bash-result.mjs' }],
   PostToolUseFailure: [{ matcher: 'Bash', script: 'hooks/audit-bash-result.mjs' }],
 };
@@ -108,28 +95,18 @@ for (const [event, expectedEntries] of Object.entries(events)) {
 }
 const nextConfigBytes = encodeJson(next);
 const nextProvenance = {
-  daemon_policy_version: 'zcode-agent-bash/v1.0.0',
-  daemon_policy_sha256: daemonSha256,
-  expected_hook_version: 'zcode-agent-bash/v1.0.0',
-  expected_hook_sha256: hookSha256,
-  effective_hook_version: 'zcode-agent-bash/v1.0.0',
-  effective_hook_sha256: hookSha256,
-  effective_hook_path: effectiveHookPath,
   effective_file_policy_version: 'zcode-agent-file-policy/v1.0.0',
   effective_file_policy_sha256: filePolicySha256,
   effective_file_policy_path: effectiveFilePolicyPath,
   effective_config_path: effectiveConfigPath,
   effective_config_sha256: crypto.createHash('sha256').update(nextConfigBytes).digest('hex'),
-  effective_guard_wrapper_path: guardWrapperPath,
-  effective_guard_wrapper_sha256: hashFile(guardWrapperPath),
   effective_audit_wrapper_path: auditWrapperPath,
   effective_audit_wrapper_sha256: hashFile(auditWrapperPath),
   effective_file_wrapper_path: fileWrapperPath,
   effective_file_wrapper_sha256: hashFile(fileWrapperPath),
   hook_activation_verified: false,
   activation_method: 'outer-plugin-install',
-  activation_generation: `${Date.now()}-${hookSha256.slice(0, 12)}`,
-  service_generation: serviceGeneration,
+  activation_generation: `${Date.now()}-${filePolicySha256.slice(0, 12)}`,
 };
 const previousProvenance = fs.existsSync(provenancePath) ? fs.readFileSync(provenancePath) : null;
 atomicWrite(provenancePath, nextProvenance);
@@ -145,4 +122,4 @@ try {
   }
   throw error;
 }
-console.log(JSON.stringify({ config: effectiveConfigPath, provenance: path.resolve(provenancePath), hook_sha256: hookSha256, file_policy_sha256: filePolicySha256, service_generation: serviceGeneration }));
+console.log(JSON.stringify({ config: effectiveConfigPath, provenance: path.resolve(provenancePath), file_policy_sha256: filePolicySha256 }));

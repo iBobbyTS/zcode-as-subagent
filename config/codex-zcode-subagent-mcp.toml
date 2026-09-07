@@ -1,6 +1,6 @@
 # Merge this table into ~/.codex/config.toml and replace the absolute paths.
-[mcp_servers.zcode_subagent]
-command = "/absolute/path/to/zcode-mcp/target/release/zcode-subagent-mcp"
+[mcp_servers.zcode_as_subagent]
+command = "/absolute/path/to/zcode-mcp/target/release/zcode-as-subagent-mcp"
 enabled = true
 required = true
 startup_timeout_sec = 10
@@ -14,21 +14,21 @@ enabled_tools = [
   "zcode_subagent_result",
   "zcode_subagent_send",
   "zcode_subagent_spawn",
-  "zcode_subagent_system_status",
+  "zcode_subagent_status",
 ]
 default_tools_approval_mode = "prompt"
 
-[mcp_servers.zcode_subagent.env]
+[mcp_servers.zcode_as_subagent.env]
 ZCODE_AGENTD_SOCKET = "/absolute/private/zcode-agentd.sock"
 
-[mcp_servers.zcode_subagent.tools.zcode_subagent_system_status]
+[mcp_servers.zcode_as_subagent.tools.zcode_subagent_status]
 approval_mode = "auto"
 
-[mcp_servers.zcode_subagent.tools.zcode_subagent_list]
+[mcp_servers.zcode_as_subagent.tools.zcode_subagent_list]
 approval_mode = "auto"
 
-[mcp_servers.zcode_subagent.tools.zcode_subagent_poll]
+[mcp_servers.zcode_as_subagent.tools.zcode_subagent_poll]
 approval_mode = "auto"
 
-[mcp_servers.zcode_subagent.tools.zcode_subagent_result]
+[mcp_servers.zcode_as_subagent.tools.zcode_subagent_result]
 approval_mode = "auto"

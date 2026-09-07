@@ -1,11 +1,10 @@
 # Hook integration
 
 The plugin root is the only installation surface. `hooks/hooks.json` registers
-the Bash guard, file guard, and metadata-only Bash audit wrapper. The daemon
-consumes the verified record at `ZCODE_AGENT_HOOK_PROVENANCE`; it does not
-derive service identity from the hook activation generation. The installer
-emits a separate `service_generation`, and daemon startup accepts it only when
-`ZCODE_AGENT_SERVICE_GENERATION` matches the verified record exactly.
+the Bash guard, file guard, and metadata-only Bash audit wrapper. The hook
+scripts consume the verified record at `ZCODE_AGENT_HOOK_PROVENANCE`. The
+daemon does not require hook provenance or caller-supplied generation; service
+identity is generated automatically.
 
 ## Runtime environment
 
@@ -13,7 +12,6 @@ The daemon injects these values into each ZCode child:
 
 ```text
 ZCODE_AGENT_POLICY=1
-ZCODE_AGENT_WORKTREE_ROOT=/absolute/prepared/worktree
 ZCODE_AGENT_WRITE_MANIFEST=["src"]
 ZCODE_AGENT_BOOTSTRAP_ROOTS=/Applications/ZCode.app
 ```
@@ -35,8 +33,8 @@ for isolated test configurations.
 
 ## Bash policy
 
-`lib/bash-policy.mjs` and `crates/zcode-agent-preparation/src/policy.rs` are the
-two decision owners. Both consume `policy-corpus.json`; the daemon source hash
+The official runtime and caller own Bash permission decisions. The file hook
+only enforces the declared workspace boundary; the daemon source hash
 and JavaScript source hash are recorded in provenance. Shell composition,
 redirection, command substitution, caller environment assignments, unknown
 executables, path escapes, secret paths, symlink escapes, and Git ref mutation

@@ -1,20 +1,10 @@
 use crate::{AccessMode, PreparationError, PreparationResult};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
     ffi::{OsStr, OsString},
     fs,
-    io::{ErrorKind, Read},
-    os::unix::process::CommandExt,
+    io::ErrorKind,
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
-    sync::mpsc,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    thread,
-    time::{Duration, Instant},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,22 +49,6 @@ impl PolicyCapabilities {
             os_sandbox: SandboxEnforcement::Unsupported,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PreparedCommand {
-    pub program: PathBuf,
-    pub args: Vec<String>,
-    pub cwd: PathBuf,
-    pub timeout_ms: u64,
-    pub max_output_bytes: usize,
-    pub environment: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub readonly_safe: bool,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,17 +152,6 @@ impl ValidatedPermissionDenial {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ValidationOutput {
-    pub status_code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-    pub stdout_truncated: bool,
-    pub stderr_truncated: bool,
-    pub timed_out: bool,
-    pub cancelled: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntryState {
     Existing,
@@ -201,11 +164,11 @@ pub struct PolicyLauncher {
     scratch_root: PathBuf,
     report_target: PathBuf,
     readable_inputs: Vec<PathBuf>,
-    commands: BTreeMap<String, PreparedCommand>,
     network_allowed: bool,
     capabilities: PolicyCapabilities,
     access_mode: AccessMode,
     tracked_write_roots: Vec<PathBuf>,
+    interactive_bash: bool,
 }
 
 impl PolicyLauncher {
@@ -214,7 +177,6 @@ impl PolicyLauncher {
         scratch_root: PathBuf,
         report_target: PathBuf,
         readable_inputs: Vec<PathBuf>,
-        commands: BTreeMap<String, PreparedCommand>,
         network_allowed: bool,
         capabilities: PolicyCapabilities,
     ) -> PreparationResult<Self> {
@@ -243,11 +205,11 @@ impl PolicyLauncher {
             scratch_root,
             report_target,
             readable_inputs,
-            commands,
             network_allowed,
             capabilities,
             access_mode: AccessMode::ReadOnly,
             tracked_write_roots: Vec::new(),
+            interactive_bash: false,
         })
     }
 
@@ -255,9 +217,8 @@ impl PolicyLauncher {
     pub fn for_general(
         worktree: PathBuf,
         scratch_root: PathBuf,
-        artifact_target: PathBuf,
+        result_target: PathBuf,
         readable_inputs: Vec<PathBuf>,
-        commands: BTreeMap<String, PreparedCommand>,
         capabilities: PolicyCapabilities,
         access_mode: AccessMode,
         mut tracked_write_roots: Vec<PathBuf>,
@@ -265,9 +226,8 @@ impl PolicyLauncher {
         let mut launcher = Self::new(
             worktree,
             scratch_root,
-            artifact_target,
+            result_target,
             readable_inputs,
-            commands,
             false,
             capabilities,
         )?;
@@ -292,6 +252,10 @@ impl PolicyLauncher {
 
     pub fn capabilities(&self) -> &PolicyCapabilities {
         &self.capabilities
+    }
+
+    pub fn set_interactive_bash(&mut self, enabled: bool) {
+        self.interactive_bash = enabled;
     }
 
     /// Produces policy identity from the daemon's own closed decision result.
@@ -365,6 +329,19 @@ impl PolicyLauncher {
         let input = params.get("input").unwrap_or(&serde_json::Value::Null);
         if tool_name == "Bash" {
             if self.access_mode != AccessMode::ReadOnly {
+                if self.interactive_bash {
+                    return if external == ExternalDecision::Deny {
+                        PermissionDecision {
+                            allowed: false,
+                            reason: "external_policy_denied",
+                        }
+                    } else {
+                        PermissionDecision {
+                            allowed: true,
+                            reason: "interactive_permission_required",
+                        }
+                    };
+                }
                 return PermissionDecision {
                     allowed: false,
                     reason: "permission_request_unrecognized",
@@ -586,48 +563,6 @@ impl PolicyLauncher {
         })
     }
 
-    pub fn run(&self, command_id: &str) -> PreparationResult<ValidationOutput> {
-        let cancellation = AtomicBool::new(false);
-        self.run_cancellable(
-            command_id,
-            Instant::now() + Duration::from_secs(86_400),
-            &cancellation,
-        )
-    }
-
-    pub fn run_cancellable(
-        &self,
-        command_id: &str,
-        task_deadline: Instant,
-        cancellation: &AtomicBool,
-    ) -> PreparationResult<ValidationOutput> {
-        let prepared = self.commands.get(command_id).ok_or_else(|| {
-            PreparationError::Policy(format!(
-                "command {command_id} is not in the exact allowlist"
-            ))
-        })?;
-        if fs::canonicalize(&self.worktree)? != self.worktree
-            || fs::canonicalize(&prepared.cwd)? != prepared.cwd
-            || !prepared.cwd.starts_with(&self.worktree)
-            || fs::canonicalize(&prepared.program)? != prepared.program
-            || !prepared.program.is_file()
-        {
-            return Err(PreparationError::Policy(
-                "named command path identity is no longer valid".into(),
-            ));
-        }
-        let request = PermissionRequest::Execute {
-            program: prepared.program.clone(),
-            args: prepared.args.clone(),
-            cwd: prepared.cwd.clone(),
-        };
-        let decision = self.decide(&request, ExternalDecision::Allow);
-        if !decision.allowed {
-            return Err(PreparationError::Policy(decision.reason.into()));
-        }
-        execute(prepared, task_deadline, cancellation)
-    }
-
     fn hard_deny_reason(&self, request: &PermissionRequest) -> Option<&'static str> {
         match request {
             PermissionRequest::Network(_) if !self.network_allowed => {
@@ -666,15 +601,7 @@ impl PolicyLauncher {
             } => self
                 .lexical_entry_denial(source, true)
                 .or_else(|| self.lexical_entry_denial(destination, false)),
-            PermissionRequest::Execute { program, args, cwd } => {
-                if self.commands.values().any(|command| {
-                    &command.program == program && &command.args == args && &command.cwd == cwd
-                }) {
-                    None
-                } else {
-                    Some("command_not_allowlisted")
-                }
-            }
+            PermissionRequest::Execute { .. } => None,
         }
     }
 
@@ -803,13 +730,13 @@ impl PolicyLauncher {
             };
         }
         if target.starts_with(report_root) {
-            return Some("daemon_artifact_root_denied");
+            return Some("daemon_result_root_denied");
         }
         if target == self.scratch_root
             || target == report_root
             || (!target.starts_with(&self.scratch_root) && !target.starts_with(report_root))
         {
-            Some("write_outside_artifact_roots_denied")
+            Some("write_outside_result_roots_denied")
         } else {
             None
         }
@@ -1650,60 +1577,12 @@ fn protected_worktree_path(worktree: &Path, target: &Path) -> bool {
     })
 }
 
-pub(crate) fn prepare_command(
-    program: &Path,
-    args: &[String],
-    cwd: &Path,
-    worktree: &Path,
-    scratch_root: &Path,
-    bounds: (u64, usize, bool),
-) -> PreparationResult<PreparedCommand> {
-    let (timeout_ms, max_output_bytes, network_allowed) = bounds;
-    if timeout_ms == 0 || max_output_bytes == 0 {
-        return Err(PreparationError::InvalidManifest(
-            "validation command bounds must be non-zero".into(),
-        ));
-    }
-    let program = fs::canonicalize(program).map_err(|error| PreparationError::InvalidPath {
-        path: program.to_path_buf(),
-        reason: error.to_string(),
-    })?;
-    if !program.is_file() {
-        return Err(PreparationError::InvalidPath {
-            path: program,
-            reason: "command is not a regular file".into(),
-        });
-    }
-    let cwd = fs::canonicalize(cwd).map_err(|error| PreparationError::InvalidPath {
-        path: cwd.to_path_buf(),
-        reason: error.to_string(),
-    })?;
-    if !cwd.starts_with(worktree) {
-        return Err(PreparationError::PathEscape {
-            path: cwd,
-            root: worktree.to_path_buf(),
-        });
-    }
-    validate_program_and_args(&program, args, worktree, scratch_root, network_allowed)?;
-    let home = scratch_root.join("home");
-    let temporary = scratch_root.join("tmp");
-    fs::create_dir_all(&home)?;
-    fs::create_dir_all(&temporary)?;
-    let mut environment = BTreeMap::new();
-    environment.insert("HOME".into(), home.to_string_lossy().into_owned());
-    environment.insert("TMPDIR".into(), temporary.to_string_lossy().into_owned());
-    environment.insert("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into());
-    environment.insert("LANG".into(), "C".into());
-    environment.insert("LC_ALL".into(), "C".into());
-    Ok(PreparedCommand {
-        program,
-        args: args.to_vec(),
-        cwd,
-        timeout_ms,
-        max_output_bytes,
-        environment,
-        readonly_safe: false,
-    })
+fn valid_positive_integer(value: &str) -> bool {
+    value.parse::<u32>().is_ok_and(|value| value > 0)
+}
+
+fn valid_nonnegative_integer(value: &str) -> bool {
+    value.parse::<u16>().is_ok()
 }
 
 fn permission_denial_semantics(
@@ -1764,10 +1643,10 @@ fn permission_denial_semantics(
             "mutation".into(),
         ),
         _ if tool.starts_with("mcp__") => (
-            "named_check".into(),
-            "named_check".into(),
+            "mcp_tool".into(),
+            "mcp_tool".into(),
             "permission_request_unrecognized".into(),
-            "named_check".into(),
+            "unknown".into(),
         ),
         _ => (
             tool.clone(),
@@ -2045,7 +1924,7 @@ fn denial_recovery(
                 | "python3"
                 | "go"
         ) {
-            return ("use_named_check", "use_named_check");
+            return ("use_prepared_inputs", "use_prepared_inputs");
         }
         return ("use_read", "use_read_or_prepared_inputs");
     }
@@ -2151,492 +2030,6 @@ fn valid_agent_sed(args: &[String]) -> bool {
         return false;
     }
     args[2..].iter().all(|arg| !arg.starts_with('-'))
-}
-
-fn validate_program_and_args(
-    program: &Path,
-    args: &[String],
-    worktree: &Path,
-    scratch_root: &Path,
-    network_allowed: bool,
-) -> PreparationResult<()> {
-    let name = program
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if !network_allowed
-        && matches!(
-            name.as_str(),
-            "curl" | "wget" | "ssh" | "scp" | "sftp" | "nc" | "ncat" | "telnet" | "ftp"
-        )
-    {
-        return Err(PreparationError::Policy(
-            "known network client is forbidden".into(),
-        ));
-    }
-    if matches!(name.as_str(), "sh" | "bash" | "zsh" | "fish") {
-        return Err(PreparationError::Policy(
-            "shell interpreters are not validation commands".into(),
-        ));
-    }
-    if name == "env" && !args.is_empty() {
-        return Err(PreparationError::Policy(
-            "env may inspect the sanitized environment but cannot launch another command".into(),
-        ));
-    }
-    if name == "git" {
-        validate_git_args(args, worktree, scratch_root)?;
-    }
-    for argument in args {
-        if argument.contains('\0') || argument.contains('\n') || argument.contains('\r') {
-            return Err(PreparationError::Policy(
-                "command arguments may not contain control separators".into(),
-            ));
-        }
-        let lowercase = argument.to_ascii_lowercase();
-        if !network_allowed
-            && (lowercase.contains("http://")
-                || lowercase.contains("https://")
-                || lowercase.starts_with("ssh://")
-                || lowercase.starts_with("git@"))
-        {
-            return Err(PreparationError::Policy(
-                "network-oriented command argument is forbidden".into(),
-            ));
-        }
-        let argument_path = Path::new(argument);
-        if argument_path.is_absolute()
-            && !argument_path.starts_with(worktree)
-            && !argument_path.starts_with(scratch_root)
-            && argument_path != program
-        {
-            return Err(PreparationError::Policy(
-                "absolute command argument escapes job roots".into(),
-            ));
-        }
-        if argument_path
-            .components()
-            .any(|component| component == Component::ParentDir)
-        {
-            return Err(PreparationError::Policy(
-                "parent traversal in command argument is forbidden".into(),
-            ));
-        }
-        if is_credential_path(argument_path) {
-            return Err(PreparationError::Policy(
-                "credential-oriented command argument is forbidden".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_git_args(
-    args: &[String],
-    worktree: &Path,
-    scratch_root: &Path,
-) -> PreparationResult<()> {
-    let verb = args.first().map(String::as_str).unwrap_or_default();
-    if !matches!(verb, "diff" | "status" | "log" | "show" | "rev-parse") {
-        return Err(PreparationError::Policy(
-            "Git command may read state but may not mutate refs or files".into(),
-        ));
-    }
-    let mut index = 1usize;
-    let mut pathspecs = false;
-    let mut no_ext_diff = false;
-    let mut no_textconv = false;
-    while index < args.len() {
-        let argument = &args[index];
-        if pathspecs {
-            validate_git_path_value(argument, worktree, scratch_root)?;
-            index += 1;
-            continue;
-        }
-        if argument == "--" {
-            pathspecs = true;
-            index += 1;
-            continue;
-        }
-        if !argument.starts_with('-') || argument == "-" {
-            if verb == "status" {
-                return Err(PreparationError::Policy(
-                    "Git status pathspecs must follow an explicit -- separator".into(),
-                ));
-            }
-            index += 1;
-            continue;
-        }
-        if argument == "--no-ext-diff" {
-            no_ext_diff = true;
-        }
-        if argument == "--no-textconv" {
-            no_textconv = true;
-        }
-        if git_flag_allowed(verb, argument) {
-            index += 1;
-            continue;
-        }
-        if let Some(value) = argument.strip_prefix("--max-count=") {
-            if verb == "log" && valid_positive_integer(value) {
-                index += 1;
-                continue;
-            }
-        }
-        if let Some(value) = argument.strip_prefix("--unified=") {
-            if verb == "diff" && valid_nonnegative_integer(value) {
-                index += 1;
-                continue;
-            }
-        }
-        if let Some(value) = argument
-            .strip_prefix("--format=")
-            .or_else(|| argument.strip_prefix("--pretty="))
-        {
-            if matches!(verb, "log" | "show") && !value.is_empty() {
-                index += 1;
-                continue;
-            }
-        }
-        if let Some(value) = argument.strip_prefix("--color=") {
-            if matches!(verb, "diff" | "log" | "show") && value == "never" {
-                index += 1;
-                continue;
-            }
-        }
-        if let Some(value) = argument.strip_prefix("--porcelain=") {
-            if verb == "status" && matches!(value, "v1" | "v2") {
-                index += 1;
-                continue;
-            }
-        }
-        if let Some(value) = argument.strip_prefix("--untracked-files=") {
-            if verb == "status" && matches!(value, "no" | "normal" | "all") {
-                index += 1;
-                continue;
-            }
-        }
-        if argument == "-n" || argument == "--max-count" {
-            let value = args.get(index + 1).ok_or_else(|| {
-                PreparationError::Policy("Git max-count option requires a value".into())
-            })?;
-            if verb == "log" && valid_positive_integer(value) {
-                index += 2;
-                continue;
-            }
-        }
-        return Err(PreparationError::Policy(format!(
-            "Git {verb} option is not in the strict read-only grammar: {argument}"
-        )));
-    }
-    if matches!(verb, "diff" | "log" | "show") && (!no_ext_diff || !no_textconv) {
-        return Err(PreparationError::Policy(format!(
-            "Git {verb} must explicitly disable external diff and textconv execution"
-        )));
-    }
-    Ok(())
-}
-
-fn git_flag_allowed(verb: &str, argument: &str) -> bool {
-    match verb {
-        "diff" => matches!(
-            argument,
-            "--no-ext-diff"
-                | "--no-textconv"
-                | "--cached"
-                | "--staged"
-                | "--stat"
-                | "--name-only"
-                | "--name-status"
-                | "--check"
-                | "--binary"
-                | "--full-index"
-                | "--no-renames"
-                | "--exit-code"
-                | "--quiet"
-                | "--no-color"
-                | "--patch"
-                | "--no-patch"
-                | "-p"
-                | "-s"
-        ),
-        "status" => matches!(
-            argument,
-            "--short"
-                | "-s"
-                | "--branch"
-                | "-b"
-                | "--porcelain"
-                | "--long"
-                | "--no-ahead-behind"
-                | "--show-stash"
-                | "--no-renames"
-        ),
-        "log" => matches!(
-            argument,
-            "--no-ext-diff"
-                | "--no-textconv"
-                | "--stat"
-                | "--name-only"
-                | "--name-status"
-                | "--no-color"
-                | "--no-patch"
-                | "-s"
-                | "--oneline"
-                | "--decorate"
-                | "--no-decorate"
-                | "--first-parent"
-                | "--all"
-        ),
-        "show" => matches!(
-            argument,
-            "--no-ext-diff"
-                | "--no-textconv"
-                | "--stat"
-                | "--name-only"
-                | "--name-status"
-                | "--no-color"
-                | "--no-patch"
-                | "-s"
-                | "--oneline"
-                | "--decorate"
-                | "--no-decorate"
-        ),
-        "rev-parse" => matches!(
-            argument,
-            "--verify"
-                | "--quiet"
-                | "-q"
-                | "--short"
-                | "--show-toplevel"
-                | "--show-prefix"
-                | "--is-inside-work-tree"
-                | "--is-bare-repository"
-                | "--is-shallow-repository"
-                | "--show-object-format"
-        ),
-        _ => false,
-    }
-}
-
-fn valid_positive_integer(value: &str) -> bool {
-    value.parse::<u32>().is_ok_and(|value| value > 0)
-}
-
-fn valid_nonnegative_integer(value: &str) -> bool {
-    value.parse::<u16>().is_ok()
-}
-
-fn validate_git_path_value(
-    value: &str,
-    worktree: &Path,
-    scratch_root: &Path,
-) -> PreparationResult<()> {
-    if value.is_empty() || value.starts_with('-') {
-        return Err(PreparationError::Policy(
-            "Git pathspec is empty or option-like".into(),
-        ));
-    }
-    let path = Path::new(value);
-    if path.is_absolute() && !path.starts_with(worktree) && !path.starts_with(scratch_root) {
-        return Err(PreparationError::Policy(
-            "Git pathspec escapes job roots".into(),
-        ));
-    }
-    if path
-        .components()
-        .any(|component| component == Component::ParentDir)
-    {
-        return Err(PreparationError::Policy(
-            "Git pathspec contains parent traversal".into(),
-        ));
-    }
-    if is_credential_path(path) {
-        return Err(PreparationError::Policy(
-            "Git credential-oriented pathspec is forbidden".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn execute(
-    prepared: &PreparedCommand,
-    task_deadline: Instant,
-    cancellation: &AtomicBool,
-) -> PreparationResult<ValidationOutput> {
-    let mut command = Command::new(&prepared.program);
-    command
-        .args(&prepared.args)
-        .current_dir(&prepared.cwd)
-        .env_clear()
-        .envs(&prepared.environment)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let mut child = command.spawn()?;
-    let pid = i32::try_from(child.id())
-        .map_err(|_| PreparationError::Policy("validation command process id is invalid".into()))?;
-    let stdout = child.stdout.take().expect("piped validation stdout");
-    let stderr = child.stderr.take().expect("piped validation stderr");
-    let max_stdout = prepared.max_output_bytes;
-    let max_stderr = prepared.max_output_bytes;
-    let output_limited = Arc::new(AtomicBool::new(false));
-    let stdout_reader = spawn_reader(stdout, max_stdout, Arc::clone(&output_limited));
-    let stderr_reader = spawn_reader(stderr, max_stderr, Arc::clone(&output_limited));
-    let command_deadline = Instant::now()
-        .checked_add(Duration::from_millis(prepared.timeout_ms))
-        .unwrap_or(task_deadline);
-    let deadline = command_deadline.min(task_deadline);
-    let (status, timed_out, cancelled) = loop {
-        if let Some(status) = child.try_wait()? {
-            break (status, false, false);
-        }
-        if cancellation.load(Ordering::Acquire) {
-            signal_group(pid, libc::SIGKILL)?;
-            let status = child.wait()?;
-            break (status, false, true);
-        }
-        if output_limited.load(Ordering::Acquire) {
-            signal_group(pid, libc::SIGKILL)?;
-            let status = child.wait()?;
-            break (status, false, false);
-        }
-        if Instant::now() >= deadline {
-            signal_group(pid, libc::SIGKILL)?;
-            let status = child.wait()?;
-            break (status, true, false);
-        }
-        thread::sleep(Duration::from_millis(2));
-    };
-    terminate_remaining_group(pid)?;
-    let (stdout, stdout_truncated) = receive_reader(stdout_reader, "stdout")?;
-    let (stderr, stderr_truncated) = receive_reader(stderr_reader, "stderr")?;
-    Ok(ValidationOutput {
-        status_code: status.code(),
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-        stdout_truncated,
-        stderr_truncated,
-        timed_out,
-        cancelled,
-    })
-}
-
-fn spawn_reader(
-    reader: impl Read + Send + 'static,
-    max_bytes: usize,
-    output_limited: Arc<AtomicBool>,
-) -> mpsc::Receiver<std::io::Result<(Vec<u8>, bool)>> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = sender.send(read_bounded(reader, max_bytes, &output_limited));
-    });
-    receiver
-}
-
-fn receive_reader(
-    receiver: mpsc::Receiver<std::io::Result<(Vec<u8>, bool)>>,
-    stream: &str,
-) -> PreparationResult<(Vec<u8>, bool)> {
-    receiver
-        .recv_timeout(Duration::from_secs(1))
-        .map_err(|_| {
-            PreparationError::Policy(format!(
-                "validation {stream} pipe remained open after process-group termination"
-            ))
-        })?
-        .map_err(PreparationError::Io)
-}
-
-fn terminate_remaining_group(pgid: i32) -> PreparationResult<()> {
-    if !process_group_exists(pgid)? {
-        return Ok(());
-    }
-    signal_group(pgid, libc::SIGTERM)?;
-    let term_deadline = Instant::now() + Duration::from_millis(50);
-    while process_group_exists(pgid)? && Instant::now() < term_deadline {
-        thread::sleep(Duration::from_millis(2));
-    }
-    if process_group_exists(pgid)? {
-        signal_group(pgid, libc::SIGKILL)?;
-    }
-    let kill_deadline = Instant::now() + Duration::from_secs(1);
-    while process_group_exists(pgid)? {
-        if Instant::now() >= kill_deadline {
-            return Err(PreparationError::Policy(
-                "validation process group remained alive after SIGKILL".into(),
-            ));
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
-    Ok(())
-}
-
-fn process_group_exists(pgid: i32) -> PreparationResult<bool> {
-    if pgid <= 1 {
-        return Err(PreparationError::Policy(
-            "validation process group identity is invalid".into(),
-        ));
-    }
-    let result = unsafe { libc::kill(-pgid, 0) };
-    if result == 0 {
-        return Ok(true);
-    }
-    let error = std::io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::ESRCH) => Ok(false),
-        Some(libc::EPERM) => Ok(true),
-        _ => Err(PreparationError::Io(error)),
-    }
-}
-
-fn signal_group(pgid: i32, signal: i32) -> PreparationResult<()> {
-    if pgid <= 1 {
-        return Err(PreparationError::Policy(
-            "validation process group identity is invalid".into(),
-        ));
-    }
-    let result = unsafe { libc::kill(-pgid, signal) };
-    if result == 0 {
-        return Ok(());
-    }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(PreparationError::Io(error))
-    }
-}
-
-fn read_bounded(
-    mut reader: impl Read,
-    max_bytes: usize,
-    output_limited: &AtomicBool,
-) -> std::io::Result<(Vec<u8>, bool)> {
-    let mut retained = Vec::with_capacity(max_bytes.min(8192));
-    let mut buffer = [0u8; 8192];
-    let mut truncated = false;
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            return Ok((retained, truncated));
-        }
-        let remaining = max_bytes.saturating_sub(retained.len());
-        retained.extend_from_slice(&buffer[..count.min(remaining)]);
-        truncated |= count > remaining;
-        if truncated {
-            output_limited.store(true, Ordering::Release);
-        }
-    }
 }
 
 pub(crate) fn is_credential_path(path: &Path) -> bool {

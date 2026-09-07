@@ -16,7 +16,7 @@ function fixture() {
 function env(root, manifest = []) {
   return {
     ZCODE_AGENT_POLICY: '1',
-    ZCODE_AGENT_WORKTREE_ROOT: root,
+    ZCODE_AGENT_WORKSPACE_ROOT: root,
     ZCODE_AGENT_WRITE_MANIFEST: JSON.stringify(manifest),
   };
 }
@@ -31,10 +31,10 @@ test('supports snake_case and camelCase hook payloads while redacting paths', ()
   assert.equal(denied.reason.includes(root), false);
 });
 
-test('requires marker and canonical root, and rejects traversal/symlink escape', () => {
+test('skips unmanaged sessions and rejects traversal/symlink escape when managed', () => {
   const root = fixture();
-  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: 'src/ok.txt' } }, {}).code, 'policy_marker_missing');
-  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: 'src/ok.txt' } }, { ZCODE_AGENT_POLICY: '1' }).code, 'worktree_root_missing');
+  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: 'src/ok.txt' } }, {}).code, 'policy_not_managed');
+  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: 'src/ok.txt' } }, { ZCODE_AGENT_POLICY: '1' }).code, 'workspace_root_missing');
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-agent-outside-'));
   fs.writeFileSync(path.join(outside, 'secret.txt'), 'secret');
   fs.symlinkSync(outside, path.join(root, 'link'));
@@ -51,7 +51,8 @@ test('permits explicitly configured bootstrap reads but never bootstrap writes',
   assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { file_path: path.join(bootstrap, 'runtime.js') }, cwd: root }, e).decision, 'allow');
   assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { file_path: '/etc/hosts' }, cwd: root }, e).decision, 'deny');
   assert.equal(evaluateAgentFileInput({ tool_name: 'Write', tool_input: { file_path: path.join(bootstrap, 'new.js') }, cwd: root }, e).code, 'write_not_allowlisted');
-  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { file_path: path.join(bootstrap, '.env') }, cwd: root }, e).decision, 'deny');
+  fs.writeFileSync(path.join(bootstrap, '.env'), 'ordinary bootstrap content');
+  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { file_path: path.join(bootstrap, '.env') }, cwd: root }, e).decision, 'allow');
   assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { file_path: path.join(bootstrap, 'missing') }, cwd: root }, { ...env(root), ZCODE_AGENT_BOOTSTRAP_ROOTS: JSON.stringify([path.join(root, '.zcode')]) }).code, 'bootstrap_roots_invalid');
 });
 
@@ -65,25 +66,37 @@ test('read-only denies mutations and workspace-write is manifest confined', () =
   assert.equal(evaluateAgentFileInput({ tool_name: 'Move', tool_input: { source: 'src/ok.txt', destination: 'other.txt' }, cwd: root }, writable).code, 'write_not_allowlisted');
 });
 
-test('rejects protected metadata and secrets for reads and manifests', () => {
+test('edit mode asks for external approval only for otherwise allowed writes', () => {
+  const root = fixture();
+  const edit = { ...env(root, ['src']), ZCODE_AGENT_PERMISSION_MODE: 'edit' };
+  assert.equal(evaluateAgentFileInput({ toolName: 'Edit', toolInput: { filePath: 'src/ok.txt' }, workingDirectory: root }, edit).decision, 'ask');
+  assert.equal(evaluateAgentFileInput({ toolName: 'Read', toolInput: { filePath: 'src/ok.txt' }, workingDirectory: root }, edit).decision, 'allow');
+  assert.equal(evaluateAgentFileInput({ toolName: 'Edit', toolInput: { filePath: 'outside.txt' }, workingDirectory: root }, edit).decision, 'deny');
+});
+
+test('rejects protected integration metadata without guessing sensitivity from filenames', () => {
   const root = fixture();
   fs.mkdirSync(path.join(root, '.git'), { recursive: true });
   fs.writeFileSync(path.join(root, '.env'), 'TOKEN=secret');
   const e = env(root);
   assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: '.git/config' }, cwd: root }, e).code, 'path_outside_root');
-  assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: '.env' }, cwd: root }, e).code, 'path_outside_root');
-  assert.equal(evaluateAgentFileInput({ tool_name: 'Write', tool_input: { path: 'src/api_key.txt' }, cwd: root }, env(root, ['src'])).code, 'path_outside_root');
+  for (const filename of ['.env', 'session.ts', 'password.ts', 'oauth.ts', 'api_key.txt', 'client-secret.pem']) {
+    const target = path.join(root, 'src', filename);
+    fs.writeFileSync(target, 'ordinary workspace content');
+    assert.equal(evaluateAgentFileInput({ tool_name: 'Read', tool_input: { path: `src/${filename}` }, cwd: root }, e).decision, 'allow');
+    assert.equal(evaluateAgentFileInput({ tool_name: 'Write', tool_input: { path: `src/${filename}` }, cwd: root }, env(root, ['src'])).decision, 'allow');
+  }
 });
 
-test('standalone process hook fails closed without echoing malformed input', () => {
+test('standalone process hook skips malformed unmanaged input without echoing it', () => {
   const script = path.resolve(new URL('../hooks/check-agent-files.mjs', import.meta.url).pathname);
   const proc = spawnSync(process.execPath, [script], { input: '{"tool_name":"Read","tool_input":{"path":"/private/secret"}', encoding: 'utf8' });
   assert.equal(proc.status, 0);
-  assert.match(proc.stdout, /"permissionDecision":"deny"/u);
+  assert.equal(proc.stdout, '');
   assert.equal(proc.stdout.includes('/private/secret'), false);
 });
 
-test('installer adds recognized matcher while preserving Bash and Post hooks', () => {
+test('installer adds recognized file matcher while preserving Post hooks', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-agent-install-'));
   const config = path.join(directory, 'config.json');
   const provenance = path.join(directory, 'provenance.json');
@@ -92,7 +105,7 @@ test('installer adds recognized matcher while preserving Bash and Post hooks', (
     hooks: {
       enabled: true,
       events: {
-        PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'process', command: 'node', args: [path.resolve(new URL('../hooks/check-bash-readonly.mjs', import.meta.url).pathname)] }] }],
+        PreToolUse: [],
         PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'process', command: 'node', args: [path.resolve(new URL('../hooks/audit-bash-result.mjs', import.meta.url).pathname)] }] }],
       },
     },
@@ -102,7 +115,7 @@ test('installer adds recognized matcher while preserving Bash and Post hooks', (
   assert.equal(proc.status, 0, proc.stderr);
   const installed = JSON.parse(fs.readFileSync(config, 'utf8'));
   assert.deepEqual(installed.unrelated, { keep: true });
-  assert.equal(installed.hooks.events.PreToolUse.some((entry) => entry.matcher === 'Bash'), true);
+  assert.equal(installed.hooks.events.PreToolUse.some((entry) => entry.matcher === 'Bash'), false);
   const policy = installed.hooks.events.PreToolUse.find((entry) => entry.matcher === '^(Read|Grep|Glob|Write|Edit|Delete|Move)$');
   assert.equal(policy.matcher, '^(Read|Grep|Glob|Write|Edit|Delete|Move)$');
   assert.equal(policy.hooks[0].args[0].endsWith('/hooks/check-agent-files.mjs'), true);

@@ -8,17 +8,14 @@ use std::{
 };
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE tasks (
     agent_id TEXT PRIMARY KEY,
-    idempotency_key TEXT NOT NULL UNIQUE,
-    semantic_fingerprint TEXT NOT NULL,
     repository TEXT NOT NULL,
-    group_id TEXT,
     phase TEXT NOT NULL,
     outcome TEXT,
     workspace_path TEXT NOT NULL,
@@ -26,8 +23,6 @@ CREATE TABLE tasks (
     prepared_launch_json TEXT NOT NULL,
     prepared_launch_sha256 TEXT NOT NULL,
     initial_prompt TEXT NOT NULL,
-    effective_budget_json TEXT NOT NULL,
-    retain_partial INTEGER NOT NULL DEFAULT 0,
     zcode_session_id TEXT,
     turn_state TEXT NOT NULL DEFAULT 'IDLE',
     pid INTEGER,
@@ -53,7 +48,7 @@ CREATE TABLE tasks (
 );
 CREATE INDEX tasks_queue_idx ON tasks(phase, created_at, agent_id);
 CREATE INDEX tasks_workspace_phase_idx ON tasks(workspace_path, phase);
-CREATE INDEX tasks_scope_idx ON tasks(repository, group_id, phase, created_at);
+CREATE INDEX tasks_scope_idx ON tasks(repository, phase, created_at);
 
 CREATE TABLE events (
     agent_id TEXT NOT NULL REFERENCES tasks(agent_id) ON DELETE CASCADE,
@@ -101,26 +96,8 @@ CREATE TABLE task_results (
     outcome TEXT NOT NULL,
     final_text TEXT NOT NULL,
     partial INTEGER NOT NULL,
-    retained INTEGER NOT NULL,
-    base_commit TEXT,
-    head_commit TEXT,
-    changed_files_json TEXT NOT NULL,
-    diff_stat TEXT,
-    checks_json TEXT NOT NULL,
     result_sha256 TEXT NOT NULL,
-    residual_gaps_json TEXT NOT NULL,
-    artifacts_json TEXT NOT NULL,
     completed_at INTEGER NOT NULL
-);
-
-CREATE TABLE artifacts (
-    artifact_id TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL REFERENCES tasks(agent_id) ON DELETE CASCADE,
-    artifact_type TEXT NOT NULL CHECK (artifact_type = 'changes_patch'),
-    path TEXT NOT NULL,
-    sha256 TEXT NOT NULL,
-    bytes INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
 );
 
 CREATE TABLE lifecycle_ledger (
@@ -226,7 +203,6 @@ pub enum TaskOutcome {
     Failed,
     Cancelled,
     TimedOut,
-    BudgetExhausted,
     RuntimeLost,
     ResultInvalid,
 }
@@ -238,7 +214,6 @@ impl TaskOutcome {
             Self::Failed => "FAILED",
             Self::Cancelled => "CANCELLED",
             Self::TimedOut => "TIMED_OUT",
-            Self::BudgetExhausted => "BUDGET_EXHAUSTED",
             Self::RuntimeLost => "RUNTIME_LOST",
             Self::ResultInvalid => "RESULT_INVALID",
         }
@@ -250,7 +225,6 @@ impl TaskOutcome {
             "FAILED" => Ok(Self::Failed),
             "CANCELLED" => Ok(Self::Cancelled),
             "TIMED_OUT" => Ok(Self::TimedOut),
-            "BUDGET_EXHAUSTED" => Ok(Self::BudgetExhausted),
             "RUNTIME_LOST" => Ok(Self::RuntimeLost),
             "RESULT_INVALID" => Ok(Self::ResultInvalid),
             other => Err(StoreError::InvalidState(format!(
@@ -260,48 +234,21 @@ impl TaskOutcome {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct EffectiveBudget {
-    pub absolute_wall_time_ms: u64,
-    pub runtime_activity_idle_timeout_ms: u64,
-    pub model_stream_idle_timeout_ms: u64,
-    pub tool_call_timeout_ms: u64,
-    pub input_wait_timeout_ms: u64,
-    pub max_turns: u64,
-    pub max_tool_calls: u64,
-    pub max_context_bytes: u64,
-    pub max_result_bytes: u64,
-    pub max_artifact_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BudgetRequest {
-    Omitted,
-    Null,
-    Limits(EffectiveBudget),
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewTask {
     pub agent_id: String,
-    pub idempotency_key: String,
     pub repository: String,
-    pub group_id: Option<String>,
     pub workspace_path: String,
     pub runtime_hash: Option<String>,
     pub prepared_launch_json: String,
     pub prepared_launch_sha256: String,
     pub initial_prompt: String,
-    pub budget: BudgetRequest,
-    pub retain_partial: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRecord {
     pub agent_id: String,
-    pub idempotency_key: String,
     pub repository: String,
-    pub group_id: Option<String>,
     pub phase: TaskPhase,
     pub outcome: Option<TaskOutcome>,
     pub workspace_path: String,
@@ -309,8 +256,6 @@ pub struct TaskRecord {
     pub prepared_launch_json: String,
     pub prepared_launch_sha256: String,
     pub initial_prompt: String,
-    pub effective_budget: EffectiveBudget,
-    pub retain_partial: bool,
     pub owner_id: Option<String>,
     pub owner_epoch: u64,
     pub close_requested: bool,
@@ -340,49 +285,38 @@ pub struct SubmittedTask {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ResultArtifact {
-    pub kind: ArtifactKind,
-    pub artifact_id: String,
-    pub sha256: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactKind {
-    ChangesPatch,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskResult {
     pub outcome: TaskOutcome,
     pub final_text: String,
     pub partial: bool,
-    pub base_commit: Option<String>,
-    pub head_commit: Option<String>,
-    pub changed_files: Vec<String>,
-    pub diff_stat: Option<String>,
-    pub checks: Vec<String>,
-    pub residual_gaps: Vec<String>,
-    pub artifacts: Vec<ResultArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredTaskResult {
     pub result: TaskResult,
     pub result_sha256: String,
-    pub retained: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskQueryScope<'a> {
     pub repository: Option<&'a str>,
-    pub group_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPageFilter {
     pub phase: Option<TaskPhase>,
     pub outcome: Option<TaskOutcome>,
+}
+
+/// Inclusive time/workspace selector used by the reduced adapter query API.
+/// `start_ms` is compared with `created_at`; `end_ms` is compared with
+/// `completed_at` and therefore only matches tasks that have completed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TaskWindowQuery {
+    pub agent_id: Option<String>,
+    pub workspace_path: Option<String>,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -455,26 +389,6 @@ pub struct TerminalUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewArtifact {
-    pub artifact_id: String,
-    pub agent_id: String,
-    pub artifact_type: String,
-    pub path: String,
-    pub sha256: String,
-    pub bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredArtifact {
-    pub artifact_id: String,
-    pub artifact_type: String,
-    pub path: String,
-    pub sha256: String,
-    pub bytes: u64,
-    pub created_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlDecision {
     pub phase: TaskPhase,
     pub outcome: Option<TaskOutcome>,
@@ -530,34 +444,6 @@ pub enum PendingResponseClaimDisposition {
     NotFound,
 }
 
-const DEFAULT_BUDGET: EffectiveBudget = EffectiveBudget {
-    absolute_wall_time_ms: 3_600_000,
-    runtime_activity_idle_timeout_ms: 90_000,
-    model_stream_idle_timeout_ms: 90_000,
-    tool_call_timeout_ms: 300_000,
-    input_wait_timeout_ms: 300_000,
-    max_turns: 32,
-    max_tool_calls: 128,
-    max_context_bytes: 1_048_576,
-    max_result_bytes: 1_048_576,
-    max_artifact_bytes: 16_777_216,
-};
-
-pub const MIN_RESULT_BYTES: u64 = 512;
-
-const MAX_BUDGET: EffectiveBudget = EffectiveBudget {
-    absolute_wall_time_ms: 86_400_000,
-    runtime_activity_idle_timeout_ms: 86_400_000,
-    model_stream_idle_timeout_ms: 86_400_000,
-    tool_call_timeout_ms: 86_400_000,
-    input_wait_timeout_ms: 86_400_000,
-    max_turns: 1024,
-    max_tool_calls: 4096,
-    max_context_bytes: 16_777_216,
-    max_result_bytes: 16_777_216,
-    max_artifact_bytes: 268_435_456,
-};
-
 pub struct Store {
     connection: Mutex<Connection>,
     database_path: PathBuf,
@@ -590,80 +476,45 @@ impl Store {
 
     pub fn enqueue_task_authoritative(&self, task: &NewTask) -> StoreResult<SubmittedTask> {
         validate_task(task)?;
-        let effective_budget = resolve_effective_budget(&task.budget)?;
-        let semantic_fingerprint = task_fingerprint(task, &effective_budget);
         let mut connection = self.connection.lock().unwrap();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(existing) = query_task_by_idempotency(&transaction, &task.idempotency_key)? {
-            let stored_fingerprint: String = transaction.query_row(
-                "SELECT semantic_fingerprint FROM tasks WHERE agent_id=?1",
-                [&existing.agent_id],
-                |row| row.get(0),
-            )?;
-            if existing.agent_id != task.agent_id || stored_fingerprint != semantic_fingerprint {
-                return Err(StoreError::Conflict(format!(
-                    "idempotency key {} names a different task",
-                    task.idempotency_key
-                )));
-            }
-            transaction.commit()?;
-            return Ok(SubmittedTask {
-                task: existing,
-                disposition: TaskSubmissionDisposition::Existing,
-            });
-        }
         if query_task(&transaction, &task.agent_id)?.is_some() {
             return Err(StoreError::Conflict(format!(
                 "agent id {} already exists",
                 task.agent_id
             )));
         }
-        if task.workspace_path == task.repository
-            && serde_json::from_str::<serde_json::Value>(&task.prepared_launch_json)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("direct_workspace")
-                        .and_then(serde_json::Value::as_bool)
-                })
-                == Some(true)
+        // Workspace ownership is the collision boundary.  It applies to every
+        // submission, regardless of launch metadata or repository identity;
+        // terminal rows remain queryable and therefore do not block reuse.
+        if let Some(active_agent_id) = transaction
+            .query_row(
+                "SELECT agent_id FROM tasks WHERE workspace_path=?1
+             AND phase IN ('QUEUED','PREPARING','RUNNING','WAITING_INPUT','CANCELLING')
+             ORDER BY created_at, rowid LIMIT 1",
+                [&task.workspace_path],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
         {
-            if let Some(active_agent_id) = transaction
-                .query_row(
-                    "SELECT agent_id FROM tasks WHERE workspace_path=?1 AND repository=?2
-                 AND phase IN ('QUEUED','PREPARING','RUNNING','WAITING_INPUT','CANCELLING')
-                 ORDER BY created_at, rowid LIMIT 1",
-                    params![task.workspace_path, task.repository],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-            {
-                return Err(StoreError::Conflict(format!(
-                    "WORKSPACE_BUSY active_agent_id={active_agent_id}"
-                )));
-            }
+            return Err(StoreError::Conflict(format!(
+                "WORKSPACE_BUSY active_agent_id={active_agent_id}"
+            )));
         }
         let created_at = now_millis();
         transaction.execute(
             "INSERT INTO tasks (
-                agent_id,idempotency_key,semantic_fingerprint,repository,group_id,
-                phase,workspace_path,runtime_hash,prepared_launch_json,prepared_launch_sha256,
-                initial_prompt,effective_budget_json,retain_partial,created_at
-             ) VALUES (?1,?2,?3,?4,?5,'QUEUED',?6,?7,?8,?9,?10,?11,?12,?13)",
+                agent_id,repository,phase,workspace_path,runtime_hash,prepared_launch_json,
+                prepared_launch_sha256,initial_prompt,created_at
+             ) VALUES (?1,?2,'QUEUED',?3,?4,?5,?6,?7,?8)",
             params![
                 task.agent_id,
-                task.idempotency_key,
-                semantic_fingerprint,
                 task.repository,
-                task.group_id,
                 task.workspace_path,
                 task.runtime_hash,
                 task.prepared_launch_json,
                 task.prepared_launch_sha256,
                 task.initial_prompt,
-                serde_json::to_string(&effective_budget)
-                    .map_err(|error| StoreError::InvalidState(error.to_string()))?,
-                task.retain_partial,
                 created_at,
             ],
         )?;
@@ -702,8 +553,8 @@ impl Store {
                 "SELECT agent_id FROM tasks
                  WHERE agent_id=?1
                    AND (?2 IS NULL OR repository=?2)
-                   AND (?3 IS NULL OR group_id=?3)",
-                params![agent_id, scope.repository, scope.group_id],
+                   ",
+                params![agent_id, scope.repository],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
@@ -730,17 +581,15 @@ impl Store {
         let mut statement = connection.prepare(
             "SELECT rowid,agent_id FROM tasks
              WHERE (?1 IS NULL OR repository=?1)
-               AND (?2 IS NULL OR group_id=?2)
-               AND (?3 IS NULL OR phase=?3)
-               AND (?4 IS NULL OR outcome=?4)
-               AND (?5 IS NULL OR rowid < ?5)
-             ORDER BY rowid DESC LIMIT ?6",
+               AND (?2 IS NULL OR phase=?2)
+               AND (?3 IS NULL OR outcome=?3)
+               AND (?4 IS NULL OR rowid < ?4)
+             ORDER BY rowid DESC LIMIT ?5",
         )?;
         let rows = statement
             .query_map(
                 params![
                     scope.repository,
-                    scope.group_id,
                     filter.phase.map(TaskPhase::as_str),
                     filter.outcome.map(TaskOutcome::as_str),
                     cursor.map(u64_to_i64).transpose()?,
@@ -764,6 +613,47 @@ impl Store {
             })
             .collect::<StoreResult<Vec<_>>>()?;
         Ok(TaskPage { tasks, next_cursor })
+    }
+
+    pub fn list_task_window(&self, query: &TaskWindowQuery) -> StoreResult<Vec<TaskRecord>> {
+        if query.agent_id.is_none() && query.workspace_path.is_none() {
+            return Err(StoreError::InvalidState(
+                "agent_id or workspace_path query scope is required".into(),
+            ));
+        }
+        if let (Some(start), Some(end)) = (query.start_ms, query.end_ms) {
+            if start > end {
+                return Err(StoreError::InvalidState(
+                    "query start_ms must be less than or equal to end_ms".into(),
+                ));
+            }
+        }
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT agent_id FROM tasks
+             WHERE (?1 IS NULL OR agent_id=?1)
+               AND (?2 IS NULL OR workspace_path=?2)
+               AND (?3 IS NULL OR created_at>=?3)
+               AND (?4 IS NULL OR (completed_at IS NOT NULL AND completed_at<=?4))
+             ORDER BY created_at, agent_id",
+        )?;
+        let ids = statement
+            .query_map(
+                params![
+                    query.agent_id,
+                    query.workspace_path,
+                    query.start_ms,
+                    query.end_ms
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| {
+                query_task(&connection, &id)?
+                    .ok_or_else(|| StoreError::InvalidState("task disappeared during query".into()))
+            })
+            .collect()
     }
 
     pub fn claim_next(
@@ -1241,24 +1131,14 @@ impl Store {
             let canonical = task_result_bytes(result)?;
             let digest = task_result_digest(&canonical);
             transaction.execute(
-                "INSERT INTO task_results(agent_id,outcome,final_text,partial,retained,base_commit,
-                     head_commit,changed_files_json,diff_stat,checks_json,result_sha256,
-                     residual_gaps_json,artifacts_json,completed_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                "INSERT INTO task_results(agent_id,outcome,final_text,partial,result_sha256,completed_at)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
                 params![
                     original.agent_id,
                     result.outcome.as_str(),
                     result.final_text,
                     result.partial,
-                    retain_result(original.retain_partial, result),
-                    result.base_commit,
-                    result.head_commit,
-                    serde_json::to_string(&result.changed_files).unwrap(),
-                    result.diff_stat,
-                    serde_json::to_string(&result.checks).unwrap(),
                     digest,
-                    serde_json::to_string(&result.residual_gaps).unwrap(),
-                    serde_json::to_string(&result.artifacts).unwrap(),
                     now_millis(),
                 ],
             )?;
@@ -1288,17 +1168,7 @@ impl Store {
     }
 
     pub fn store_task_result(&self, agent_id: &str, result: &TaskResult) -> StoreResult<()> {
-        self.store_task_result_with_patch(agent_id, result, None)
-    }
-
-    pub fn store_task_result_with_patch(
-        &self,
-        agent_id: &str,
-        result: &TaskResult,
-        patch: Option<&NewArtifact>,
-    ) -> StoreResult<()> {
         validate_result(result)?;
-        validate_result_patch(agent_id, result, patch)?;
         let canonical = task_result_bytes(result)?;
         let digest = task_result_digest(&canonical);
         let mut connection = self.connection.lock().unwrap();
@@ -1338,11 +1208,6 @@ impl Store {
                 task.phase
             )));
         }
-        if canonical.len() as u64 > task.effective_budget.max_result_bytes {
-            return Err(StoreError::InvalidState(
-                "task result exceeds effective max_result_bytes".into(),
-            ));
-        }
         if result.outcome == TaskOutcome::Completed {
             let (pending, queued) = completion_blockers_tx(&transaction, agent_id)?;
             if pending || queued {
@@ -1357,29 +1222,15 @@ impl Store {
                 "cancellation or close intent wins over late result".into(),
             ));
         }
-        let retained = retain_result(task.retain_partial, result);
-        if let Some(patch) = patch {
-            insert_artifact_tx(&transaction, patch)?;
-        }
         transaction.execute(
-            "INSERT INTO task_results(agent_id,outcome,final_text,partial,retained,base_commit,
-                 head_commit,changed_files_json,diff_stat,checks_json,result_sha256,
-                 residual_gaps_json,artifacts_json,completed_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            "INSERT INTO task_results(agent_id,outcome,final_text,partial,result_sha256,completed_at)
+             VALUES (?1,?2,?3,?4,?5,?6)",
             params![
                 agent_id,
                 result.outcome.as_str(),
                 result.final_text,
                 result.partial,
-                retained,
-                result.base_commit,
-                result.head_commit,
-                serde_json::to_string(&result.changed_files).unwrap(),
-                result.diff_stat,
-                serde_json::to_string(&result.checks).unwrap(),
                 digest,
-                serde_json::to_string(&result.residual_gaps).unwrap(),
-                serde_json::to_string(&result.artifacts).unwrap(),
                 now_millis(),
             ],
         )?;
@@ -1393,9 +1244,7 @@ impl Store {
             &TerminalUpdate {
                 outcome: result.outcome,
                 failure_code: task.failure_code.or_else(|| {
-                    (result.outcome != TaskOutcome::Completed)
-                        .then(|| result.residual_gaps.last().cloned())
-                        .flatten()
+                    (result.outcome != TaskOutcome::Completed).then(|| "task failed".to_string())
                 }),
                 failure_message: task.failure_message,
             },
@@ -1700,53 +1549,6 @@ impl Store {
         )? == 1)
     }
 
-    #[cfg(test)]
-    fn insert_artifact(&self, artifact: &NewArtifact) -> StoreResult<bool> {
-        let mut connection = self.connection.lock().unwrap();
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (phase, _, _, _, _) = query_guard(&transaction, &artifact.agent_id)?;
-        if phase == TaskPhase::Terminal {
-            return Err(StoreError::Conflict(
-                "terminal task cannot accept a late artifact".into(),
-            ));
-        }
-        let changed = insert_artifact_tx(&transaction, artifact)?;
-        transaction.commit()?;
-        Ok(changed)
-    }
-
-    pub fn artifacts(&self, agent_id: &str, limit: usize) -> StoreResult<Vec<StoredArtifact>> {
-        let connection = self.connection.lock().unwrap();
-        let mut statement = connection.prepare(
-            "SELECT artifact_id,artifact_type,path,sha256,bytes,created_at FROM artifacts
-             WHERE agent_id=?1 ORDER BY created_at,artifact_id LIMIT ?2",
-        )?;
-        let rows = statement
-            .query_map(params![agent_id, usize_to_i64(limit)?], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(StoredArtifact {
-                    artifact_id: row.0,
-                    artifact_type: row.1,
-                    path: row.2,
-                    sha256: row.3,
-                    bytes: i64_to_u64(row.4)?,
-                    created_at: row.5,
-                })
-            })
-            .collect()
-    }
-
     pub fn active_count(&self) -> StoreResult<u64> {
         let connection = self.connection.lock().unwrap();
         let count: i64 = connection.query_row(
@@ -1756,53 +1558,6 @@ impl Store {
         )?;
         i64_to_u64(count)
     }
-}
-
-pub fn resolve_effective_budget(request: &BudgetRequest) -> StoreResult<EffectiveBudget> {
-    let value = match request {
-        BudgetRequest::Omitted => DEFAULT_BUDGET,
-        BudgetRequest::Null => {
-            return Err(StoreError::InvalidState(
-                "budget null is not omission".into(),
-            ))
-        }
-        BudgetRequest::Limits(value) => value.clone(),
-    };
-    let pairs = [
-        (
-            value.absolute_wall_time_ms,
-            MAX_BUDGET.absolute_wall_time_ms,
-        ),
-        (
-            value.runtime_activity_idle_timeout_ms,
-            MAX_BUDGET.runtime_activity_idle_timeout_ms,
-        ),
-        (
-            value.model_stream_idle_timeout_ms,
-            MAX_BUDGET.model_stream_idle_timeout_ms,
-        ),
-        (value.tool_call_timeout_ms, MAX_BUDGET.tool_call_timeout_ms),
-        (
-            value.input_wait_timeout_ms,
-            MAX_BUDGET.input_wait_timeout_ms,
-        ),
-        (value.max_turns, MAX_BUDGET.max_turns),
-        (value.max_tool_calls, MAX_BUDGET.max_tool_calls),
-        (value.max_context_bytes, MAX_BUDGET.max_context_bytes),
-        (value.max_result_bytes, MAX_BUDGET.max_result_bytes),
-        (value.max_artifact_bytes, MAX_BUDGET.max_artifact_bytes),
-    ];
-    if pairs.iter().any(|(value, cap)| *value == 0 || value > cap) {
-        return Err(StoreError::InvalidState(
-            "budget limit is zero or above hard cap".into(),
-        ));
-    }
-    if value.max_result_bytes < MIN_RESULT_BYTES {
-        return Err(StoreError::InvalidState(format!(
-            "max_result_bytes must be at least {MIN_RESULT_BYTES}"
-        )));
-    }
-    Ok(value)
 }
 
 fn initialize_schema(connection: &mut Connection) -> StoreResult<()> {
@@ -1831,7 +1586,6 @@ fn initialize_schema(connection: &mut Connection) -> StoreResult<()> {
 
 fn schema_is_current(connection: &Connection) -> StoreResult<bool> {
     let expected = [
-        "artifacts",
         "events",
         "lifecycle_ledger",
         "messages",
@@ -1851,7 +1605,6 @@ fn schema_is_current(connection: &Connection) -> StoreResult<bool> {
 fn validate_task(task: &NewTask) -> StoreResult<()> {
     for (name, value) in [
         ("agent_id", task.agent_id.as_str()),
-        ("idempotency_key", task.idempotency_key.as_str()),
         ("repository", task.repository.as_str()),
         ("workspace_path", task.workspace_path.as_str()),
         ("prepared_launch_json", task.prepared_launch_json.as_str()),
@@ -1865,43 +1618,17 @@ fn validate_task(task: &NewTask) -> StoreResult<()> {
             return Err(StoreError::InvalidState(format!("{name} is invalid")));
         }
     }
-    if task
-        .group_id
-        .as_deref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        return Err(StoreError::InvalidState("group_id is invalid".into()));
-    }
     Ok(())
 }
 
 fn validate_scope(scope: &TaskQueryScope<'_>) -> StoreResult<()> {
-    if scope.repository.is_none() && scope.group_id.is_none() {
+    if scope.repository.is_none() {
         Err(StoreError::InvalidState(
             "repository or group task scope is required".into(),
         ))
     } else {
         Ok(())
     }
-}
-
-fn task_fingerprint(task: &NewTask, budget: &EffectiveBudget) -> String {
-    let canonical = serde_json::to_vec(&(
-        "generic-task-v1",
-        &task.agent_id,
-        &task.idempotency_key,
-        &task.repository,
-        &task.group_id,
-        &task.workspace_path,
-        &task.runtime_hash,
-        &task.prepared_launch_json,
-        &task.prepared_launch_sha256,
-        &task.initial_prompt,
-        budget,
-        task.retain_partial,
-    ))
-    .expect("task fingerprint input is serializable");
-    format!("{:x}", sha2::Sha256::digest(canonical))
 }
 
 fn task_result_bytes(result: &TaskResult) -> StoreResult<Vec<u8>> {
@@ -1924,104 +1651,6 @@ fn validate_result(result: &TaskResult) -> StoreResult<()> {
     Ok(())
 }
 
-fn validate_result_patch(
-    agent_id: &str,
-    result: &TaskResult,
-    patch: Option<&NewArtifact>,
-) -> StoreResult<()> {
-    match (result.artifacts.as_slice(), patch) {
-        ([], None) => Ok(()),
-        ([metadata], Some(patch))
-            if metadata.kind == ArtifactKind::ChangesPatch
-                && metadata.artifact_id == patch.artifact_id
-                && metadata.sha256 == patch.sha256
-                && patch.agent_id == agent_id
-                && patch.artifact_type == "changes_patch" =>
-        {
-            Ok(())
-        }
-        _ => Err(StoreError::InvalidState(
-            "result changes_patch metadata is incomplete or inconsistent".into(),
-        )),
-    }
-}
-
-fn insert_artifact_tx(transaction: &Transaction<'_>, artifact: &NewArtifact) -> StoreResult<bool> {
-    if artifact.artifact_type != "changes_patch" {
-        return Err(StoreError::InvalidState(
-            "only daemon-created changes_patch artifacts are durable".into(),
-        ));
-    }
-    let changed = transaction.execute(
-        "INSERT OR IGNORE INTO artifacts(artifact_id,agent_id,artifact_type,path,sha256,bytes,created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7)",
-        params![
-            artifact.artifact_id,
-            artifact.agent_id,
-            artifact.artifact_type,
-            artifact.path,
-            artifact.sha256,
-            u64_to_i64(artifact.bytes)?,
-            now_millis(),
-        ],
-    )?;
-    if changed == 0 {
-        let stored = transaction.query_row(
-            "SELECT agent_id,artifact_type,path,sha256,bytes FROM artifacts WHERE artifact_id=?1",
-            [&artifact.artifact_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )?;
-        if stored
-            != (
-                artifact.agent_id.clone(),
-                artifact.artifact_type.clone(),
-                artifact.path.clone(),
-                artifact.sha256.clone(),
-                u64_to_i64(artifact.bytes)?,
-            )
-        {
-            return Err(StoreError::Conflict(
-                "artifact id has different immutable metadata".into(),
-            ));
-        }
-    }
-    Ok(changed == 1)
-}
-
-fn retain_result(retain_partial: bool, result: &TaskResult) -> bool {
-    !result.partial
-        || result.outcome == TaskOutcome::Completed
-        || (retain_partial
-            && !matches!(
-                result.outcome,
-                TaskOutcome::RuntimeLost | TaskOutcome::ResultInvalid
-            ))
-}
-
-fn query_task_by_idempotency(
-    connection: &Connection,
-    key: &str,
-) -> StoreResult<Option<TaskRecord>> {
-    let id = connection
-        .query_row(
-            "SELECT agent_id FROM tasks WHERE idempotency_key=?1",
-            [key],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    id.map(|id| query_task(connection, &id))
-        .transpose()
-        .map(Option::flatten)
-}
-
 type TaskRow = (
     String,
     String,
@@ -2030,12 +1659,8 @@ type TaskRow = (
     String,
     Option<String>,
     String,
-    Option<String>,
     String,
     String,
-    Option<String>,
-    String,
-    i64,
     Option<String>,
     i64,
     i64,
@@ -2058,9 +1683,9 @@ type TaskRow = (
 fn query_task(connection: &Connection, agent_id: &str) -> StoreResult<Option<TaskRecord>> {
     let row = connection
         .query_row(
-            "SELECT agent_id,idempotency_key,repository,group_id,phase,outcome,
+        "SELECT agent_id,repository,phase,outcome,
                     workspace_path,runtime_hash,prepared_launch_json,prepared_launch_sha256,
-                    initial_prompt,effective_budget_json,retain_partial,owner_id,owner_epoch,
+                    initial_prompt,owner_id,owner_epoch,
                     close_requested,stop_requested,failure_code,failure_message,runtime_agent_id,
                     zcode_session_id,turn_state,pid,process_group_id,process_uid,process_start_token,
                     closed_at,reaped_at,created_at,last_event_seq
@@ -2070,34 +1695,11 @@ fn query_task(connection: &Connection, agent_id: &str) -> StoreResult<Option<Tas
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                    row.get(10)?,
-                    row.get(11)?,
-                    row.get(12)?,
-                    row.get(13)?,
-                    row.get(14)?,
-                    row.get(15)?,
-                    row.get(16)?,
-                    row.get(17)?,
-                    row.get(18)?,
-                    row.get(19)?,
-                    row.get(20)?,
-                    row.get(21)?,
-                    row.get(22)?,
-                    row.get(23)?,
-                    row.get(24)?,
-                    row.get(25)?,
-                    row.get(26)?,
-                    row.get(27)?,
-                    row.get(28)?,
-                    row.get(29)?,
+                    row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?,
+                    row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?,
+                    row.get(12)?, row.get(13)?, row.get(14)?, row.get(15)?, row.get(16)?,
+                    row.get(17)?, row.get(18)?, row.get(19)?, row.get(20)?, row.get(21)?,
+                    row.get(22)?, row.get(23)?, row.get(24)?, row.get(25)?,
                 ))
             },
         )
@@ -2106,7 +1708,7 @@ fn query_task(connection: &Connection, agent_id: &str) -> StoreResult<Option<Tas
 }
 
 fn convert_task_row(row: TaskRow) -> StoreResult<TaskRecord> {
-    let process_identity = match (row.22, row.23, row.24, row.25) {
+    let process_identity = match (row.18, row.19, row.20, row.21) {
         (Some(pid), Some(process_group_id), Some(uid), Some(start_token)) => {
             Some(StoredProcessIdentity {
                 pid: u32::try_from(pid)
@@ -2128,33 +1730,28 @@ fn convert_task_row(row: TaskRow) -> StoreResult<TaskRecord> {
     };
     Ok(TaskRecord {
         agent_id: row.0,
-        idempotency_key: row.1,
-        repository: row.2,
-        group_id: row.3,
-        phase: TaskPhase::parse(&row.4)?,
-        outcome: row.5.map(|value| TaskOutcome::parse(&value)).transpose()?,
-        workspace_path: row.6,
-        runtime_hash: row.7,
-        prepared_launch_json: row.8,
-        prepared_launch_sha256: row.9,
-        initial_prompt: row.10.expect("initial prompt column is non-null"),
-        effective_budget: serde_json::from_str(&row.11)
-            .map_err(|error| StoreError::InvalidState(error.to_string()))?,
-        retain_partial: row.12 != 0,
-        owner_id: row.13,
-        owner_epoch: i64_to_u64(row.14)?,
-        close_requested: row.15 != 0,
-        stop_requested: row.16 != 0,
-        failure_code: row.17,
-        failure_message: row.18,
-        runtime_agent_id: row.19,
-        zcode_session_id: row.20,
-        turn_state: TurnState::parse(&row.21)?,
+        repository: row.1,
+        phase: TaskPhase::parse(&row.2)?,
+        outcome: row.3.map(|value| TaskOutcome::parse(&value)).transpose()?,
+        workspace_path: row.4,
+        runtime_hash: row.5,
+        prepared_launch_json: row.6,
+        prepared_launch_sha256: row.7,
+        initial_prompt: row.8,
+        owner_id: row.9,
+        owner_epoch: i64_to_u64(row.10)?,
+        close_requested: row.11 != 0,
+        stop_requested: row.12 != 0,
+        failure_code: row.13,
+        failure_message: row.14,
+        runtime_agent_id: row.15,
+        zcode_session_id: row.16,
+        turn_state: TurnState::parse(&row.17)?,
         process_identity,
-        closed_at: row.26,
-        reaped_at: row.27,
-        created_at: row.28,
-        last_event_seq: i64_to_u64(row.29)?,
+        closed_at: row.22,
+        reaped_at: row.23,
+        created_at: row.24,
+        last_event_seq: i64_to_u64(row.25)?,
     })
 }
 
@@ -2315,9 +1912,7 @@ fn query_task_result(
 ) -> StoreResult<Option<StoredTaskResult>> {
     let row = connection
         .query_row(
-            "SELECT outcome,final_text,partial,retained,base_commit,head_commit,
-                    changed_files_json,diff_stat,checks_json,result_sha256,
-                    residual_gaps_json,artifacts_json
+            "SELECT outcome,final_text,partial,result_sha256
              FROM task_results WHERE agent_id=?1",
             [agent_id],
             |row| {
@@ -2325,15 +1920,7 @@ fn query_task_result(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, String>(10)?,
-                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         )
@@ -2344,20 +1931,8 @@ fn query_task_result(
                 outcome: TaskOutcome::parse(&row.0)?,
                 final_text: row.1,
                 partial: row.2 != 0,
-                base_commit: row.4,
-                head_commit: row.5,
-                changed_files: serde_json::from_str(&row.6)
-                    .map_err(|error| StoreError::InvalidState(error.to_string()))?,
-                diff_stat: row.7,
-                checks: serde_json::from_str(&row.8)
-                    .map_err(|error| StoreError::InvalidState(error.to_string()))?,
-                residual_gaps: serde_json::from_str(&row.10)
-                    .map_err(|error| StoreError::InvalidState(error.to_string()))?,
-                artifacts: serde_json::from_str(&row.11)
-                    .map_err(|error| StoreError::InvalidState(error.to_string()))?,
             },
-            retained: row.3 != 0,
-            result_sha256: row.9,
+            result_sha256: row.3,
         })
     })
     .transpose()
@@ -2485,19 +2060,15 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn task(id: &str, repository: &str, group_id: Option<&str>) -> NewTask {
+    fn task(id: &str, repository: &str, _scope: Option<&str>) -> NewTask {
         NewTask {
             agent_id: id.into(),
-            idempotency_key: format!("key-{id}"),
             repository: repository.into(),
-            group_id: group_id.map(str::to_owned),
             workspace_path: format!("/workspace/{id}"),
             runtime_hash: Some("runtime".into()),
             prepared_launch_json: "{}".into(),
             prepared_launch_sha256: "prepared".into(),
             initial_prompt: "do work".into(),
-            budget: BudgetRequest::Limits(DEFAULT_BUDGET),
-            retain_partial: false,
         }
     }
 
@@ -2522,13 +2093,6 @@ mod tests {
             outcome,
             final_text: "terminal text".into(),
             partial: outcome != TaskOutcome::Completed,
-            base_commit: None,
-            head_commit: None,
-            changed_files: Vec::new(),
-            diff_stat: None,
-            checks: Vec::new(),
-            residual_gaps: Vec::new(),
-            artifacts: Vec::new(),
         }
     }
 
@@ -2585,132 +2149,6 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), before);
         assert!(!path.with_extension("sqlite3-wal").exists());
         assert!(!path.with_extension("sqlite3-shm").exists());
-    }
-
-    #[test]
-    fn idempotency_binds_the_complete_generic_contract() {
-        let (_directory, _path, store) = store();
-        let first = task("agent", "/repo", Some("group"));
-        assert_eq!(
-            store
-                .enqueue_task_authoritative(&first)
-                .unwrap()
-                .disposition,
-            TaskSubmissionDisposition::Created
-        );
-        assert_eq!(
-            store
-                .enqueue_task_authoritative(&first)
-                .unwrap()
-                .disposition,
-            TaskSubmissionDisposition::Existing
-        );
-        let mut changed = first.clone();
-        changed.group_id = Some("other".into());
-        assert!(matches!(
-            store.enqueue_task_authoritative(&changed),
-            Err(StoreError::Conflict(_))
-        ));
-    }
-
-    #[test]
-    fn concurrent_same_workspace_submission_has_one_atomic_winner() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("concurrent.sqlite3");
-        Store::open(&path).unwrap();
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
-        let mut workers = Vec::new();
-        for id in ["first", "second"] {
-            let path = path.clone();
-            let barrier = barrier.clone();
-            workers.push(std::thread::spawn(move || {
-                let store = Store::open(path).unwrap();
-                barrier.wait();
-                // Canonical direct-workspace submissions use the repository itself as
-                // their workspace and explicitly opt into the direct launch path.  Both
-                // contenders therefore exercise the atomic workspace guard (including
-                // the QUEUED phase) rather than the generic per-agent path.
-                let mut submission = task(id, "/same-workspace", None);
-                submission.workspace_path = submission.repository.clone();
-                submission.prepared_launch_json = r#"{"direct_workspace":true}"#.into();
-                store.enqueue_task_authoritative(&submission)
-            }));
-        }
-        barrier.wait();
-        let results = workers
-            .into_iter()
-            .map(|worker| worker.join().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-        assert_eq!(
-            results
-                .iter()
-                .filter(|result| matches!(
-                    result,
-                    Err(StoreError::Conflict(message))
-                        if message.starts_with("WORKSPACE_BUSY active_agent_id=")
-                ))
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn list_filters_repository_and_group_before_limit() {
-        let (_directory, _path, store) = store();
-        for (id, repository, group) in [
-            ("noise", "/other", Some("target")),
-            ("one", "/repo", Some("target")),
-        ] {
-            store
-                .enqueue_task_authoritative(&task(id, repository, group))
-                .unwrap();
-        }
-        let owner_epoch = running(&store, "noise");
-        store
-            .transition_terminal(
-                "noise",
-                owner_epoch,
-                &TerminalUpdate {
-                    outcome: TaskOutcome::Completed,
-                    failure_code: None,
-                    failure_message: None,
-                },
-            )
-            .unwrap();
-        let owner_epoch = running(&store, "one");
-        store
-            .transition_terminal(
-                "one",
-                owner_epoch,
-                &TerminalUpdate {
-                    outcome: TaskOutcome::Completed,
-                    failure_code: None,
-                    failure_message: None,
-                },
-            )
-            .unwrap();
-        store
-            .enqueue_task_authoritative(&task("two", "/repo", Some("target")))
-            .unwrap();
-        let page = store
-            .list_task_page(
-                TaskQueryScope {
-                    repository: Some("/repo"),
-                    group_id: Some("target"),
-                },
-                TaskPageFilter {
-                    phase: None,
-                    outcome: None,
-                },
-                None,
-                1,
-            )
-            .unwrap();
-        assert_eq!(page.tasks.len(), 1);
-        assert_eq!(page.tasks[0].repository, "/repo");
-        assert_eq!(page.tasks[0].group_id.as_deref(), Some("target"));
-        assert!(page.next_cursor.is_some());
     }
 
     #[test]
@@ -2771,7 +2209,6 @@ mod tests {
             TaskOutcome::Completed,
             TaskOutcome::Failed,
             TaskOutcome::TimedOut,
-            TaskOutcome::BudgetExhausted,
             TaskOutcome::RuntimeLost,
             TaskOutcome::ResultInvalid,
         ] {
@@ -2813,73 +2250,6 @@ mod tests {
     }
 
     #[test]
-    fn whole_result_budget_accepts_exact_boundary_and_rejects_one_byte_less() {
-        let mut sample = result(TaskOutcome::Completed);
-        sample.final_text = "x".repeat(MIN_RESULT_BYTES as usize);
-        let encoded = serde_json::to_vec(&sample).unwrap();
-        for (agent_id, limit, accepted) in [
-            ("exact", encoded.len() as u64, true),
-            ("over", encoded.len() as u64 - 1, false),
-        ] {
-            let (_directory, _path, store) = store();
-            let mut submitted = task(agent_id, "/repo", None);
-            submitted.budget = BudgetRequest::Limits(EffectiveBudget {
-                max_result_bytes: limit,
-                ..DEFAULT_BUDGET
-            });
-            store.enqueue_task_authoritative(&submitted).unwrap();
-            running(&store, agent_id);
-            let stored = store.store_task_result(agent_id, &sample);
-            assert_eq!(stored.is_ok(), accepted);
-            assert_eq!(store.task_result(agent_id).unwrap().is_some(), accepted);
-            assert_eq!(
-                store.get_task(agent_id).unwrap().unwrap().phase,
-                if accepted {
-                    TaskPhase::Terminal
-                } else {
-                    TaskPhase::Running
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn result_budget_floor_fits_truthful_cancel_fallback_and_rejects_less() {
-        let cancelled = TaskResult {
-            outcome: TaskOutcome::Cancelled,
-            final_text: "task cancelled".into(),
-            partial: true,
-            base_commit: None,
-            head_commit: None,
-            changed_files: Vec::new(),
-            diff_stat: None,
-            checks: Vec::new(),
-            residual_gaps: vec!["CANCELLED".into()],
-            artifacts: Vec::new(),
-        };
-        assert!(serde_json::to_vec(&cancelled).unwrap().len() as u64 <= MIN_RESULT_BYTES);
-
-        let (_directory, _path, store) = store();
-        let mut minimum = task("minimum", "/repo", None);
-        minimum.budget = BudgetRequest::Limits(EffectiveBudget {
-            max_result_bytes: MIN_RESULT_BYTES,
-            ..DEFAULT_BUDGET
-        });
-        assert!(store.enqueue_task_authoritative(&minimum).is_ok());
-
-        let mut too_small = task("too-small", "/repo", None);
-        too_small.budget = BudgetRequest::Limits(EffectiveBudget {
-            max_result_bytes: MIN_RESULT_BYTES - 1,
-            ..DEFAULT_BUDGET
-        });
-        assert!(matches!(
-            store.enqueue_task_authoritative(&too_small),
-            Err(StoreError::InvalidState(message))
-                if message.contains("max_result_bytes must be at least")
-        ));
-    }
-
-    #[test]
     fn startup_recovery_inventory_is_read_only() {
         let (_directory, path, store) = store();
         store
@@ -2902,83 +2272,5 @@ mod tests {
             TaskPhase::Running
         );
         assert!(reopened.task_result("agent").unwrap().is_none());
-    }
-
-    #[test]
-    fn changes_patch_result_and_terminal_transition_are_atomic_and_immutable() {
-        let (_directory, _path, store) = store();
-        store
-            .enqueue_task_authoritative(&task("agent", "/repo", None))
-            .unwrap();
-        let artifact = NewArtifact {
-            artifact_id: "patch".into(),
-            agent_id: "agent".into(),
-            artifact_type: "changes_patch".into(),
-            path: "/private/changes.patch".into(),
-            sha256: "abc".into(),
-            bytes: 3,
-        };
-        running(&store, "agent");
-        let mut completed = result(TaskOutcome::Completed);
-        completed.artifacts.push(ResultArtifact {
-            kind: ArtifactKind::ChangesPatch,
-            artifact_id: artifact.artifact_id.clone(),
-            sha256: artifact.sha256.clone(),
-        });
-        store
-            .store_task_result_with_patch("agent", &completed, Some(&artifact))
-            .unwrap();
-        assert_eq!(store.artifacts("agent", 2).unwrap().len(), 1);
-        assert!(store
-            .store_task_result_with_patch("agent", &completed, Some(&artifact))
-            .is_ok());
-        assert!(matches!(
-            store.insert_artifact(&artifact),
-            Err(StoreError::Conflict(_))
-        ));
-        let mut invalid = artifact.clone();
-        invalid.artifact_id = "report".into();
-        invalid.artifact_type = concat!("report_", "markdown").into();
-        assert!(matches!(
-            store.insert_artifact(&invalid),
-            Err(StoreError::Conflict(_)) | Err(StoreError::InvalidState(_))
-        ));
-    }
-
-    #[test]
-    fn failed_result_transaction_leaves_no_patch_or_terminal_mutation() {
-        let (_directory, path, store) = store();
-        store
-            .enqueue_task_authoritative(&task("agent", "/repo", None))
-            .unwrap();
-        running(&store, "agent");
-        let artifact = NewArtifact {
-            artifact_id: "patch".into(),
-            agent_id: "agent".into(),
-            artifact_type: "changes_patch".into(),
-            path: "/private/changes.patch".into(),
-            sha256: "abc".into(),
-            bytes: 3,
-        };
-        let mut completed = result(TaskOutcome::Completed);
-        completed.artifacts.push(ResultArtifact {
-            kind: ArtifactKind::ChangesPatch,
-            artifact_id: artifact.artifact_id.clone(),
-            sha256: artifact.sha256.clone(),
-        });
-        let raw = Connection::open(path).unwrap();
-        raw.execute_batch(
-            "CREATE TRIGGER reject_result BEFORE INSERT ON task_results
-             BEGIN SELECT RAISE(FAIL, 'scripted result failure'); END;",
-        )
-        .unwrap();
-        assert!(matches!(
-            store.store_task_result_with_patch("agent", &completed, Some(&artifact)),
-            Err(StoreError::Sqlite(_))
-        ));
-        assert!(store.artifacts("agent", 1).unwrap().is_empty());
-        let task = store.get_task("agent").unwrap().unwrap();
-        assert_eq!(task.phase, TaskPhase::Running);
-        assert_eq!(task.outcome, None);
     }
 }

@@ -11,12 +11,19 @@ tools; there is no compatibility alias or migration layer.
 npm install -g zcode-as-subagent
 zcode-as-subagent help
 zcode-as-subagent init --dry-run
+zcode-as-subagent install-mcp
 # Hooks are opt-in:
 zcode-as-subagent init --install-hooks
 # Or install them independently:
 zcode-as-subagent hooks install
 zcode-as-subagent status
 ```
+
+`install-mcp` installs the `zcode_as_subagent` MCP server into
+`$CODEX_HOME/config.toml`, or `~/.codex/config.toml` when `CODEX_HOME` is not
+set. It preserves unrelated Codex configuration and can be run repeatedly.
+Use `zcode-as-subagent install-mcp --uninstall` to remove only this managed
+MCP entry.
 
 The macOS runtime is probed only at the fixed bundle location
 `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`. Windows supports
@@ -32,20 +39,28 @@ The nine tools are `zcode_subagent_status`, `zcode_subagent_spawn`,
 `zcode_subagent_poll`, `zcode_subagent_list`, `zcode_subagent_send`,
 `zcode_subagent_respond`, `zcode_subagent_cancel`, `zcode_subagent_result`,
 and `zcode_subagent_close`. Spawn accepts only `build`, `edit`, `plan`, or
-`yolo` permission modes (default `build`). A canonical workspace has one
-active Agent; a collision is reported as `WORKSPACE_BUSY` with the active id.
+`yolo` permission modes (default `build`). `write_manifest` is optional for
+`build`, `edit`, and `yolo`; when omitted the
+daemon uses the protected repository workspace scope, while `plan` remains
+read-only. A canonical workspace has one active Agent; a collision is reported
+as `WORKSPACE_BUSY` with the active id. Terminal results expose stable outcome,
+partial status, task reason code, and bounded result segments; use
+`offset`/`limit` (default and maximum 81920 bytes) for large text.
 
 ## Data, cleanup, and safety
 
 `uninstall` removes service registration but retains data. `purge --yes` is the
 only destructive data operation. `cleanup-legacy --yes` removes an old,
-unpublished installation without importing or aliasing its data. Hook
-PreToolUse remains an independent deny-first boundary in every permission
-mode, including `yolo`; PostToolUse records metadata-only hashes.
+unpublished installation without importing or aliasing its data. Optional
+file-scope Hooks enforce only the declared workspace boundary; Bash permission
+decisions remain with the official runtime and caller response. PostToolUse
+records observed metadata-only facts and never re-evaluates policy.
 
 The default `init` does not modify ZCode hook configuration. Hook installation
 is explicit via `init --install-hooks` or `hooks install`.
 
+The distributable public request catalog is versioned at
+[`schema/zcode-subagent-public-api.json`](schema/zcode-subagent-public-api.json).
 See [docs/setup.md](docs/setup.md), [docs/operations.md](docs/operations.md),
 [docs/recovery.md](docs/recovery.md), and the
 [plugin validation guide](plugins/zcode-subagent-mcp/docs/VALIDATION.md).

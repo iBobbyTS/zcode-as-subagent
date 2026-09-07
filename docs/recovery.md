@@ -2,7 +2,7 @@
 
 ## Facade restart
 
-The MCP facade is stateless. Restart it with the same `ZCODE_AGENTD_SOCKET`, then use `zcode_subagent_poll` or `zcode_subagent_result` with the durable `agent_id`. The configured `service_generation` is bound to the installed Hook provenance and is reused across daemon restarts; reinstalling or regenerating that provenance changes it. Do not confuse this configured binding with a facade restart or a task identity.
+The MCP facade is stateless. Restart it with the same `ZCODE_AGENTD_SOCKET`, then use `zcode_subagent_poll` or `zcode_subagent_result` with the durable `agent_id`. Hook provenance and service generation are optional integration metadata and are not required for daemon startup. Do not confuse a daemon restart with a facade restart or a task identity.
 
 ## Daemon restart
 
@@ -10,8 +10,8 @@ Stop the daemon with SIGTERM or SIGINT and wait for its exact socket to disappea
 
 After restart, call `zcode_subagent_list` with explicit repository, feature, or ownership scope. Inspect tasks with `poll` and `result`, then close them after verifying durable state. Start a new Agent for further work.
 
-## Data and artifacts
+## Data and terminal history
 
-For a consistent SQLite backup, stop the sole daemon and preserve the database with any WAL/SHM companions. Read artifact chunks through `zcode_subagent_result`; verify repeated size/SHA-256 metadata and the final digest. Never read a private stored locator directly.
+For a consistent SQLite backup, stop the sole daemon and preserve the database with any WAL/SHM companions. Terminal history is read through `zcode_subagent_result` and running state through poll. A send to a closed session attempts resume; failure is typed and leaves the original terminal row unchanged. Never read private stored locators directly.
 
 This product intentionally has no compatibility framework or migration for removed unpublished records. Use `cleanup-legacy --yes` only for explicit deletion; it never imports or aliases legacy data.

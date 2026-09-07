@@ -5,7 +5,7 @@ use std::{
 };
 
 fn discover() -> Vec<Value> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_zcode-subagent-mcp"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zcode-as-subagent-mcp"))
         .env(
             "ZCODE_AGENTD_SOCKET",
             "/tmp/zcode-subagent-mcp-test-unused.sock",
@@ -68,4 +68,21 @@ fn stdio_catalog_is_exactly_the_generic_nine_tools() {
     ] {
         assert!(!schema.contains(forbidden), "catalog leaked {forbidden}");
     }
+    let by_name = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
+    assert_eq!(
+        by_name("zcode_subagent_spawn")["annotations"]["idempotentHint"],
+        false
+    );
+    assert_eq!(
+        by_name("zcode_subagent_list")["inputSchema"]["properties"]["limit"]["default"],
+        100
+    );
+    assert_eq!(
+        by_name("zcode_subagent_poll")["inputSchema"]["properties"]["after_revision"]["default"],
+        0
+    );
+    assert_eq!(
+        by_name("zcode_subagent_result")["inputSchema"]["properties"]["limit"]["default"],
+        80 * 1024
+    );
 }
