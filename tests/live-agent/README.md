@@ -44,3 +44,29 @@ achieved. A task that achieves its stated goal may be classified as success or
 success-with-gap when bounded evidence is incomplete. `FAILED` is reserved for
 an outcome that did not achieve the goal. Artifact hashes and repository
 identity remain integrity evidence, not a substitute for goal judgment.
+
+## 真实 MCP：完成后追加指令
+
+```sh
+python3 tests/live-agent/non-git-based/real_terminal_send_case.py
+```
+
+这是显式运行的真实工具调用用例，不加入默认离线矩阵。它读取用户
+LaunchAgent plist 中的 socket/database/runtime，记录当前 HEAD、二进制
+哈希及服务状态，使用分发的 MCP 二进制通过 stdio 调用官方 ZCode。
+
+流程：复制 `fixtures/terminal-send` → MCP spawn 并要求真实 Read
+`initial.txt` → 按 `next_revision` poll → result → 确认 COMPLETED 且未
+close → 重启本用例的 MCP 接入进程 → 向同一 agent 发送读取
+`followup.txt` 的消息 → 用相同 message_id 重试 → 持续观察 → result
+→ 只读采集消息状态及 diagnose → close 并复查。
+
+初始等待默认 120 秒，追加发送后的观察窗口默认 20 秒，可使用
+`--timeout-sec` 和 `--observe-sec` 调整测试上限；不更改产品超时。
+首次发送报错也保留重试和后续观察。原有 COMPLETED 不能当作追加任务
+成功；执行者须核对新一轮真实 Read、消息交付和第二个文件的结果。
+若初始任务未完成或需要审批，不能判定为终态发送复现。
+
+每次执行在 `workspace/real-terminal-send-*` 保留 transcript、summary、
+诊断和执行副本，包括失败、超时及清理结果。退出码 1 表示调用或测试
+流程有错误；退出码 0 仅表示采集完成，业务验收仍需核对证据。
