@@ -29,6 +29,7 @@ test('agent diagnose reads only the public poll projection and exports a bounded
   fs.mkdirSync(paths.logs, { recursive: true });
   fs.writeFileSync(path.join(paths.logs, 'daemon.log'), 'observed fact\n');
   fs.writeFileSync(path.join(paths.logs, 'daemon.log.1'), 'rotated fact\n');
+  fs.writeFileSync(path.join(paths.logs, 'secret-extra.log'), 'password=do-not-read\n');
   const server = net.createServer((socket) => socket.once('data', (chunk) => {
     const request = JSON.parse(chunk);
     assert.equal(request.method, 'task_poll');
@@ -45,6 +46,7 @@ test('agent diagnose reads only the public poll projection and exports a bounded
     const report = await diagnose(paths, ['--agent', 'agent-1', '--output', destination]);
     assert.equal(report.daemon.available, true);
     assert.equal(report.agent.task.agent_id, 'agent-1');
+    assert.deepEqual(report.agent.request_ids, []);
     assert.equal(report.logs.complete, false);
     assert.ok(report.logs.incomplete.some((reason) => reason.startsWith('log_rotated:')));
     assert.equal(report.output.path, path.join(destination, 'diagnose.json'));
@@ -64,4 +66,27 @@ test('diagnostic tail is bounded and reports truncation', () => {
   assert.equal(report.complete, false);
   assert.equal(report.files[0].truncated, true);
   assert.ok(Buffer.byteLength(report.files[0].tail) <= 16 * 1024);
+});
+
+test('diagnostic reads only known files, caps total bytes, and redacts secrets', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-redact-'));
+  const logs = path.join(home, 'logs');
+  fs.mkdirSync(logs);
+  fs.writeFileSync(path.join(logs, 'daemon.log'), 'token=abc123 password=hunter2 Authorization: Bearer xyz\n' + 'a'.repeat(20 * 1024));
+  fs.writeFileSync(path.join(logs, 'daemon-error.log'), 'api_key=secret\n' + 'b'.repeat(20 * 1024));
+  fs.writeFileSync(path.join(logs, 'unrelated.log'), 'password=must-not-read');
+  const report = diagnosticLogs(logs);
+  assert.equal(report.files.length, 2);
+  assert.equal(report.total_bytes <= 32 * 1024, true);
+  const joined = report.files.map((file) => file.tail).join('\n');
+  assert.doesNotMatch(joined, /abc123|hunter2|xyz|secret/u);
+  assert.equal(joined.includes('must-not-read'), false);
+});
+
+test('diagnostic export write failure is reported without throwing', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-output-'));
+  const paths = pathsFor(home);
+  const report = await diagnose(paths, ['--output', '/dev/null/zcode-diagnose-output']);
+  assert.equal(report.output.complete, false);
+  assert.ok(report.output.error);
 });
