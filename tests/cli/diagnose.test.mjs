@@ -106,6 +106,21 @@ test('diagnostic redacts quoted bearer and JSON secret values', () => {
   assert.match(report.files[0].tail, /REDACTED/u);
 });
 
+test('diagnostic preserves legacy multiline redaction and partial tail text', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-partial-'));
+  const logs = path.join(home, 'logs');
+  fs.mkdirSync(logs);
+  fs.writeFileSync(path.join(logs, 'daemon.log'), 'prefix'.repeat(4000)
+    + '\n-----BEGIN PRIVATE KEY-----\nLEGACY_PRIVATE_VALUE\n-----END PRIVATE KEY-----\n'
+    + '[zcode-agentd] failure agent=Agent-A: {"agent_id":"Agent-A","message":"unfinished');
+  const report = diagnosticLogs(logs);
+  assert.equal(report.files[0].truncated, true);
+  assert.match(report.files[0].tail, /\[REDACTED_PRIVATE_KEY\]/);
+  assert.doesNotMatch(report.files[0].tail, /LEGACY_PRIVATE_VALUE/);
+  assert.ok(report.files[0].tail.endsWith('"message":"unfinished'));
+  assert.ok(Buffer.byteLength(report.files[0].tail) <= 16 * 1024);
+});
+
 test('diagnostic export write failure is reported without throwing', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-output-'));
   const paths = pathsFor(home);
@@ -143,7 +158,7 @@ test('global diagnose queries the configured effective socket without model side
   try {
     await withDaemon(configured, (request) => {
       assert.equal(request.method, 'system_status');
-      assert.deepEqual(request.params, {});
+      assert.equal(Object.hasOwn(request, 'params'), false);
       return statusOrTask(request);
     }, async () => {
       const report = await diagnose(paths, []);
@@ -157,6 +172,37 @@ test('global diagnose queries the configured effective socket without model side
     if (previous === undefined) delete process.env.ZCODE_AGENTD_SOCKET;
     else process.env.ZCODE_AGENTD_SOCKET = previous;
   }
+});
+
+test('recent structured failures are redacted in global and agent diagnostic tails and exports', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-recent-secret-'));
+  const paths = pathsFor(home);
+  fs.mkdirSync(paths.logs);
+  const failure = {
+    agent_id: 'Agent-A', session_id: null, stage: 'bootstrap', error_code: 'SESSION_START_FAILED',
+    message: 'recent-failure ' + JSON.stringify({ api_key: 'RECENT_MESSAGE_SECRET' }),
+    stderr_tail: JSON.stringify({ password: 'RECENT_STDERR_SECRET' }),
+  };
+  fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'),
+    '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify(failure) + '\nlegacy token=LEGACY_SECRET\n');
+  await withDaemon(paths, statusOrTask, async () => {
+    for (const scope of [[], ['--agent', 'Agent-A']]) {
+      const report = await diagnose(paths, [...scope, '--output', path.join(home, scope.length ? 'agent' : 'global')]);
+      const tail = report.logs.files[0].tail;
+      assert.match(tail, /recent-failure/);
+      assert.match(tail, /legacy token=\[REDACTED\]/);
+      assert.doesNotMatch(tail, /RECENT_MESSAGE_SECRET|RECENT_STDERR_SECRET|LEGACY_SECRET/);
+      assert.doesNotMatch(JSON.stringify(report), /RECENT_MESSAGE_SECRET|RECENT_STDERR_SECRET|LEGACY_SECRET/);
+      assert.doesNotMatch(fs.readFileSync(report.output.path, 'utf8'), /RECENT_MESSAGE_SECRET|RECENT_STDERR_SECRET|LEGACY_SECRET/);
+      const decoded = JSON.parse(tail.split('\n')[0].slice('[zcode-agentd] failure agent=Agent-A: '.length));
+      assert.equal(decoded.session_id, null);
+      assert.equal(decoded.error_code, failure.error_code);
+      assert.match(decoded.message, /REDACTED/);
+      assert.match(decoded.stderr_tail, /REDACTED/);
+      assert.ok(Buffer.byteLength(tail) <= 16 * 1024);
+      if (scope.length) assert.equal(report.agent.diagnostics.status, 'found');
+    }
+  });
 });
 
 test('Agent A diagnostics survive Agent B displacing global tails and finite rotation', async () => {
