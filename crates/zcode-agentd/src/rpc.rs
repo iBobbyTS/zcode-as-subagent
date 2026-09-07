@@ -384,7 +384,6 @@ pub struct TaskActivityView {
     pub model_request_age_ms: Option<u64>,
     pub model_last_delta_age_ms: Option<u64>,
     pub latest_text_tail: String,
-    pub diagnostic_tail: String,
     pub latest_text_updated_at: Option<u64>,
     pub latest_text_truncated: bool,
     pub latest_progress: Option<String>,
@@ -904,11 +903,7 @@ impl RpcService {
                     && !terminal
                     && now >= deadline;
                 return Ok(RpcSuccess::TaskPoll {
-                    activity: task_activity_view(
-                        task.phase,
-                        activity,
-                        self.scheduler.diagnostic_tail(&task.agent_id),
-                    ),
+                    activity: task_activity_view(task.phase, activity),
                     task: task_view(task.clone()),
                     revision,
                     next_revision: revision,
@@ -1012,7 +1007,6 @@ fn task_view(task: TaskRecord) -> TaskView {
 fn task_activity_view(
     phase: TaskPhase,
     snapshot: Option<PassiveActivitySnapshot>,
-    diagnostic_tail: String,
 ) -> TaskActivityView {
     let state = match phase {
         TaskPhase::Queued => TaskActivityStateView::Queued,
@@ -1031,7 +1025,6 @@ fn task_activity_view(
             model_request_age_ms: None,
             model_last_delta_age_ms: None,
             latest_text_tail: String::new(),
-            diagnostic_tail,
             latest_text_updated_at: None,
             latest_text_truncated: false,
             latest_progress: None,
@@ -1048,7 +1041,6 @@ fn task_activity_view(
         model_request_age_ms: snapshot.model_request_age_ms,
         model_last_delta_age_ms: snapshot.model_last_delta_age_ms,
         latest_text_tail: snapshot.latest_text_tail,
-        diagnostic_tail,
         latest_text_updated_at: snapshot.latest_text_updated_at,
         latest_text_truncated: snapshot.latest_text_truncated,
         latest_progress: snapshot.latest_progress,
