@@ -4,31 +4,32 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::Read,
     path::Path,
     sync::Arc,
     thread,
     time::{Duration, Instant},
 };
 use zcode_agent_preparation::{
-    canonical_general_repository, BudgetLimits, GeneralTaskManifest, PreparedGeneralTask,
+    canonical_general_repository, GeneralTaskManifest, PreparedGeneralTask,
 };
 use zcode_agent_store::{
-    EffectiveBudget, PendingRequestState, Store, StoreError, StoredArtifact, StoredPendingRequest,
-    StoredTaskResult, TaskOutcome, TaskPageFilter, TaskPhase, TaskQueryScope, TaskRecord,
-    TaskResult, TaskSubmissionDisposition,
+    PendingRequestState, Store, StoreError, StoredPendingRequest, StoredTaskResult, TaskOutcome,
+    TaskPageFilter, TaskPhase, TaskQueryScope, TaskRecord, TaskSubmissionDisposition,
 };
 
 pub const RPC_VERSION: u16 = 12;
-pub const MAX_FRAME_BYTES: usize = 128 * 1024;
+pub const MAX_FRAME_BYTES: usize = 512 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_LIST_TASKS: usize = 100;
 pub const MAX_PENDING_REQUESTS: usize = 100;
-pub const MAX_ARTIFACT_CHUNK_BYTES: usize = 8 * 1024;
+/// A result page is capped below the transport frame cap so that even the
+/// worst-case JSON escaping (one input byte becoming a six-byte `\\u00XX`
+/// escape), the response envelope, and the trailing newline fit in one frame.
+pub const MAX_RESULT_CHUNK_BYTES: usize = 80 * 1024;
 pub const MAX_WAIT: Duration = Duration::from_secs(5);
 pub const RPC_TRANSPORT_SUPPORTED: bool = cfg!(unix);
 
@@ -37,7 +38,7 @@ mod unix;
 #[cfg(unix)]
 pub use unix::{RpcClient, RpcServer, ServerOptions};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RpcRequest {
     pub version: u16,
     pub request_id: String,
@@ -45,7 +46,7 @@ pub struct RpcRequest {
     pub method: RpcMethod,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(
     tag = "method",
     content = "params",
@@ -55,15 +56,26 @@ pub struct RpcRequest {
 #[allow(clippy::large_enum_variant)]
 pub enum RpcMethod {
     SystemStatus,
-    SubmitGeneral { input: GeneralSubmitInput },
+    SubmitGeneral {
+        input: GeneralSubmitInput,
+    },
     TaskList(TaskListQuery),
     TaskPoll(TaskPollQuery),
     TaskMessage(MessageInput),
     TaskRespond(RespondInput),
-    TaskCancel { agent_id: String },
-    TaskResult { agent_id: String },
-    TaskArtifact(TaskArtifactQuery),
-    TaskClose { agent_id: String },
+    TaskCancel {
+        agent_id: String,
+    },
+    TaskResult {
+        agent_id: String,
+        #[serde(default)]
+        offset: usize,
+        #[serde(default = "default_result_limit")]
+        limit: usize,
+    },
+    TaskClose {
+        agent_id: String,
+    },
 }
 
 impl RpcMethod {
@@ -78,19 +90,16 @@ impl RpcMethod {
                 | "task_respond"
                 | "task_cancel"
                 | "task_result"
-                | "task_artifact"
                 | "task_close"
         )
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskListQuery {
     #[serde(default)]
     pub repository: Option<String>,
-    #[serde(default)]
-    pub group_id: Option<String>,
     #[serde(default)]
     pub phase: Option<TaskPhaseFilter>,
     #[serde(default)]
@@ -124,25 +133,10 @@ impl From<TaskPhaseFilter> for TaskPhase {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TaskArtifactQuery {
-    pub agent_id: String,
-    pub artifact_id: String,
-    pub offset_bytes: u64,
-    pub limit_bytes: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeneralSubmitInput {
     pub manifest: GeneralTaskManifest,
-    #[serde(default)]
-    pub group_id: Option<String>,
-    #[serde(default)]
-    pub allowed_command_ids: Vec<String>,
-    #[serde(default)]
-    pub required_command_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,17 +239,17 @@ pub enum RpcSuccess {
         revision: u64,
         next_revision: u64,
         pending_requests: Vec<PendingRequestView>,
+        command_pending_approval: bool,
         result_available: bool,
         activity: TaskActivityView,
+        latest_progress: Option<String>,
+        result: Option<TaskResultView>,
+        instruction: Option<String>,
         timed_out: bool,
     },
     TaskResult {
         task: TaskView,
         result: Option<TaskResultView>,
-        artifacts: Vec<TaskArtifactMetadataView>,
-    },
-    TaskArtifact {
-        chunk: TaskArtifactChunkView,
     },
     Message {
         disposition: MessageDispositionView,
@@ -316,19 +310,19 @@ pub struct SystemStatusView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCapabilitiesView {
-    pub hard_budget_caps: BudgetLimits,
     pub max_rpc_frame_bytes: usize,
     pub max_wait_ms: u64,
-    pub named_checks: bool,
     pub maturity: BTreeMap<String, CapabilityMaturityView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskView {
     pub agent_id: String,
+    pub session_id: Option<String>,
+    pub turn_id: Option<String>,
     pub phase: String,
     pub outcome: Option<TaskOutcome>,
-    pub effective_budget: EffectiveBudget,
+    pub reason_code: Option<String>,
     pub stop_requested: bool,
     pub close_requested: bool,
     pub closed: bool,
@@ -394,6 +388,7 @@ pub struct TaskActivityView {
     pub latest_text_tail: String,
     pub latest_text_updated_at: Option<u64>,
     pub latest_text_truncated: bool,
+    pub latest_progress: Option<String>,
     pub active_tools: Vec<ActiveToolView>,
     pub window_60s: ActivityWindowView,
     pub telemetry_status: TelemetryStatusView,
@@ -404,33 +399,15 @@ pub struct TaskResultView {
     pub outcome: TaskOutcome,
     pub final_text: String,
     pub partial: bool,
-    pub retained: bool,
-    pub base_commit: Option<String>,
-    pub head_commit: Option<String>,
-    pub changed_files: Vec<String>,
-    pub diff_stat: Option<String>,
-    pub checks: Vec<String>,
-    pub residual_gaps: Vec<String>,
-    pub artifacts: Vec<zcode_agent_store::ResultArtifact>,
     pub result_sha256: String,
+    pub offset: usize,
+    pub total_bytes: usize,
+    pub next_offset: Option<usize>,
+    pub complete: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskArtifactMetadataView {
-    pub artifact_id: String,
-    pub kind: String,
-    pub sha256: String,
-    pub size_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskArtifactChunkView {
-    pub artifact_id: String,
-    pub sha256: String,
-    pub size_bytes: u64,
-    pub offset_bytes: u64,
-    pub bytes: Vec<u8>,
-    pub eof: bool,
+fn default_result_limit() -> usize {
+    MAX_RESULT_CHUNK_BYTES
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -664,19 +641,9 @@ impl RpcService {
             }),
             RpcMethod::SubmitGeneral { input } => {
                 let manifest = input.manifest;
-                if let Some(group_id) = input.group_id.as_deref() {
-                    validate_text(group_id, "group_id", 256)?;
-                }
-                validate_command_ids(&input.allowed_command_ids, "allowed_command_ids")?;
-                validate_command_ids(&input.required_command_ids, "required_command_ids")?;
                 let submitted = self
                     .scheduler
-                    .enqueue_general_with_commands(
-                        &manifest,
-                        input.group_id.as_deref(),
-                        &input.allowed_command_ids,
-                        &input.required_command_ids,
-                    )
+                    .enqueue_general(&manifest)
                     .map_err(map_scheduler)?;
                 Ok(RpcSuccess::GeneralSubmitted {
                     task: task_view(submitted.task),
@@ -690,10 +657,8 @@ impl RpcService {
                         "task list limit is outside the allowed range",
                     ));
                 }
-                for (field, value, cap) in [
-                    ("repository", query.repository.as_deref(), 4096usize),
-                    ("group_id", query.group_id.as_deref(), 256usize),
-                ] {
+                for (field, value, cap) in [("repository", query.repository.as_deref(), 4096usize)]
+                {
                     if let Some(value) = value {
                         validate_text(value, field, cap)?;
                     }
@@ -701,7 +666,7 @@ impl RpcService {
                 if let Some(cursor) = query.cursor.as_deref() {
                     validate_text(cursor, "cursor", 64)?;
                 }
-                if query.repository.is_none() && query.group_id.is_none() {
+                if query.repository.is_none() {
                     return Err(RpcError::new(
                         RpcErrorCode::Validation,
                         "at least one task list scope is required",
@@ -721,7 +686,6 @@ impl RpcService {
                     .list_task_page(
                         TaskQueryScope {
                             repository: canonical_repository.as_deref(),
-                            group_id: query.group_id.as_deref(),
                         },
                         TaskPageFilter {
                             phase: query.phase.map(Into::into),
@@ -801,25 +765,27 @@ impl RpcService {
                     task: task_view(task),
                 })
             }
-            RpcMethod::TaskResult { agent_id } => {
+            RpcMethod::TaskResult {
+                agent_id,
+                offset,
+                limit,
+            } => {
                 let task = self.require_task(&agent_id)?;
-                let artifacts = self.task_artifact_metadata(&task)?;
+                if limit == 0 || limit > MAX_RESULT_CHUNK_BYTES {
+                    return Err(RpcError::new(
+                        RpcErrorCode::Validation,
+                        "result limit is outside the allowed range",
+                    ));
+                }
                 let result = self
                     .store
                     .task_result(&task.agent_id)
                     .map_err(map_store)?
-                    .map(|stored| self.task_result_view(stored))
+                    .map(|stored| self.task_result_view(stored, offset, limit))
                     .transpose()?;
                 Ok(RpcSuccess::TaskResult {
                     task: task_view(task),
                     result,
-                    artifacts,
-                })
-            }
-            RpcMethod::TaskArtifact(query) => {
-                let task = self.require_task(&query.agent_id)?;
-                Ok(RpcSuccess::TaskArtifact {
-                    chunk: self.task_artifact_chunk(&task, &query)?,
                 })
             }
             RpcMethod::TaskClose { agent_id } => {
@@ -856,7 +822,7 @@ impl RpcService {
             protocol_version: RPC_VERSION,
             service_generation: self.service_generation.clone(),
             components,
-            capabilities: agent_capabilities(self.scheduler.named_checks_enabled()),
+            capabilities: agent_capabilities(),
         }
     }
 
@@ -875,79 +841,25 @@ impl RpcService {
         Ok(task)
     }
 
-    fn task_artifact_metadata(
+    fn task_result_view(
         &self,
-        task: &TaskRecord,
-    ) -> Result<Vec<TaskArtifactMetadataView>, RpcError> {
-        let result = self.store.task_result(&task.agent_id).map_err(map_store)?;
-        let allowed = result
-            .as_ref()
-            .map(|stored| {
-                stored
-                    .result
-                    .artifacts
-                    .iter()
-                    .map(|artifact| (artifact.artifact_id.as_str(), artifact.sha256.as_str()))
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
-        let mut projected = Vec::new();
-        for artifact in self
-            .store
-            .artifacts(&task.agent_id, MAX_PENDING_REQUESTS)
-            .map_err(map_store)?
-        {
-            let permitted = allowed
-                .get(artifact.artifact_id.as_str())
-                .is_some_and(|sha| *sha == artifact.sha256);
-            if permitted {
-                projected.push(TaskArtifactMetadataView {
-                    artifact_id: artifact.artifact_id,
-                    kind: public_artifact_kind(&artifact.artifact_type)?.into(),
-                    sha256: artifact.sha256,
-                    size_bytes: artifact.bytes,
-                });
-            }
-        }
-        projected.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
-        Ok(projected)
-    }
-
-    fn task_result_view(&self, stored: StoredTaskResult) -> Result<TaskResultView, RpcError> {
-        Ok(TaskResultView::from(stored))
-    }
-
-    fn task_artifact_chunk(
-        &self,
-        task: &TaskRecord,
-        query: &TaskArtifactQuery,
-    ) -> Result<TaskArtifactChunkView, RpcError> {
-        validate_id(&query.artifact_id, "artifact_id")?;
-        if query.limit_bytes == 0 || query.limit_bytes > MAX_ARTIFACT_CHUNK_BYTES {
-            return Err(RpcError::new(
-                RpcErrorCode::Validation,
-                "artifact chunk size is outside the allowed range",
-            ));
-        }
-        let metadata = self.task_artifact_metadata(task)?;
-        let expected = metadata
-            .into_iter()
-            .find(|artifact| artifact.artifact_id == query.artifact_id)
-            .ok_or_else(|| RpcError::new(RpcErrorCode::NotFound, "artifact was not found"))?;
-        if query.offset_bytes >= expected.size_bytes {
-            return Err(RpcError::new(
-                RpcErrorCode::Validation,
-                "artifact offset does not permit non-empty progress",
-            ));
-        }
-        let stored = self
-            .store
-            .artifacts(&task.agent_id, MAX_PENDING_REQUESTS)
-            .map_err(map_store)?
-            .into_iter()
-            .find(|artifact| artifact.artifact_id == query.artifact_id)
-            .ok_or_else(|| RpcError::new(RpcErrorCode::NotFound, "artifact was not found"))?;
-        verified_artifact_chunk(stored, expected, query.offset_bytes, query.limit_bytes)
+        stored: StoredTaskResult,
+        offset: usize,
+        limit: usize,
+    ) -> Result<TaskResultView, RpcError> {
+        let text = stored.result.final_text;
+        let total_bytes = text.len();
+        let (end, next_offset) = result_page_bounds(&text, offset, limit)?;
+        Ok(TaskResultView {
+            outcome: stored.result.outcome,
+            final_text: text[offset..end].to_owned(),
+            partial: stored.result.partial,
+            result_sha256: stored.result_sha256,
+            offset,
+            total_bytes,
+            next_offset,
+            complete: next_offset.is_none(),
+        })
     }
 
     fn task_poll(&self, query: TaskPollQuery) -> Result<RpcSuccess, RpcError> {
@@ -960,14 +872,16 @@ impl RpcService {
         let deadline = Instant::now() + Duration::from_millis(query.timeout_ms);
         loop {
             let task = self.require_task(&query.agent_id)?;
-            let policy = self.scheduler.active_policy(&task.agent_id);
             let pending_requests = self
                 .store
                 .pending_requests_bounded(&task.agent_id, MAX_PENDING_REQUESTS)
                 .map_err(map_store)?
                 .into_iter()
-                .map(|request| pending_request_view(policy.as_deref(), request))
+                .map(pending_request_view)
                 .collect::<Vec<_>>();
+            let command_pending_approval = pending_requests.iter().any(|request| {
+                request.kind == "permission" && request.state == PendingRequestStateView::Pending
+            });
             let result_available = self
                 .store
                 .task_result(&task.agent_id)
@@ -992,17 +906,53 @@ impl RpcService {
                     && now >= deadline;
                 return Ok(RpcSuccess::TaskPoll {
                     activity: task_activity_view(task.phase, activity),
-                    task: task_view(task),
+                    task: task_view(task.clone()),
                     revision,
                     next_revision: revision,
                     pending_requests,
+                    command_pending_approval,
                     result_available,
+                    latest_progress: self
+                        .scheduler
+                        .passive_activity_snapshot(&task.agent_id)
+                        .and_then(|a| a.latest_progress),
+                    // Result text is read through the bounded result endpoint;
+                    // poll must remain queryable for arbitrarily large results.
+                    result: None,
+                    instruction: (!terminal).then(|| "Use poll for progress".to_owned()),
                     timed_out,
                 });
             }
             thread::sleep((deadline - now).min(Duration::from_millis(10)));
         }
     }
+}
+
+fn result_page_bounds(
+    text: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<(usize, Option<usize>), RpcError> {
+    let total_bytes = text.len();
+    if offset > total_bytes || !text.is_char_boundary(offset) {
+        return Err(RpcError::new(
+            RpcErrorCode::Validation,
+            "result offset is outside the result",
+        ));
+    }
+    let mut end = offset.saturating_add(limit).min(total_bytes);
+    while end > offset && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == offset && offset < total_bytes {
+        return Err(RpcError::new(
+            RpcErrorCode::Validation,
+            "result limit does not include a complete UTF-8 character",
+        ));
+    }
+    let next_offset = (end < total_bytes).then_some(end);
+    debug_assert!(next_offset.is_none_or(|next| next > offset));
+    Ok((end, next_offset))
 }
 
 fn opaque_generation() -> Result<String, RpcServiceConfigError> {
@@ -1013,24 +963,11 @@ fn opaque_generation() -> Result<String, RpcServiceConfigError> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn agent_capabilities(named_checks: bool) -> AgentCapabilitiesView {
+fn agent_capabilities() -> AgentCapabilitiesView {
     let maturity = BTreeMap::new();
     AgentCapabilitiesView {
-        hard_budget_caps: BudgetLimits {
-            absolute_wall_time_ms: 86_400_000,
-            runtime_activity_idle_timeout_ms: 86_400_000,
-            model_stream_idle_timeout_ms: 86_400_000,
-            tool_call_timeout_ms: 86_400_000,
-            input_wait_timeout_ms: 86_400_000,
-            max_turns: 1_024,
-            max_tool_calls: 4_096,
-            max_context_bytes: 16_777_216,
-            max_result_bytes: 16_777_216,
-            max_artifact_bytes: 268_435_456,
-        },
         max_rpc_frame_bytes: MAX_FRAME_BYTES,
         max_wait_ms: MAX_WAIT.as_millis() as u64,
-        named_checks,
         maturity,
     }
 }
@@ -1048,75 +985,11 @@ fn format_task_cursor(cursor: u64) -> String {
     format!("task:{cursor}")
 }
 
-fn public_artifact_kind(stored: &str) -> Result<&'static str, RpcError> {
-    match stored {
-        "changes_patch" => Ok("changes_patch"),
-        _ => Err(RpcError::new(
-            RpcErrorCode::ResultInvalid,
-            "stored artifact kind is not supported",
-        )),
-    }
-}
-
-fn verified_artifact_chunk(
-    stored: StoredArtifact,
-    expected: TaskArtifactMetadataView,
-    offset_bytes: u64,
-    limit_bytes: usize,
-) -> Result<TaskArtifactChunkView, RpcError> {
-    let metadata = std::fs::symlink_metadata(&stored.path)
-        .map_err(|_| RpcError::new(RpcErrorCode::ResultInvalid, "artifact is unavailable"))?;
-    if metadata.file_type().is_symlink()
-        || !metadata.file_type().is_file()
-        || metadata.len() != expected.size_bytes
-        || stored.bytes != expected.size_bytes
-        || stored.sha256 != expected.sha256
-    {
-        return Err(RpcError::new(
-            RpcErrorCode::ResultInvalid,
-            "artifact metadata does not match authoritative bytes",
-        ));
-    }
-    let mut file = File::open(&stored.path)
-        .map_err(|_| RpcError::new(RpcErrorCode::ResultInvalid, "artifact is unavailable"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|_| RpcError::new(RpcErrorCode::ResultInvalid, "artifact read failed"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let observed = format!("{:x}", hasher.finalize());
-    if observed != expected.sha256 {
-        return Err(RpcError::new(
-            RpcErrorCode::ResultInvalid,
-            "artifact digest does not match authoritative metadata",
-        ));
-    }
-    file.seek(SeekFrom::Start(offset_bytes))
-        .map_err(|_| RpcError::new(RpcErrorCode::ResultInvalid, "artifact seek failed"))?;
-    let remaining = expected.size_bytes - offset_bytes;
-    let requested = remaining.min(limit_bytes as u64) as usize;
-    let mut bytes = vec![0u8; requested];
-    file.read_exact(&mut bytes)
-        .map_err(|_| RpcError::new(RpcErrorCode::ResultInvalid, "artifact read failed"))?;
-    Ok(TaskArtifactChunkView {
-        artifact_id: expected.artifact_id,
-        sha256: expected.sha256,
-        size_bytes: expected.size_bytes,
-        offset_bytes,
-        eof: offset_bytes + bytes.len() as u64 == expected.size_bytes,
-        bytes,
-    })
-}
-
 fn task_view(task: TaskRecord) -> TaskView {
     TaskView {
         agent_id: task.agent_id,
+        session_id: task.zcode_session_id,
+        turn_id: None,
         phase: match task.phase {
             TaskPhase::Queued => "QUEUED",
             TaskPhase::Preparing => "PREPARING",
@@ -1127,7 +1000,7 @@ fn task_view(task: TaskRecord) -> TaskView {
         }
         .into(),
         outcome: task.outcome,
-        effective_budget: task.effective_budget,
+        reason_code: task.failure_code,
         stop_requested: task.stop_requested,
         close_requested: task.close_requested,
         closed: task.closed_at.is_some(),
@@ -1139,6 +1012,7 @@ fn task_activity_view(
     phase: TaskPhase,
     snapshot: Option<PassiveActivitySnapshot>,
 ) -> TaskActivityView {
+    let terminal = phase == TaskPhase::Terminal;
     let state = match phase {
         TaskPhase::Queued => TaskActivityStateView::Queued,
         TaskPhase::Preparing => TaskActivityStateView::Preparing,
@@ -1158,6 +1032,7 @@ fn task_activity_view(
             latest_text_tail: String::new(),
             latest_text_updated_at: None,
             latest_text_truncated: false,
+            latest_progress: None,
             active_tools: Vec::new(),
             window_60s: ActivityWindowView::default(),
             telemetry_status: TelemetryStatusView::Unavailable,
@@ -1167,12 +1042,17 @@ fn task_activity_view(
         state,
         last_runtime_event_at: snapshot.last_runtime_event_at,
         last_activity_age_ms: snapshot.last_activity_age_ms,
-        model_request_active: snapshot.model_request_active,
-        model_request_age_ms: snapshot.model_request_age_ms,
+        model_request_active: !terminal && snapshot.model_request_active,
+        model_request_age_ms: if terminal {
+            None
+        } else {
+            snapshot.model_request_age_ms
+        },
         model_last_delta_age_ms: snapshot.model_last_delta_age_ms,
         latest_text_tail: snapshot.latest_text_tail,
         latest_text_updated_at: snapshot.latest_text_updated_at,
         latest_text_truncated: snapshot.latest_text_truncated,
+        latest_progress: snapshot.latest_progress,
         active_tools: snapshot
             .active_tools
             .into_iter()
@@ -1194,6 +1074,73 @@ fn task_activity_view(
     }
 }
 
+#[cfg(test)]
+mod activity_projection_tests {
+    use super::{task_activity_view, TaskActivityStateView};
+    use crate::{PassiveActivitySnapshot, PassiveActivityWindow};
+    use zcode_agent_store::TaskPhase;
+
+    fn active_model_request_snapshot() -> PassiveActivitySnapshot {
+        PassiveActivitySnapshot {
+            revision: 7,
+            last_runtime_event_at: Some(1_000),
+            last_activity_age_ms: Some(250),
+            model_request_active: true,
+            model_request_age_ms: Some(900),
+            model_last_delta_age_ms: Some(300),
+            latest_text_tail: "preserved tail".into(),
+            latest_text_updated_at: Some(950),
+            latest_text_truncated: false,
+            latest_progress: Some("preserved progress".into()),
+            active_tools: Vec::new(),
+            oldest_active_tool_age_ms: None,
+            window_60s: PassiveActivityWindow {
+                reasoning_delta_events: 2,
+                ..PassiveActivityWindow::default()
+            },
+            telemetry_degraded: true,
+        }
+    }
+
+    #[test]
+    fn terminal_phase_clears_stale_model_request_activity_and_preserves_history() {
+        let activity =
+            task_activity_view(TaskPhase::Terminal, Some(active_model_request_snapshot()));
+
+        assert_eq!(activity.state, TaskActivityStateView::Terminal);
+        assert!(!activity.model_request_active);
+        assert_eq!(activity.model_request_age_ms, None);
+        assert_eq!(activity.last_runtime_event_at, Some(1_000));
+        assert_eq!(activity.last_activity_age_ms, Some(250));
+        assert_eq!(activity.model_last_delta_age_ms, Some(300));
+        assert_eq!(activity.latest_text_tail, "preserved tail");
+        assert_eq!(
+            activity.latest_progress.as_deref(),
+            Some("preserved progress")
+        );
+        assert_eq!(activity.window_60s.reasoning_delta_events, 2);
+    }
+
+    #[test]
+    fn running_phase_preserves_live_model_request_activity() {
+        let activity =
+            task_activity_view(TaskPhase::Running, Some(active_model_request_snapshot()));
+
+        assert_eq!(activity.state, TaskActivityStateView::Active);
+        assert!(activity.model_request_active);
+        assert_eq!(activity.model_request_age_ms, Some(900));
+    }
+
+    #[test]
+    fn terminal_phase_without_runtime_snapshot_is_inactive() {
+        let activity = task_activity_view(TaskPhase::Terminal, None);
+
+        assert_eq!(activity.state, TaskActivityStateView::Terminal);
+        assert!(!activity.model_request_active);
+        assert_eq!(activity.model_request_age_ms, None);
+    }
+}
+
 fn activity_window_view(value: PassiveActivityWindow) -> ActivityWindowView {
     ActivityWindowView {
         reasoning_delta_events: value.reasoning_delta_events,
@@ -1211,63 +1158,21 @@ fn activity_window_view(value: PassiveActivityWindow) -> ActivityWindowView {
 
 impl From<StoredTaskResult> for TaskResultView {
     fn from(stored: StoredTaskResult) -> Self {
+        let total_bytes = stored.result.final_text.len();
         Self {
             outcome: stored.result.outcome,
             final_text: stored.result.final_text,
             partial: stored.result.partial,
-            retained: stored.retained,
-            base_commit: stored.result.base_commit,
-            head_commit: stored.result.head_commit,
-            changed_files: stored.result.changed_files,
-            diff_stat: stored.result.diff_stat,
-            checks: stored.result.checks,
-            residual_gaps: stored.result.residual_gaps,
-            artifacts: stored.result.artifacts,
             result_sha256: stored.result_sha256,
+            offset: 0,
+            total_bytes,
+            next_offset: None,
+            complete: true,
         }
     }
 }
 
-pub(crate) fn terminal_result_response_fits(
-    task: &TaskRecord,
-    result: &TaskResult,
-    artifacts: &[TaskArtifactMetadataView],
-) -> bool {
-    let worst_case_request_id = "\u{1}".repeat(MAX_REQUEST_ID_BYTES);
-    terminal_result_response_size(task, result, artifacts, &worst_case_request_id)
-        .is_some_and(|size| size <= MAX_FRAME_BYTES)
-}
-
-fn terminal_result_response_size(
-    task: &TaskRecord,
-    result: &TaskResult,
-    artifacts: &[TaskArtifactMetadataView],
-    request_id: &str,
-) -> Option<usize> {
-    let mut task = task_view(task.clone());
-    task.phase = "TERMINAL".into();
-    task.outcome = Some(result.outcome);
-    let response = RpcResponse::success(
-        request_id.into(),
-        RpcSuccess::TaskResult {
-            task,
-            result: Some(TaskResultView::from(StoredTaskResult {
-                result: result.clone(),
-                result_sha256: "0".repeat(64),
-                // `false` is the longer JSON spelling, so this remains safe
-                // for both retained and non-retained terminal results.
-                retained: false,
-            })),
-            artifacts: artifacts.to_vec(),
-        },
-    );
-    serde_json::to_vec(&response).ok().map(|frame| frame.len())
-}
-
-fn pending_request_view(
-    policy: Option<&zcode_agent_preparation::PolicyLauncher>,
-    request: StoredPendingRequest,
-) -> PendingRequestView {
+fn pending_request_view(request: StoredPendingRequest) -> PendingRequestView {
     let state = match request.state {
         PendingRequestState::Pending => PendingRequestStateView::Pending,
         PendingRequestState::Sending => PendingRequestStateView::Sending,
@@ -1300,19 +1205,7 @@ fn pending_request_view(
         .as_ref()
         .map(sanitized_permission_summary)
         .unwrap_or_else(|| "unrecognized permission request".into());
-    let policy_preview = params
-        .as_ref()
-        .and_then(|params| {
-            let decision = policy?
-                .decide_zcode_permission(params, zcode_agent_preparation::ExternalDecision::Allow);
-            Some(if decision.allowed {
-                "externally_decidable"
-            } else {
-                "hard_deny"
-            })
-        })
-        .unwrap_or("unknown")
-        .to_owned();
+    let policy_preview = "official_permission_request".to_owned();
     PendingRequestView {
         request_id: request.request_id,
         kind: "permission".into(),
@@ -1325,11 +1218,87 @@ fn pending_request_view(
     }
 }
 
+#[cfg(test)]
+mod result_paging_tests {
+    use super::{
+        result_page_bounds, RpcResponse, RpcSuccess, TaskResultView, TaskView, MAX_FRAME_BYTES,
+        MAX_RESULT_CHUNK_BYTES,
+    };
+    use zcode_agent_store::TaskOutcome;
+
+    fn task() -> TaskView {
+        TaskView {
+            agent_id: "a".repeat(256),
+            session_id: None,
+            turn_id: None,
+            phase: "TERMINAL".into(),
+            outcome: Some(TaskOutcome::Completed),
+            reason_code: Some("r".repeat(256)),
+            stop_requested: false,
+            close_requested: false,
+            closed: false,
+            reaped: true,
+        }
+    }
+
+    #[test]
+    fn non_terminal_pages_always_advance() {
+        assert_eq!(result_page_bounds("abcdef", 0, 3).unwrap(), (3, Some(3)));
+        assert_eq!(result_page_bounds("abcdef", 3, 3).unwrap(), (6, None));
+    }
+
+    #[test]
+    fn too_small_utf8_page_is_rejected_instead_of_stalling() {
+        let error = result_page_bounds("你a", 0, 1).unwrap_err();
+        assert_eq!(error.code, super::RpcErrorCode::Validation);
+        assert_eq!(result_page_bounds("你a", 0, 3).unwrap(), (3, Some(3)));
+        assert!(result_page_bounds("你a", 1, 3).is_err());
+    }
+
+    #[test]
+    fn worst_case_encoded_result_response_and_newline_fit_the_frame() {
+        let text = "\u{0}".repeat(MAX_RESULT_CHUNK_BYTES);
+        let response = RpcResponse::success(
+            "q".repeat(128),
+            RpcSuccess::TaskResult {
+                task: task(),
+                result: Some(TaskResultView {
+                    outcome: TaskOutcome::Completed,
+                    final_text: text,
+                    partial: false,
+                    result_sha256: "f".repeat(64),
+                    offset: 0,
+                    total_bytes: MAX_RESULT_CHUNK_BYTES + 1,
+                    next_offset: Some(MAX_RESULT_CHUNK_BYTES),
+                    complete: false,
+                }),
+            },
+        );
+        assert!(serde_json::to_vec(&response).unwrap().len() + 1 <= MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn transport_projection_does_not_change_the_stored_outcome() {
+        let view = TaskResultView {
+            outcome: TaskOutcome::Failed,
+            final_text: "failure".into(),
+            partial: true,
+            result_sha256: "f".repeat(64),
+            offset: 0,
+            total_bytes: 7,
+            next_offset: None,
+            complete: true,
+        };
+        assert_eq!(view.outcome, TaskOutcome::Failed);
+        assert!(view.partial);
+    }
+}
+
 fn operation_category(tool_name: &str) -> &'static str {
     match tool_name.to_ascii_lowercase().as_str() {
         "read" | "grep" | "glob" => "read",
         "write" | "edit" | "delete" | "move" => "write",
-        "execute" | "terminal" => "command",
+        "bash" | "execute" | "terminal" => "command",
         "network" => "network",
         "git_ref_mutation" => "git_ref_mutation",
         _ => "unknown",
@@ -1387,36 +1356,17 @@ fn validate_text(value: &str, field: &str, max: usize) -> Result<(), RpcError> {
     Ok(())
 }
 
-fn validate_command_ids(values: &[String], field: &str) -> Result<(), RpcError> {
-    if values.len() > 128 {
-        return Err(RpcError::new(
-            RpcErrorCode::Validation,
-            format!("{field} exceeds the selection cap"),
-        ));
-    }
-    let mut seen = std::collections::HashSet::new();
-    for value in values {
-        if value.is_empty()
-            || value.len() > 256
-            || !value.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
-            })
-            || !seen.insert(value)
-        {
-            return Err(RpcError::new(
-                RpcErrorCode::Validation,
-                format!("{field} must contain exact unique command ids"),
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn map_scheduler(error: SchedulerError) -> RpcError {
     match error {
         SchedulerError::Store(error) => map_store(error),
-        SchedulerError::InvalidConfig(_) => {
-            RpcError::new(RpcErrorCode::Validation, "scheduler rejected the operation")
+        SchedulerError::InvalidConfig(message) => {
+            // Preserve the bounded, actionable preparation reason. The MCP
+            // facade may still redact it for callers, but RPC diagnostics
+            // must distinguish repository, path, budget, and state errors.
+            RpcError::new(
+                RpcErrorCode::Validation,
+                format!("scheduler rejected the operation: {message}"),
+            )
         }
         SchedulerError::RuntimeSpawn { .. } | SchedulerError::LifecycleSink { .. } => {
             RpcError::new(RpcErrorCode::RuntimeLost, "runtime operation failed")
@@ -1451,6 +1401,3 @@ fn map_store(error: StoreError) -> RpcError {
         ),
     }
 }
-
-#[cfg(test)]
-mod tests;

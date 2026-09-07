@@ -27,7 +27,7 @@ printf '%s\n' '{
   "hook_event_name":"PreToolUse",
   "tool_name":"Bash",
   "tool_input":{"command":"git status --short"}
-}' | node hooks/check-bash-readonly.mjs | jq
+}' | node hooks/check-agent-files.mjs | jq
 ```
 
 Expected result:
@@ -53,7 +53,7 @@ printf '%s\n' '{
   "hook_event_name":"PreToolUse",
   "tool_name":"Bash",
   "tool_input":{"command":"find . -delete"}
-}' | node hooks/check-bash-readonly.mjs | jq
+}' | node hooks/audit-bash-result.mjs | jq
 ```
 
 Expected decision: `deny`.
@@ -62,7 +62,7 @@ Expected decision: `deny`.
 
 Do not add an executable to a generic regex.
 
-1. Add or extend one command-specific validator in `lib/bash-policy.mjs`.
+1. Keep Bash hooks fact-only; command permission remains owned by the official runtime.
 2. Enumerate every allowed option role.
 3. Identify options that execute programs, write output, follow symlinks, access network, or escape the root.
 4. Add positive corpus cases.

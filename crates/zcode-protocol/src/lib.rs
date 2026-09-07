@@ -327,6 +327,8 @@ pub struct WorkspaceParams<'a> {
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionParams<'a> {
     pub workspace: WorkspaceRef<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<&'a str>,
     #[serde(skip_serializing_if = "is_empty_mcp_servers")]
     pub mcp_servers: &'a [StdioMcpServer],
 }
@@ -814,6 +816,7 @@ mod tests {
                 workspace_key: "/work",
                 workspace_path: "/work",
             },
+            mode: None,
             mcp_servers: &servers,
         })
         .unwrap();

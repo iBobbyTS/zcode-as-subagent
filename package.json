@@ -14,8 +14,10 @@
     "npm/",
     "launchd/",
     "plugins/",
+    "schema/",
     "crates/zcode-agent-preparation/src/policy.rs",
     "scripts/install/",
+    "scripts/release/",
     "LICENSE"
   ],
   "scripts": {

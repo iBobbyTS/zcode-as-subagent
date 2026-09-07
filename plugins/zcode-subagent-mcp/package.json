@@ -1,11 +1,11 @@
 {
-  "name": "zcode-subagent-mcp",
+  "name": "zcode-as-subagent-mcp",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "zcode-as-subagent MCP facade and fail-closed policy hooks.",
   "scripts": {
-    "check": "node --check hooks/check-bash-readonly.mjs && node --check hooks/audit-bash-result.mjs && node --check lib/bash-policy.mjs",
+    "check": "node --check hooks/audit-bash-result.mjs && node --check hooks/check-agent-files.mjs && node --check lib/agent-file-policy.mjs",
     "test": "node --test test/*.test.mjs",
     "install": "node scripts/install-agent-hooks.mjs",
     "check:hooks": "node scripts/check-agent-hooks.mjs",

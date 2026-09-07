@@ -1,0 +1,4 @@
+interface:
+  display_name: "Zcode As Subagent Debugging"
+  short_description: "Debug MCP, daemon, runtime, logs, and stale binary issues"
+  default_prompt: "Use $zcode-as-subagent-debugging to investigate this repository's zcode-as-subagent behavior with source-to-process evidence."

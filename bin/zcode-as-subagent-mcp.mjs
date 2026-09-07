@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const facade = path.join(packageRoot, 'npm', 'native', 'darwin-arm64', 'zcode-subagent-mcp');
+const facade = path.join(packageRoot, 'npm', 'native', 'darwin-arm64', 'zcode-as-subagent-mcp');
 const child = spawn(facade, process.argv.slice(2), { stdio: 'inherit', env: process.env });
 child.on('error', (error) => {
   console.error(error.message);

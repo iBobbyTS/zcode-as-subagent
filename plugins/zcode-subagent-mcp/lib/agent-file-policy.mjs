@@ -13,7 +13,6 @@ const PATH_KEYS = new Set([
   'source', 'source_path', 'sourcePath', 'destination', 'destination_path', 'destinationPath',
   'old_path', 'oldPath', 'new_path', 'newPath', 'from', 'to',
 ]);
-const SECRET_NAME = /(^|[._/\\-])(\.env(?:\.|$)|credentials?(?:\.|$)|secrets?(?:\.|$)|.*(?:api[_-]?key|access[_-]?key|auth[_-]?token|password|passwd|private[_-]?key|client[_-]?secret|oauth|cookie|session)[^/\\]*$)|(^|[._-])(id_rsa|id_ed25519)(?:\.|$)|\.(?:pem|key|p12|pfx)$/iu;
 const PROTECTED_PART = /^(?:\.git|\.gitmodules|\.zcode|\.codex|\.agent-work)$/u;
 
 function deny(code) {
@@ -24,18 +23,22 @@ function allow() {
   return { decision: 'allow', code: 'ok', reason: `${AGENT_FILE_POLICY_VERSION}: allowed` };
 }
 
+function ask() {
+  return { decision: 'ask', code: 'edit_requires_approval', reason: `${AGENT_FILE_POLICY_VERSION}: edit requires external approval` };
+}
+
 function envRequired(env) {
-  if (env?.ZCODE_AGENT_POLICY !== '1') return deny('policy_marker_missing');
-  const rawRoot = env?.ZCODE_AGENT_WORKTREE_ROOT;
+  if (env?.ZCODE_AGENT_POLICY !== '1') return { decision: 'skip', code: 'policy_not_managed', reason: `${AGENT_FILE_POLICY_VERSION}: unmanaged session` };
+  const rawRoot = env?.ZCODE_AGENT_WORKSPACE_ROOT;
   if (typeof rawRoot !== 'string' || rawRoot.length === 0 || !path.isAbsolute(rawRoot)) {
-    return deny('worktree_root_missing');
+    return deny('workspace_root_missing');
   }
   let root;
   try {
     root = fs.realpathSync.native(rawRoot);
-    if (!fs.statSync(root).isDirectory()) return deny('worktree_root_invalid');
+    if (!fs.statSync(root).isDirectory()) return deny('workspace_root_invalid');
   } catch {
-    return deny('worktree_root_invalid');
+    return deny('workspace_root_invalid');
   }
   let manifest = [];
   const rawManifest = env?.ZCODE_AGENT_WRITE_MANIFEST;
@@ -53,7 +56,7 @@ function envRequired(env) {
       if (path.posix.isAbsolute(candidate) || candidate === '..' || candidate.startsWith('../') || candidate.includes('\0')) {
         throw new Error('manifest traversal');
       }
-      if (candidate.split('/').some((part) => PROTECTED_PART.test(part) || SECRET_NAME.test(part))) {
+      if (candidate.split('/').some((part) => PROTECTED_PART.test(part))) {
         throw new Error('manifest protected');
       }
       return candidate === '.' ? '' : candidate;
@@ -76,7 +79,7 @@ function envRequired(env) {
         if (typeof item !== 'string' || !path.isAbsolute(item) || item.length > MAX_PATH_BYTES || item.includes('\0') || hasParentTraversal(item)) {
           throw new Error('bootstrap root path');
         }
-        if (item.split(/[\\/]/u).some((part) => PROTECTED_PART.test(part) || SECRET_NAME.test(part))) {
+        if (item.split(/[\\/]/u).some((part) => PROTECTED_PART.test(part))) {
           throw new Error('bootstrap protected');
         }
         try {
@@ -140,13 +143,13 @@ function resolveCanonicalPath(root, value) {
 
 function protectedPath(root, value) {
   const relative = path.isAbsolute(value) ? path.relative(root, value) : value;
-  const lexicalProtected = relative.split(/[\\/]/u).some((part) => PROTECTED_PART.test(part) || SECRET_NAME.test(part));
+  const lexicalProtected = relative.split(/[\\/]/u).some((part) => PROTECTED_PART.test(part));
   if (lexicalProtected) return true;
   const canonical = resolveCanonicalPath(root, value);
   if (!canonical) return false;
   return path.relative(root, canonical)
     .split(/[\\/]/u)
-    .some((part) => PROTECTED_PART.test(part) || SECRET_NAME.test(part));
+    .some((part) => PROTECTED_PART.test(part));
 }
 
 function pathAllowedForRead(state, value) {
@@ -186,6 +189,7 @@ export function evaluateAgentFileInput(input, env = process.env) {
     if (!pathAllowedForRead(state, value)) return deny('path_outside_root');
     if (WRITE_TOOLS.has(tool) && !withinManifest(state.root, value, state.manifest)) return deny('write_not_allowlisted');
   }
+  if (WRITE_TOOLS.has(tool) && env.ZCODE_AGENT_PERMISSION_MODE === 'edit') return ask();
   return allow();
 }
 
