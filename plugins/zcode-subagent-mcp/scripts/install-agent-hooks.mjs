@@ -53,10 +53,6 @@ const auditWrapperPath = path.join(hookRoot, 'hooks', 'audit-bash-result.mjs');
 const fileWrapperPath = path.join(hookRoot, 'hooks', 'check-agent-files.mjs');
 const daemonSourcePath = path.join(pluginRoot, '..', '..', 'crates', 'zcode-agent-preparation', 'src', 'policy.rs');
 const filePolicySha256 = hashFile(effectiveFilePolicyPath);
-const priorProvenance = readJson(provenancePath, null);
-const serviceGeneration = typeof priorProvenance?.service_generation === 'string' && priorProvenance.service_generation.length > 0
-  ? priorProvenance.service_generation
-  : crypto.randomBytes(16).toString('hex');
 if (effectiveConfigPath === path.resolve(provenancePath)) throw new Error('config and provenance paths must differ');
 const events = {
   PreToolUse: [{ matcher: '^(Read|Grep|Glob|Write|Edit|Delete|Move)$', script: 'hooks/check-agent-files.mjs' }],
@@ -111,7 +107,6 @@ const nextProvenance = {
   hook_activation_verified: false,
   activation_method: 'outer-plugin-install',
   activation_generation: `${Date.now()}-${filePolicySha256.slice(0, 12)}`,
-  service_generation: serviceGeneration,
 };
 const previousProvenance = fs.existsSync(provenancePath) ? fs.readFileSync(provenancePath) : null;
 atomicWrite(provenancePath, nextProvenance);
@@ -127,4 +122,4 @@ try {
   }
   throw error;
 }
-console.log(JSON.stringify({ config: effectiveConfigPath, provenance: path.resolve(provenancePath), file_policy_sha256: filePolicySha256, service_generation: serviceGeneration }));
+console.log(JSON.stringify({ config: effectiveConfigPath, provenance: path.resolve(provenancePath), file_policy_sha256: filePolicySha256 }));

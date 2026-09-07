@@ -41,8 +41,6 @@ pub struct AgentHookProvenance {
     pub hook_activation_verified: bool,
     pub activation_method: Option<String>,
     pub activation_generation: Option<String>,
-    #[serde(default)]
-    pub service_generation: Option<String>,
 }
 
 impl Default for AgentHookProvenance {
@@ -73,7 +71,6 @@ pub fn agent_hook_provenance() -> AgentHookProvenance {
         hook_activation_verified: false,
         activation_method: None,
         activation_generation: None,
-        service_generation: None,
     };
     let Some(path) = std::env::var_os("ZCODE_AGENT_HOOK_PROVENANCE") else {
         return unverified();
@@ -98,10 +95,6 @@ pub fn agent_hook_provenance() -> AgentHookProvenance {
             .is_some_and(|value| !value.is_empty())
         && record
             .activation_generation
-            .as_deref()
-            .is_some_and(|value| !value.is_empty())
-        && record
-            .service_generation
             .as_deref()
             .is_some_and(|value| !value.is_empty());
     if verified {
@@ -252,7 +245,6 @@ mod provenance_tests {
     fn missing_record_cannot_verify() {
         let provenance = agent_hook_provenance();
         assert!(!provenance.hook_activation_verified);
-        assert!(provenance.service_generation.is_none());
     }
 }
 
