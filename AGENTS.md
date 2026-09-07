@@ -22,3 +22,12 @@
 
 - Integrate completed local branches into `main` only from the primary checkout and only with explicit user authorization.
 - Do not push, rewrite history, or delete user work without explicit user authorization.
+
+## macOS Native Runtime
+
+- The distributed daemon payload is `npm/native/darwin-arm64/zcode-as-subagentd`; the active LaunchAgent must execute this exact path.
+- The user LaunchAgent plist is `/Users/ibobby/Library/LaunchAgents/com.zcode-as-subagent.daemon.plist`. Its database, socket, runtime, stdout, and stderr paths are authoritative; do not infer them from an old log.
+- After a release rebuild, copy `target/release/zcode-as-subagentd` to the distributed payload, preserve executable mode `0755`, and verify both files with `shasum -a 256` before restarting the service.
+- The payload must pass `codesign --verify --verbose=4 npm/native/darwin-arm64/zcode-as-subagentd`. If ad-hoc re-signing is required, sign a temporary copy only after ensuring its final mode is `0755`; `mktemp` files default to non-executable mode and can make launchd report a misleading `OS_REASON_CODESIGNING` or `EX_CONFIG` failure.
+- Restart and verify in this order: `launchctl bootout gui/$(id -u)/com.zcode-as-subagent.daemon`, `launchctl bootstrap gui/$(id -u) /Users/ibobby/Library/LaunchAgents/com.zcode-as-subagent.daemon.plist`, then `launchctl print gui/$(id -u)/com.zcode-as-subagent.daemon`, check the daemon socket, and run `node bin/zcode-as-subagent.mjs status` or a scoped `list` call.
+- Never add or require `ZCODE_AGENT_SERVICE_GENERATION`; service identity is managed by the program and LaunchAgent. Avoid treating stale `daemon-error.log` entries as evidence for the current payload; record the log timestamp alongside the active executable hash.
