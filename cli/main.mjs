@@ -66,14 +66,66 @@ function diagnosticLogs(logDirectory) {
       fs.closeSync(fd);
       const redacted = redactDiagnosticText(buffer.subarray(0, read).toString('utf8'));
       const encoded = Buffer.from(redacted, 'utf8');
-      const bounded = encoded.subarray(Math.max(0, encoded.length - Math.min(take, remaining)));
+      let tailStart = Math.max(0, encoded.length - Math.min(take, remaining));
+      while (tailStart < encoded.length && (encoded[tailStart] & 0xc0) === 0x80) tailStart += 1;
+      const bounded = encoded.subarray(tailStart);
       const tail = bounded.toString('utf8');
       totalBytes += Buffer.byteLength(tail);
-      files.push({ name, bytes: stat.size, modified_at_ms: stat.mtimeMs, rotated, truncated: start > 0 || take < stat.size || bounded.length < encoded.length, tail });
+      if (start > 0 || take < stat.size || bounded.length < encoded.length) incomplete.push(`log_truncated:${name}`);
+      files.push({ name, read_status: 'read', bytes: stat.size, modified_at_ms: stat.mtimeMs, rotated, truncated: start > 0 || take < stat.size || bounded.length < encoded.length, tail });
     } catch (error) { incomplete.push(`log_unreadable:${name}:${error.code || 'error'}`); }
   }
   if (files.length === 0) incomplete.push('log_files_missing');
   return { directory: logDirectory, complete: incomplete.length === 0, incomplete, total_bytes: totalBytes, files };
+}
+
+// The writer retains the current file and two 1 MiB rotations. Search that
+// finite window, independently of the much smaller global display tails.
+const DIAGNOSTIC_RETAINED_BYTES = 1024 * 1024;
+const DIAGNOSTIC_RECORD_BYTES = 192 * 1024;
+function agentDiagnosticLogs(logDirectory, agentId) {
+  const report = { status: 'target_record_missing', scope: 'retained_logs', scan_complete: true, scanned_bytes: 0, record: null, incomplete: [] };
+  for (const name of ['daemon-error.log', 'daemon-error.log.1', 'daemon-error.log.2']) {
+    let fd;
+    try {
+      const target = path.join(logDirectory, name);
+      const stat = fs.lstatSync(target);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw Object.assign(new Error('not a regular file'), { code: 'NON_FILE' });
+      fd = fs.openSync(target, 'r');
+      const size = fs.fstatSync(fd).size;
+      const start = Math.max(0, size - DIAGNOSTIC_RETAINED_BYTES);
+      const bytes = Buffer.alloc(Math.min(size, DIAGNOSTIC_RETAINED_BYTES));
+      const read = fs.readSync(fd, bytes, 0, bytes.length, start);
+      report.scanned_bytes += read;
+      if (start > 0 || read < bytes.length) report.incomplete.push(`scan_truncated:${name}`);
+      const text = bytes.subarray(0, read).toString('utf8');
+      const lines = text.split('\n');
+      if (start > 0) lines.shift(); // Never associate a partial first record.
+      if (lines.pop()) report.incomplete.push(`record_incomplete:${name}`); // The writer may still be appending.
+      for (const line of lines.reverse()) {
+        if (Buffer.byteLength(line) > DIAGNOSTIC_RECORD_BYTES) { report.incomplete.push(`record_truncated:${name}`); continue; }
+        const prefix = `[zcode-agentd] failure agent=${agentId}: `;
+        if (!line.startsWith(prefix)) continue;
+        const raw = line.slice(prefix.length);
+        // JSON records repeat the identifier; reject misleading prefix matches.
+        let structured;
+        try { structured = JSON.parse(raw); } catch { structured = null; }
+        if (structured && structured.agent_id !== agentId) continue;
+        const redacted = redactDiagnosticText(raw);
+        const encoded = Buffer.from(redacted);
+        let end = Math.min(encoded.length, DIAGNOSTIC_TAIL_BYTES);
+        while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
+        report.record = { file: name, text: encoded.subarray(0, end).toString('utf8'), truncated: encoded.length > end };
+        report.status = 'found';
+        break;
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') report.incomplete.push(`scan_unreadable:${name}:${error.code || 'error'}`);
+    } finally { if (fd !== undefined) fs.closeSync(fd); }
+    if (report.record) break;
+  }
+  report.scan_complete = report.incomplete.length === 0;
+  return report;
 }
 
 function diagnoseInput(args) {
@@ -90,19 +142,31 @@ function diagnoseInput(args) {
 
 async function diagnose(paths, args) {
   const { agent, outputDirectory } = diagnoseInput(args);
+  const socket = process.env.ZCODE_AGENTD_SOCKET || paths.socket;
   const report = {
     schema_version: 1,
     scope: agent ? { agent_id: agent } : { kind: 'global' },
     platform: platform(),
     runtime: { path: ZCODE_RUNTIME, exists: fs.existsSync(ZCODE_RUNTIME) },
-    daemon: { socket: paths.socket, socket_exists: fs.existsSync(paths.socket), available: false },
+    daemon: { socket, socket_exists: fs.existsSync(socket), query_status: 'unqueried', available: null },
     logs: diagnosticLogs(paths.logs),
   };
+  try {
+    report.daemon.status = await callDaemon(socket, 'status', {});
+    report.daemon.available = true;
+    report.daemon.query_status = 'queried';
+  } catch (error) {
+    report.daemon.available = Boolean(error.daemonResponded);
+    report.daemon.query_status = error.daemonResponded ? 'query_failed' : 'unavailable';
+    report.daemon.error = { code: error.code || 'DAEMON_ERROR', message: error.message };
+  }
   if (agent) {
+    const diagnostics = agentDiagnosticLogs(paths.logs, agent);
     try {
-      const snapshot = await callDaemon(paths.socket, 'poll', { agent_id: agent, timeout_ms: 0 });
+      const snapshot = await callDaemon(socket, 'poll', { agent_id: agent, timeout_ms: 0 });
       report.daemon.available = true;
       report.agent = {
+        diagnostics,
         task: snapshot.task,
         activity: snapshot.activity,
         session_id: snapshot.task?.session_id ?? null,
@@ -116,15 +180,16 @@ async function diagnose(paths, args) {
       };
     } catch (error) {
       report.daemon.error = { code: error.code || 'DAEMON_ERROR', message: error.message };
-      report.logs.incomplete.push('agent_store_unavailable');
+      const missing = error.code === 'not_found';
+      report.logs.incomplete.push(missing ? 'agent_missing' : 'agent_store_unavailable');
       report.logs.complete = false;
-      report.agent = { agent_id: agent, unavailable: true };
+      report.agent = { agent_id: agent, query_status: missing ? 'missing' : 'unavailable', unavailable: !missing, missing, diagnostics };
     }
   }
   if (outputDirectory) {
     const destination = path.resolve(outputDirectory);
     const target = path.join(destination, 'diagnose.json');
-    report.output = { path: target, complete: report.logs.complete && !report.agent?.unavailable };
+    report.output = { path: target, complete: report.logs.complete && report.daemon.query_status === 'queried' && !report.agent?.unavailable && !report.agent?.missing };
     try {
       fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
       fs.writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });

@@ -33,6 +33,10 @@ test('agent diagnose reads only the public poll projection and exports a bounded
   fs.writeFileSync(path.join(paths.logs, 'secret-extra.log'), 'password=do-not-read\n');
   const server = net.createServer((socket) => socket.once('data', (chunk) => {
     const request = JSON.parse(chunk);
+    if (request.method === 'system_status') {
+      socket.end(JSON.stringify({ version: 12, request_id: request.request_id, outcome: 'success', result: { status: { protocol_version: 12 } } }) + '\n');
+      return;
+    }
     assert.equal(request.method, 'task_poll');
     socket.end(JSON.stringify({ version: 12, request_id: request.request_id, outcome: 'success', result: {
       kind: 'task_poll', task: { agent_id: 'agent-1', phase: 'RUNNING', outcome: null, reason_code: null, stop_requested: false, close_requested: false, closed: false, reaped: false },
@@ -61,13 +65,15 @@ test('agent diagnose reads only the public poll projection and exports a bounded
   } finally { await new Promise((resolve) => server.close(resolve)); }
 });
 
-test('diagnostic tail is bounded without treating a normal long log as incomplete', () => {
+test('diagnostic tail distinguishes successful reading from truncated history', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-tail-'));
   const logs = path.join(home, 'logs');
   fs.mkdirSync(logs);
   fs.writeFileSync(path.join(logs, 'daemon.log'), 'x'.repeat(20 * 1024));
   const report = diagnosticLogs(logs);
-  assert.equal(report.complete, true);
+  assert.equal(report.complete, false);
+  assert.equal(report.files[0].read_status, 'read');
+  assert.ok(report.incomplete.includes('log_truncated:daemon.log'));
   assert.equal(report.files[0].truncated, true);
   assert.ok(Buffer.byteLength(report.files[0].tail) <= 16 * 1024);
 });
@@ -106,4 +112,120 @@ test('diagnostic export write failure is reported without throwing', async () =>
   const report = await diagnose(paths, ['--output', '/dev/null/zcode-diagnose-output']);
   assert.equal(report.output.complete, false);
   assert.ok(report.output.error);
+});
+
+async function withDaemon(paths, respond, run) {
+  const server = net.createServer((socket) => socket.once('data', (chunk) => {
+    const request = JSON.parse(chunk);
+    socket.end(JSON.stringify({ version: 12, request_id: request.request_id, ...respond(request) }) + '\n');
+  }));
+  await new Promise((resolve) => server.listen(paths.socket, resolve));
+  try { return await run(); }
+  finally { await new Promise((resolve) => server.close(resolve)); }
+}
+
+function statusOrTask(request, agentId = 'Agent-A') {
+  if (request.method === 'system_status') return { outcome: 'success', result: { status: { protocol_version: 12, service_generation: 'configured-daemon' } } };
+  assert.equal(request.method, 'task_poll');
+  assert.equal(request.params.agent_id, agentId);
+  return { outcome: 'success', result: {
+    task: { agent_id: agentId, phase: 'TERMINAL', outcome: 'FAILED', reason_code: 'RUNTIME_START_FAILED', reaped: true },
+    activity: {}, pending_requests: [], result_available: true,
+  } };
+}
+
+test('global diagnose queries the configured effective socket without model side effects', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-socket-'));
+  const paths = pathsFor(home);
+  const configured = { socket: path.join(home, 'configured.sock') };
+  const previous = process.env.ZCODE_AGENTD_SOCKET;
+  process.env.ZCODE_AGENTD_SOCKET = configured.socket;
+  try {
+    await withDaemon(configured, (request) => {
+      assert.equal(request.method, 'system_status');
+      assert.deepEqual(request.params, {});
+      return statusOrTask(request);
+    }, async () => {
+      const report = await diagnose(paths, []);
+      assert.equal(report.daemon.socket, configured.socket);
+      assert.equal(report.daemon.available, true);
+      assert.equal(report.daemon.query_status, 'queried');
+      assert.equal(report.daemon.status.service_generation, 'configured-daemon');
+      assert.equal(fs.existsSync(paths.socket), false);
+    });
+  } finally {
+    if (previous === undefined) delete process.env.ZCODE_AGENTD_SOCKET;
+    else process.env.ZCODE_AGENTD_SOCKET = previous;
+  }
+});
+
+test('Agent A diagnostics survive Agent B displacing global tails and finite rotation', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-target-'));
+  const paths = pathsFor(home);
+  fs.mkdirSync(paths.logs);
+  const target = '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify({ agent_id: 'Agent-A', stage: 'bootstrap', message: 'A-owned-failure token=private-token' }) + '\n';
+  const noise = '[zcode-agentd] failure agent=Agent-B: B-owned-failure\n'.repeat(1000);
+  fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), target + noise);
+  await withDaemon(paths, statusOrTask, async () => {
+    for (const rotated of [false, true]) {
+      if (rotated) {
+        fs.renameSync(path.join(paths.logs, 'daemon-error.log'), path.join(paths.logs, 'daemon-error.log.1'));
+        fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), noise);
+      }
+      const report = await diagnose(paths, ['--agent', 'Agent-A']);
+      assert.doesNotMatch(report.logs.files.map((file) => file.tail).join(''), /A-owned-failure/);
+      assert.equal(report.agent.task.reason_code, 'RUNTIME_START_FAILED');
+      assert.equal(report.agent.diagnostics.status, 'found');
+      assert.match(report.agent.diagnostics.record.text, /A-owned-failure/);
+      assert.doesNotMatch(report.agent.diagnostics.record.text, /B-owned-failure|private-token/);
+      assert.equal(report.agent.diagnostics.record.file, rotated ? 'daemon-error.log.1' : 'daemon-error.log');
+      assert.ok(report.agent.diagnostics.scanned_bytes <= 3 * 1024 * 1024);
+    }
+    fs.writeFileSync(path.join(paths.logs, 'daemon-error.log.1'), noise);
+    let report = await diagnose(paths, ['--agent', 'Agent-A']);
+    assert.equal(report.agent.diagnostics.status, 'target_record_missing');
+    assert.equal(report.agent.diagnostics.scan_complete, true);
+    fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), target + noise.repeat(30));
+    report = await diagnose(paths, ['--agent', 'Agent-A']);
+    assert.equal(report.agent.diagnostics.status, 'target_record_missing');
+    assert.equal(report.agent.diagnostics.scan_complete, false);
+    assert.ok(report.agent.diagnostics.incomplete.includes('scan_truncated:daemon-error.log'));
+  });
+});
+
+test('missing agent and unreachable daemon have distinct diagnostic states', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-missing-'));
+  const paths = pathsFor(home);
+  await withDaemon(paths, (request) => request.method === 'system_status' ? statusOrTask(request) : { outcome: 'error', error: { code: 'not_found', message: 'task not found' } }, async () => {
+    const report = await diagnose(paths, ['--agent', 'unknown']);
+    assert.equal(report.daemon.available, true);
+    assert.equal(report.agent.query_status, 'missing');
+    assert.equal(report.agent.unavailable, false);
+  });
+  const report = await diagnose(paths, []);
+  assert.equal(report.daemon.available, false);
+  assert.equal(report.daemon.query_status, 'unavailable');
+});
+
+
+test('diagnostic output caps UTF-8 bytes and distinguishes unfinished target records', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-utf8-'));
+  const paths = pathsFor(home);
+  fs.mkdirSync(paths.logs);
+  const target = '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify({ agent_id: 'Agent-A', message: '诊断'.repeat(6000) });
+  fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), target + '\n');
+  fs.writeFileSync(path.join(paths.logs, 'daemon.log'), '诊断'.repeat(6000));
+  await withDaemon(paths, statusOrTask, async () => {
+    let report = await diagnose(paths, ['--agent', 'Agent-A']);
+    assert.ok(report.logs.total_bytes <= 32 * 1024);
+    assert.ok(report.logs.files.every((file) => Buffer.byteLength(file.tail) <= 16 * 1024));
+    assert.equal(report.agent.diagnostics.status, 'found');
+    assert.equal(report.agent.diagnostics.record.truncated, true);
+    assert.ok(Buffer.byteLength(report.agent.diagnostics.record.text) <= 16 * 1024);
+    fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), target);
+    report = await diagnose(paths, ['--agent', 'Agent-A']);
+    assert.equal(report.agent.diagnostics.status, 'target_record_missing');
+    assert.equal(report.agent.diagnostics.scan_complete, false);
+    assert.ok(report.agent.diagnostics.incomplete.includes('record_incomplete:daemon-error.log'));
+  });
 });

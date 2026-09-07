@@ -63,6 +63,8 @@ test('LaunchAgent provides a stable PATH for the Node runtime', () => {
   assert.match(launchAgent, /<key>PATH<\/key><string>\/opt\/homebrew\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin<\/string>/);
   assert.match(launchAgent, /<key>ProgramArguments<\/key><array>/);
   assert.match(launchAgent, /zcode-as-subagentd<\/string>/);
+  assert.ok(launchAgent.includes(`<string>--diagnostic-log</string><string>${path.join(paths.logs, 'daemon-error.log')}</string>`));
+  assert.ok(launchAgent.includes(`<key>StandardErrorPath</key><string>${path.join(paths.logs, 'daemon-error.log')}</string>`));
 });
 
 test('plan uses no PATH lookup and points only at fixed bundle runtime', () => {
