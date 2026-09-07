@@ -2,16 +2,16 @@
 
 ## CLI daemon calls
 
-The `zcode-as-subagent` CLI forwards business commands to the configured daemon
+The `zas` CLI forwards business commands to the configured daemon
 Unix socket (`ZCODE_AGENTD_SOCKET`, or the product socket under Application
 Support). Pass a JSON object with `--json` or on stdin. `create`/`spawn` submit
 the general task contract; `get`/`poll` read task progress. The remaining
 commands map to the corresponding daemon task RPCs:
 
 ```sh
-zcode-as-subagent create --json '{"repository":"/abs/repo","prompt":"..."}'
-zcode-as-subagent poll --json '{"agent_id":"...","timeout_ms":5000}'
-zcode-as-subagent result --json '{"agent_id":"..."}'
+zas create --json '{"repository":"/abs/repo","prompt":"..."}'
+zas poll --json '{"agent_id":"...","timeout_ms":5000}'
+zas result --json '{"agent_id":"..."}'
 ```
 
 Successful responses are structured JSON. Daemon errors preserve their `code`,

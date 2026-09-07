@@ -2,7 +2,7 @@
 
 这份流程用于以后由 Agent 重复执行公开的九个 `zcode_subagent_*` 工具。它有两条必须都通过的路径：
 
-1. 直接调用 `zcode-as-subagent` CLI（daemon RPC 的公开 CLI 映射）。
+1. 直接调用 `zas` CLI（daemon RPC 的公开 CLI 映射）。
 2. 启动新的 `codex exec` 会话，由 Codex 通过 `zcode_as_subagent` MCP 调用同一工具。
 
 ## 前置条件
@@ -10,9 +10,9 @@
 在项目根目录执行：
 
 ```sh
-zcode-as-subagent init
-zcode-as-subagent install-mcp codex
-zcode-as-subagent status
+zas init
+zas install-mcp codex
+zas status
 ```
 
 记录 `target/release` 与 `npm/native/darwin-arm64` 两个 native binary 的 SHA-256，并确认 daemon socket 与固定的 ZCode runtime 可用。真实调用使用专用测试仓库；不要把项目当前工作区作为 build/edit/yolo 的写入目标。
@@ -24,7 +24,7 @@ zcode-as-subagent status
 CLI 请求形状如下（`<method>` 替换为表格中的方法，JSON 从 stdin 或 `--json` 传入）：
 
 ```sh
-zcode-as-subagent <method> --json '<json-object>'
+zas <method> --json '<json-object>'
 ```
 
 MCP 请求由新 Codex 会话执行：

@@ -160,7 +160,7 @@ def main() -> int:
         emit('followup_result', client.call('result', {'agent_id': agent_id}))
         with sqlite3.connect(Path(database).as_uri() + '?mode=ro', uri=True) as connection:
             emit('message_rows', connection.execute('SELECT message_id,state,failure_code FROM messages WHERE agent_id=?', (agent_id,)).fetchall())
-        diagnosis = subprocess.run(['node', str(ROOT / 'bin/zcode-as-subagent.mjs'), 'diagnose', '--agent', agent_id], capture_output=True, text=True, timeout=20, env={**os.environ, 'ZCODE_AGENTD_SOCKET': socket})
+        diagnosis = subprocess.run(['node', str(ROOT / 'bin/zas.mjs'), 'diagnose', '--agent', agent_id], capture_output=True, text=True, timeout=20, env={**os.environ, 'ZCODE_AGENTD_SOCKET': socket})
         (execution / 'diagnose.txt').write_text(diagnosis.stdout + diagnosis.stderr)
         emit('diagnose_exit', diagnosis.returncode)
     except Exception as exc:

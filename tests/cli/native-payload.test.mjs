@@ -19,4 +19,8 @@ test('macOS arm64 daemon payload is present and executable', () => {
 test('npm files whitelist includes the native payload directory', () => {
   const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.ok(packageJson.files.includes('npm/'));
+  assert.deepEqual(packageJson.bin, {
+    zas: 'bin/zas.mjs',
+    'zcode-as-subagent-mcp': 'bin/zcode-as-subagent-mcp.mjs',
+  });
 });

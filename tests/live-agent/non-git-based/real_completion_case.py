@@ -18,7 +18,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-CLI = ROOT / "bin" / "zcode-as-subagent.mjs"
+CLI = ROOT / "bin" / "zas.mjs"
 SOURCE = Path(__file__).resolve().parent / "fixtures" / "tiny-agent"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fixture_workspace import create_execution_root, materialize  # noqa: E402

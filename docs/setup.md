@@ -30,7 +30,7 @@ Install the MCP entry into `$CODEX_HOME/config.toml`, falling back to
 `~/.codex/config.toml`, with:
 
 ```text
-zcode-as-subagent install-mcp
+zas install-mcp
 ```
 
 The command preserves unrelated configuration and replaces only its managed

@@ -1,28 +1,28 @@
 # zcode-as-subagent
 
-`zcode-as-subagent` is a local npm-distributed CLI and MCP facade for running
+`zcode-as-subagent` is a local npm package that provides the `zas` CLI and MCP facade for running
 one durable Agent in a caller-selected workspace. The package exposes the same
-Agent lifecycle through `zcode-as-subagent` and the `zcode_subagent_*` MCP
+Agent lifecycle through `zas` and the `zcode_subagent_*` MCP
 tools; there is no compatibility alias or migration layer.
 
 ## Install and use
 
 ```bash
 npm install -g zcode-as-subagent
-zcode-as-subagent help
-zcode-as-subagent init --dry-run
-zcode-as-subagent install-mcp
+zas help
+zas init --dry-run
+zas install-mcp
 # Hooks are opt-in:
-zcode-as-subagent init --install-hooks
+zas init --install-hooks
 # Or install them independently:
-zcode-as-subagent hooks install
-zcode-as-subagent status
+zas hooks install
+zas status
 ```
 
 `install-mcp` installs the `zcode_as_subagent` MCP server into
 `$CODEX_HOME/config.toml`, or `~/.codex/config.toml` when `CODEX_HOME` is not
 set. It preserves unrelated Codex configuration and can be run repeatedly.
-Use `zcode-as-subagent install-mcp --uninstall` to remove only this managed
+Use `zas install-mcp --uninstall` to remove only this managed
 MCP entry.
 
 The macOS runtime is probed only at the fixed bundle location
