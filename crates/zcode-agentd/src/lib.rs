@@ -1125,6 +1125,7 @@ pub struct RuntimeOwner {
     shutdown_pump: Arc<AtomicBool>,
     turn_tracker: Arc<TurnTracker>,
     session_id: Mutex<Option<String>>,
+    diagnostic_session_id: Mutex<Option<String>>,
     permission_responses: Arc<Mutex<OfferedPermissionCache>>,
     stop_boundaries: AtomicU64,
 }
@@ -1238,6 +1239,7 @@ impl RuntimeOwner {
             shutdown_pump,
             turn_tracker,
             session_id: Mutex::new(None),
+            diagnostic_session_id: Mutex::new(None),
             permission_responses,
             stop_boundaries: AtomicU64::new(0),
         })
@@ -1285,6 +1287,7 @@ impl RuntimeOwner {
         let session_id = task.zcode_session_id.as_deref().ok_or_else(|| {
             RuntimeCommandError::InvalidSession("task has no persisted session id".into())
         })?;
+        *self.diagnostic_session_id.lock().unwrap() = Some(session_id.to_owned());
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or(RuntimeCommandError::Timeout)?;
@@ -1373,6 +1376,9 @@ impl RuntimeOwner {
             ))
         })?;
         let session_id = projection.session_id;
+        // Correlation only: the command-plane session is still registered only
+        // after subscribe succeeds. A rejected subscribe must remain diagnosable.
+        *self.diagnostic_session_id.lock().unwrap() = Some(session_id.clone());
         let observed_model = projection.requested_model;
         validate_requested_model(requested_model, observed_model.as_deref())
             .map_err(|code| RuntimeCommandError::InvalidSession(code.into()))?;
@@ -1842,6 +1848,9 @@ pub trait ManagedRuntime: Send + Sync + 'static {
     fn diagnostic_tail(&self) -> String {
         String::new()
     }
+    fn diagnostic_session_id(&self) -> Option<String> {
+        None
+    }
     fn wait_diagnostics(&self, _timeout: Duration) {}
     fn bootstrap_session(
         &self,
@@ -1937,6 +1946,10 @@ impl ManagedRuntime for RuntimeOwner {
 
     fn diagnostic_tail(&self) -> String {
         self.driver.diagnostic_tail()
+    }
+
+    fn diagnostic_session_id(&self) -> Option<String> {
+        self.diagnostic_session_id.lock().unwrap().clone()
     }
 
     fn wait_diagnostics(&self, timeout: Duration) {
@@ -3389,6 +3402,14 @@ impl Scheduler {
             Ok(runtime) => runtime,
             Err(error) => {
                 let message = error.to_string();
+                self.record_runtime_failure(
+                    &claim.task.agent_id,
+                    claim.task.zcode_session_id.as_deref(),
+                    "spawn",
+                    "RUNTIME_SPAWN_FAILED",
+                    &message,
+                    None,
+                );
                 if let Err(store_error) = self.finish_unstarted_route(
                     &claim.task.agent_id,
                     claim.owner_epoch,
@@ -3422,6 +3443,14 @@ impl Scheduler {
                 let terminal = runtime.stop(self.inner.config.stop_grace);
                 let resources_reaped = terminal_proves_process_group_reaped(&terminal);
                 let (outcome, code) = (CompletionOutcome::Failed, "SESSION_START_FAILED");
+                self.record_runtime_failure(
+                    &claim.task.agent_id,
+                    claim.task.zcode_session_id.as_deref(),
+                    "session_start",
+                    code,
+                    &message,
+                    Some(runtime.as_ref()),
+                );
                 if let Err(store_error) = self.finish_unstarted_route(
                     &claim.task.agent_id,
                     claim.owner_epoch,
@@ -3450,6 +3479,14 @@ impl Scheduler {
         ) {
             let message = "runtime model did not match the prepared request";
             let terminal = runtime.stop(self.inner.config.stop_grace);
+            self.record_runtime_failure(
+                &claim.task.agent_id,
+                Some(&session.session_id),
+                "session_start",
+                code,
+                message,
+                Some(runtime.as_ref()),
+            );
             let resources_reaped = terminal_proves_process_group_reaped(&terminal);
             if let Err(error) = self.finish_unstarted_route(
                 &claim.task.agent_id,
@@ -3848,7 +3885,7 @@ impl Scheduler {
             agent_id,
             sink,
             route,
-            runtime: _runtime,
+            runtime,
         } = target;
         let TerminalDecision {
             terminal,
@@ -3879,6 +3916,20 @@ impl Scheduler {
                     };
                     (outcome, "RUNTIME_TERMINAL".into())
                 });
+                if !matches!(
+                    outcome,
+                    CompletionOutcome::Completed | CompletionOutcome::Cancelled
+                ) {
+                    let session_id = self.active_session(agent_id).map(|active| active.2);
+                    self.record_runtime_failure(
+                        agent_id,
+                        session_id.as_deref(),
+                        "runtime_terminal",
+                        &reason,
+                        &format!("{terminal:?}"),
+                        Some(runtime.as_ref()),
+                    );
+                }
                 let natural_completed =
                     natural_completion && matches!(terminal, RuntimeTerminal::Completed(_));
                 let process_group_reaped = terminal_proves_process_group_reaped(&terminal);
@@ -4841,25 +4892,87 @@ impl Scheduler {
         }
     }
 
-    fn record_failure(&self, agent_id: &str, message: String) {
-        let bounded = bounded_error(&message);
+    fn record_runtime_failure(
+        &self,
+        agent_id: &str,
+        session_id: Option<&str>,
+        stage: &str,
+        error_code: &str,
+        message: &str,
+        runtime: Option<&dyn ManagedRuntime>,
+    ) {
+        // Callers already stopped/reaped the runtime or observed its terminal
+        // boundary. Do not introduce a diagnostic wait into scheduler control.
+        let known_session = runtime.and_then(ManagedRuntime::diagnostic_session_id);
+        let tail = runtime
+            .map(ManagedRuntime::diagnostic_tail)
+            .unwrap_or_default();
+        let record = runtime_failure_record(
+            agent_id,
+            known_session.as_deref().or(session_id),
+            stage,
+            error_code,
+            message,
+            &tail,
+        );
+        self.record_failure_line(agent_id, record.clone(), &record);
+    }
+
+    fn record_failure_line(&self, agent_id: &str, message: String, record: &str) {
         update_latest_failure(
             &mut self.inner.state.lock().unwrap().failures,
             agent_id,
             message,
         );
-        let line = format!("[zcode-agentd] failure agent={agent_id}: {bounded}\n");
+        let line = format!(
+            "[zcode-agentd] failure agent={}: {record}\n",
+            bounded_error(agent_id)
+        );
         let _ = spawn_failure_log(line, || io::stderr());
+    }
+
+    fn record_failure(&self, agent_id: &str, message: String) {
+        let bounded = bounded_error(&message);
+        self.record_failure_line(agent_id, message, &bounded);
     }
 }
 
+// Every variable field is bounded before JSON escaping, whose worst-case
+// expansion is six bytes per input byte. Including framing, records stay below
+// 192 KiB; stderr keeps its latest 16 KiB even for invalid UTF-8 input.
+fn runtime_failure_record(
+    agent_id: &str,
+    session_id: Option<&str>,
+    stage: &str,
+    error_code: &str,
+    message: &str,
+    stderr_tail: &str,
+) -> String {
+    let mut start = stderr_tail.len().saturating_sub(16 * 1024);
+    while !stderr_tail.is_char_boundary(start) {
+        start += 1;
+    }
+    serde_json::json!({
+        "agent_id": bounded_error(agent_id),
+        "session_id": session_id.map(bounded_error),
+        "stage": bounded_prefix(stage, 128),
+        "error_code": bounded_prefix(error_code, 128),
+        "message": bounded_error(message),
+        "stderr_tail": &stderr_tail[start..],
+    })
+    .to_string()
+}
+
 fn bounded_error(message: &str) -> String {
-    const MAX_ERROR_BYTES: usize = 4096;
-    if message.len() <= MAX_ERROR_BYTES {
+    bounded_prefix(message, 4096)
+}
+
+fn bounded_prefix(message: &str, max_bytes: usize) -> String {
+    if message.len() <= max_bytes {
         return message.to_owned();
     }
     const MARKER: &str = "…";
-    let limit = MAX_ERROR_BYTES - MARKER.len();
+    let limit = max_bytes - MARKER.len();
     let end = message
         .char_indices()
         .map(|(index, _)| index)
@@ -4888,11 +5001,194 @@ where
 
 #[cfg(test)]
 mod failure_log_tests {
-    use super::{bounded_error, spawn_failure_log, update_latest_failure};
+    use super::*;
     use std::collections::HashMap;
     use std::io::{self, Write};
     use std::sync::mpsc;
     use std::time::Duration;
+
+    fn diagnostic_scheduler(script: &str) -> (tempfile::TempDir, Scheduler, String) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/live-agent/workspace");
+        fs::create_dir_all(&root).unwrap();
+        let workspace = tempfile::Builder::new()
+            .prefix("s02-fault-")
+            .tempdir_in(root)
+            .unwrap();
+        let store = Arc::new(Store::open(workspace.path().join("state.sqlite")).unwrap());
+        let script = script.to_owned();
+        let factory = CommandRuntimeFactory::new(move |_: &TaskRecord| {
+            let mut command = Command::new("sh");
+            command.args(["-c", &script]);
+            Ok(command)
+        });
+        let scheduler = Scheduler::new(
+            "diagnostic-test",
+            store,
+            Arc::new(factory),
+            SchedulerConfig::default(),
+        )
+        .unwrap();
+        let submitted = scheduler
+            .enqueue_general(&GeneralTaskManifest {
+                schema: "zcode-general-task/v1".into(),
+                agent_id: "diagnostic-agent".into(),
+                repository: workspace.path().canonicalize().unwrap(),
+                permission_mode: zcode_agent_preparation::PermissionMode::Plan,
+                prompt: "diagnostic fixture".into(),
+                write_manifest: Vec::new(),
+            })
+            .unwrap();
+        (workspace, scheduler, submitted.task.agent_id)
+    }
+
+    fn await_result(scheduler: &Scheduler, agent_id: &str) -> zcode_agent_store::StoredTaskResult {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(result) = scheduler.store().task_result(agent_id).unwrap() {
+                return result;
+            }
+            assert!(Instant::now() < deadline, "no terminal result");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn failure_record(scheduler: &Scheduler, agent_id: &str) -> serde_json::Value {
+        let record = scheduler
+            .last_error(agent_id)
+            .expect("correlated failure record");
+        assert!(record.len() < 192 * 1024);
+        let record: serde_json::Value = serde_json::from_str(&record).unwrap();
+        assert_eq!(record["agent_id"], agent_id);
+        record
+    }
+
+    #[test]
+    fn startup_and_protocol_failures_record_stderr_without_changing_result() {
+        let cases = [
+            (
+                "read request; printf startup-tail >&2; exit 7",
+                None,
+                "startup-tail",
+            ),
+            (
+                r#"read request; printf invalid-projection-tail >&2; printf '%s\n' '{"id":1,"result":{}}'; sleep 2"#,
+                None,
+                "invalid-projection-tail",
+            ),
+            (
+                r#"read request; printf '%s\n' '{"id":1,"result":{"session":{"sessionId":"known-session"}}}'; read request; printf subscribe-tail >&2; printf '%s\n' '{"id":2,"error":{"code":-1,"message":"reject"}}'; sleep 2"#,
+                Some("known-session"),
+                "subscribe-tail",
+            ),
+        ];
+        for (script, session, tail) in cases {
+            let (_workspace, scheduler, agent_id) = diagnostic_scheduler(script);
+            assert!(scheduler.start_ready().is_err());
+            let record = failure_record(&scheduler, &agent_id);
+            assert_eq!(record["stage"], "session_start");
+            assert_eq!(record["error_code"], "SESSION_START_FAILED");
+            assert_eq!(record["session_id"].as_str(), session);
+            assert!(record["stderr_tail"].as_str().unwrap().contains(tail));
+            let result = await_result(&scheduler, &agent_id);
+            let result_json = serde_json::to_string(&result.result).unwrap();
+            assert!(
+                !result_json.contains(tail),
+                "stderr leaked into task result"
+            );
+            assert_eq!(
+                scheduler
+                    .store()
+                    .get_task(&agent_id)
+                    .unwrap()
+                    .unwrap()
+                    .outcome,
+                Some(TaskOutcome::Failed)
+            );
+        }
+    }
+
+    const RUNNING_PROTOCOL: &str = r#"
+read request
+printf '%s\n' '{"id":1,"result":{"session":{"sessionId":"running-session"}}}'
+read request
+printf '%s\n' '{"id":2,"result":{}}'
+read request
+printf '%s\n' '{"id":3,"result":{}}' '{"method":"session/event","params":{"type":"turn.started"}}'
+sleep 0.1
+"#;
+
+    #[test]
+    fn abnormal_exit_records_correlated_tail_and_preserves_runtime_lost_outcome() {
+        let script = format!("{RUNNING_PROTOCOL}\nprintf abnormal-exit-tail >&2; exit 7");
+        let (_workspace, scheduler, agent_id) = diagnostic_scheduler(&script);
+        scheduler.start_ready().unwrap();
+        let result = await_result(&scheduler, &agent_id);
+        let record = failure_record(&scheduler, &agent_id);
+        assert_eq!(record["stage"], "runtime_terminal");
+        assert_eq!(record["session_id"], "running-session");
+        assert_eq!(record["error_code"], "RUNTIME_TERMINAL");
+        assert!(record["stderr_tail"]
+            .as_str()
+            .unwrap()
+            .contains("abnormal-exit-tail"));
+        assert!(!serde_json::to_string(&result.result)
+            .unwrap()
+            .contains("abnormal-exit-tail"));
+        assert_eq!(
+            scheduler
+                .store()
+                .get_task(&agent_id)
+                .unwrap()
+                .unwrap()
+                .outcome,
+            Some(TaskOutcome::RuntimeLost)
+        );
+    }
+
+    #[test]
+    fn successful_runtime_stderr_is_not_published_as_failure_or_final_text() {
+        let script = format!(
+            r#"{RUNNING_PROTOCOL}
+printf normal-stderr-tail >&2
+printf '%s\n' '{{"method":"session/event","params":{{"type":"model.streaming","payload":{{"kind":"text_delta","delta":"task answer","assistantMessageId":"m1"}}}}}}' '{{"method":"session/event","params":{{"type":"message.finished","payload":{{"assistantMessageId":"m1"}}}}}}' '{{"method":"session/event","params":{{"type":"turn.completed"}}}}'
+sleep 2
+"#
+        );
+        let (_workspace, scheduler, agent_id) = diagnostic_scheduler(&script);
+        scheduler.start_ready().unwrap();
+        let result = await_result(&scheduler, &agent_id);
+        assert!(scheduler.last_error(&agent_id).is_none());
+        let result_json = serde_json::to_string(&result.result).unwrap();
+        assert!(result_json.contains("task answer"));
+        assert!(!result_json.contains("normal-stderr-tail"));
+        assert_eq!(
+            scheduler
+                .store()
+                .get_task(&agent_id)
+                .unwrap()
+                .unwrap()
+                .outcome,
+            Some(TaskOutcome::Completed)
+        );
+    }
+
+    #[test]
+    fn escaped_runtime_failure_record_is_bounded_and_keeps_latest_stderr() {
+        let large = "\0".repeat(30000);
+        let record = runtime_failure_record(
+            &large,
+            Some(&large),
+            &large,
+            &large,
+            &large,
+            &(large.clone() + "END"),
+        );
+        assert!(record.len() < 192 * 1024);
+        let record: serde_json::Value = serde_json::from_str(&record).unwrap();
+        assert!(record["stderr_tail"].as_str().unwrap().ends_with("END"));
+        assert!(record["stderr_tail"].as_str().unwrap().len() <= 16 * 1024);
+        assert!(!record.to_string().contains('\n'));
+    }
 
     #[test]
     fn bounded_error_respects_utf8_byte_limit() {

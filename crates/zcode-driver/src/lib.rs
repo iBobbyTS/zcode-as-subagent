@@ -389,7 +389,13 @@ impl Driver {
     }
 
     pub fn diagnostic_tail(&self) -> String {
-        String::from_utf8_lossy(&self.diagnostics.lock().unwrap()).into_owned()
+        let tail = String::from_utf8_lossy(&self.diagnostics.lock().unwrap()).into_owned();
+        // Replacement characters can expand malformed bytes by up to 3x.
+        let mut start = tail.len().saturating_sub(16 * 1024);
+        while !tail.is_char_boundary(start) {
+            start += 1;
+        }
+        tail[start..].to_owned()
     }
 
     pub fn wait_diagnostics(&self, timeout: Duration) {
@@ -1687,6 +1693,22 @@ mod tests {
         let tail = driver.diagnostic_tail();
         assert_eq!(tail.len(), 16 * 1024);
         assert!(tail.bytes().all(|byte| byte == b'x'));
+    }
+
+    #[test]
+    fn invalid_utf8_diagnostics_remain_byte_bounded_and_keep_the_end() {
+        let mut command = Command::new("sh");
+        command.env("LC_ALL", "C");
+        command.args([
+            "-c",
+            "head -c 20000 /dev/zero | tr '\\0' '\\377' >&2; printf 'END' >&2",
+        ]);
+        let driver = Driver::spawn(command).unwrap();
+        assert_eq!(driver.wait().unwrap(), Some(0));
+        let tail = driver.diagnostic_tail();
+        assert!(tail.len() <= 16 * 1024);
+        assert!(tail.contains('�'));
+        assert!(tail.ends_with("END"));
     }
 
     #[test]
