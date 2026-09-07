@@ -47,8 +47,8 @@ test('agent diagnose reads only the public poll projection and exports a bounded
     const report = await diagnose(paths, ['--agent', 'agent-1', '--output', destination]);
     assert.equal(report.daemon.available, true);
     assert.equal(report.agent.task.agent_id, 'agent-1');
-    assert.equal(report.agent.request_ids.length, 1);
-    assert.match(report.agent.request_ids[0], /^cli-/u);
+    assert.deepEqual(report.agent.request_ids, []);
+    assert.match(report.agent.query_request_id, /^cli-/u);
     assert.equal(report.agent.identifiers_complete, false);
     assert.equal(report.logs.complete, false);
     assert.ok(report.logs.incomplete.some((reason) => reason.startsWith('log_rotated:')));
@@ -79,12 +79,25 @@ test('diagnostic reads only known files, caps total bytes, and redacts secrets',
   fs.writeFileSync(path.join(logs, 'daemon.log'), 'token=abc123 password=hunter2 Authorization: Bearer xyz\n' + 'a'.repeat(20 * 1024));
   fs.writeFileSync(path.join(logs, 'daemon-error.log'), 'api_key=secret\n' + 'b'.repeat(20 * 1024));
   fs.writeFileSync(path.join(logs, 'unrelated.log'), 'password=must-not-read');
+  fs.writeFileSync(path.join(home, 'outside.log'), 'outside=must-not-read');
+  fs.unlinkSync(path.join(logs, 'daemon-error.log'));
+  fs.symlinkSync(path.join(home, 'outside.log'), path.join(logs, 'daemon-error.log'));
   const report = diagnosticLogs(logs);
-  assert.equal(report.files.length, 2);
+  assert.equal(report.files.length, 1);
   assert.equal(report.total_bytes <= 32 * 1024, true);
   const joined = report.files.map((file) => file.tail).join('\n');
   assert.doesNotMatch(joined, /abc123|hunter2|xyz|secret/u);
   assert.equal(joined.includes('must-not-read'), false);
+});
+
+test('diagnostic redacts quoted bearer and JSON secret values', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-json-secret-'));
+  const logs = path.join(home, 'logs');
+  fs.mkdirSync(logs);
+  fs.writeFileSync(path.join(logs, 'daemon.log'), '{"password":"hunter2","Authorization":"Bearer xyz","api_key":"abc"}\n');
+  const report = diagnosticLogs(logs);
+  assert.doesNotMatch(report.files[0].tail, /hunter2|xyz|abc/u);
+  assert.match(report.files[0].tail, /REDACTED/u);
 });
 
 test('diagnostic export write failure is reported without throwing', async () => {
