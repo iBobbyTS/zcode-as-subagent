@@ -1,4 +1,5 @@
 use crate::{
+    observation::{ObservationCoverage, ObservedReasoning, ObservedTool, OBSERVATION_SCHEMA},
     MessageDisposition, PassiveActivitySnapshot, PassiveActivityWindow, PassiveToolKind,
     ResponseDisposition, Scheduler, SchedulerError,
 };
@@ -76,6 +77,9 @@ pub enum RpcMethod {
     TaskClose {
         agent_id: String,
     },
+    TaskObserve {
+        agent_id: String,
+    },
 }
 
 impl RpcMethod {
@@ -91,6 +95,7 @@ impl RpcMethod {
                 | "task_cancel"
                 | "task_result"
                 | "task_close"
+                | "task_observe"
         )
     }
 }
@@ -265,6 +270,9 @@ pub enum RpcSuccess {
     Closed {
         task: TaskView,
     },
+    TaskObserved {
+        observation: TaskObservationView,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -313,6 +321,34 @@ pub struct AgentCapabilitiesView {
     pub max_rpc_frame_bytes: usize,
     pub max_wait_ms: u64,
     pub maturity: BTreeMap<String, CapabilityMaturityView>,
+    pub observation: ObservationCapabilityView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservationCapabilityView {
+    pub protocol: String,
+    pub public_reasoning_default: bool,
+    pub runtime_source_verified: bool,
+    pub defaults: ObservationDefaultsView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservationDefaultsView {
+    pub top_tools: usize,
+    pub recent_calls_per_tool: usize,
+    pub reasoning_chars: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskObservationView {
+    pub schema: String,
+    pub agent_id: String,
+    pub service_generation: String,
+    pub snapshot_seq: u64,
+    pub count_scope: String,
+    pub tools: Vec<ObservedTool>,
+    pub reasoning: ObservedReasoning,
+    pub coverage: ObservationCoverage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -798,6 +834,29 @@ impl RpcService {
                     task: task_view(task),
                 })
             }
+            RpcMethod::TaskObserve { agent_id } => {
+                let task = self.require_task(&agent_id)?;
+                let (snapshot, runtime_source_verified) =
+                    self.scheduler.observation_snapshot(&task.agent_id);
+                if !runtime_source_verified {
+                    return Err(RpcError::new(
+                        RpcErrorCode::Unavailable,
+                        "observation runtime source is not verified",
+                    ));
+                }
+                Ok(RpcSuccess::TaskObserved {
+                    observation: TaskObservationView {
+                        schema: OBSERVATION_SCHEMA.into(),
+                        agent_id: task.agent_id,
+                        service_generation: self.service_generation.clone(),
+                        snapshot_seq: snapshot.snapshot_seq,
+                        count_scope: "agent_lifetime".into(),
+                        tools: snapshot.tools,
+                        reasoning: snapshot.reasoning,
+                        coverage: snapshot.coverage,
+                    },
+                })
+            }
         }
     }
 
@@ -822,7 +881,7 @@ impl RpcService {
             protocol_version: RPC_VERSION,
             service_generation: self.service_generation.clone(),
             components,
-            capabilities: agent_capabilities(),
+            capabilities: agent_capabilities(self.scheduler.runtime_source_verified()),
         }
     }
 
@@ -963,12 +1022,22 @@ fn opaque_generation() -> Result<String, RpcServiceConfigError> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn agent_capabilities() -> AgentCapabilitiesView {
+fn agent_capabilities(runtime_source_verified: bool) -> AgentCapabilitiesView {
     let maturity = BTreeMap::new();
     AgentCapabilitiesView {
         max_rpc_frame_bytes: MAX_FRAME_BYTES,
         max_wait_ms: MAX_WAIT.as_millis() as u64,
         maturity,
+        observation: ObservationCapabilityView {
+            protocol: OBSERVATION_SCHEMA.into(),
+            public_reasoning_default: true,
+            runtime_source_verified,
+            defaults: ObservationDefaultsView {
+                top_tools: 3,
+                recent_calls_per_tool: 5,
+                reasoning_chars: 200,
+            },
+        },
     }
 }
 
@@ -1076,7 +1145,7 @@ fn task_activity_view(
 
 #[cfg(test)]
 mod activity_projection_tests {
-    use super::{task_activity_view, TaskActivityStateView};
+    use super::{agent_capabilities, task_activity_view, TaskActivityStateView};
     use crate::{PassiveActivitySnapshot, PassiveActivityWindow};
     use zcode_agent_store::TaskPhase;
 
@@ -1138,6 +1207,22 @@ mod activity_projection_tests {
         assert_eq!(activity.state, TaskActivityStateView::Terminal);
         assert!(!activity.model_request_active);
         assert_eq!(activity.model_request_age_ms, None);
+    }
+
+    #[test]
+    fn status_reports_observation_contract_and_real_source_state() {
+        let verified = agent_capabilities(true).observation;
+        assert_eq!(verified.protocol, "zas-observation/1.1");
+        assert!(verified.public_reasoning_default);
+        assert!(verified.runtime_source_verified);
+        assert_eq!(verified.defaults.top_tools, 3);
+        assert_eq!(verified.defaults.recent_calls_per_tool, 5);
+        assert_eq!(verified.defaults.reasoning_chars, 200);
+        assert!(
+            !agent_capabilities(false)
+                .observation
+                .runtime_source_verified
+        );
     }
 }
 

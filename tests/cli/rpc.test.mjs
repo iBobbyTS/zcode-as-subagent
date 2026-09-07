@@ -110,6 +110,26 @@ test('CLI applies documented list and result defaults before connecting', async 
   }
 });
 
+test('CLI observe uses the shared read-only daemon snapshot without adding fields', async () => {
+  const socketPath = path.join(os.tmpdir(), `zcode-cli-rpc-observe-${process.pid}-${Date.now()}.sock`);
+  const observation = {
+    schema: 'zas-observation/1.1', agent_id: 'agent-1', service_generation: 'generation',
+    snapshot_seq: 7, count_scope: 'agent_lifetime', tools: [],
+    reasoning: { text: '', char_count: 0, truncated: false, source: { status: 'VERIFIED_RUNTIME_PUBLIC', runtime_version: '3.11.2', event_type: 'model.streaming', delta_pointer: '/params/payload/delta' } },
+    coverage: { tool_history_complete: false, reasoning_complete: false, dropped_events: 0 },
+  };
+  const server = net.createServer((socket) => { socket.once('data', (chunk) => {
+    const request = JSON.parse(chunk);
+    assert.equal(request.method, 'task_observe');
+    assert.deepEqual(request.params, { agent_id: 'agent-1' });
+    socket.end(`${JSON.stringify({ version: 12, request_id: request.request_id, outcome: 'success', result: { kind: 'task_observed', observation } })}\n`);
+  }); });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  try {
+    assert.deepEqual(await callDaemon(socketPath, 'observe', { agent_id: 'agent-1' }), observation);
+  } finally { await new Promise((resolve) => server.close(resolve)); }
+});
+
 test('CLI public projection removes private RPC fields and result digest', () => {
   const task = { agent_id: 'agent-1', phase: 'TERMINAL', outcome: 'COMPLETED', reason_code: null, stop_requested: false, close_requested: false, closed: false, reaped: true };
   const projected = projectDaemonResult('result', {

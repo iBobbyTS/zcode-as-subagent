@@ -10,6 +10,14 @@ Stop the daemon with SIGTERM or SIGINT and wait for its exact socket to disappea
 
 After restart, call `zcode_subagent_list` with explicit repository, feature, or ownership scope. Inspect tasks with `poll` and `result`, then close them after verifying durable state. Start a new Agent for further work.
 
+Observation snapshots are intentionally memory-only. After a daemon restart,
+`zcode_subagent_observe` can return an empty bounded snapshot for a retained
+task only with `tool_history_complete=false` and
+`reasoning_complete=false`; it never presents the missing pre-restart history
+as a complete empty lifetime. A runtime path or SHA-256 mismatch makes the
+observation source unavailable and sets the status capability to false. Use
+`poll` and `result` for durable lifecycle facts.
+
 ## Data and terminal history
 
 For a consistent SQLite backup, stop the sole daemon and preserve the database with any WAL/SHM companions. Terminal history is read through `zcode_subagent_result` and running state through poll. 恢复已结束的 session 暂不可用；发送恢复失败时保留原终态历史，具体限制见下文。 Never read private stored locators directly.

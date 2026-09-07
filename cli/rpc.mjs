@@ -45,6 +45,7 @@ function methodFor(command, input) {
     case 'cancel': return { method: 'task_cancel', params: { agent_id: input.agent_id } };
     case 'result': return { method: 'task_result', params: { agent_id: input.agent_id, offset: input.offset ?? 0, limit: input.limit ?? MAX_RESULT_CHUNK_BYTES } };
     case 'close': return { method: 'task_close', params: { agent_id: input.agent_id } };
+    case 'observe': return { method: 'task_observe', params: { agent_id: input.agent_id } };
     default: throw new CliError('UNKNOWN_COMMAND', `unsupported daemon command: ${command}`, 2);
   }
 }
@@ -92,6 +93,7 @@ export function projectDaemonResult(command, result) {
     case 'respond': return { ...result.outcome, policy_reason_code: result.outcome.policy_reason_code ?? null };
     case 'cancel': case 'close': return { task: publicTask(result.task) };
     case 'result': return { task: publicTask(result.task), result: publicResult(result.result) };
+    case 'observe': return result.observation;
     default: throw new CliError('PROTOCOL_ERROR', `daemon returned an unsupported result for ${command}`);
   }
 }

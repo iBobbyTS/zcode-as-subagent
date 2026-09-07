@@ -3,9 +3,10 @@ use rmcp::{
     model::{Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router, Json, ServerHandler, ServiceExt,
 };
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     path::PathBuf,
     sync::{
@@ -21,8 +22,8 @@ use zcode_agentd::rpc::{
     AgentCapabilitiesView, CapabilityMaturityView, ComponentStateView, GeneralSubmitInput,
     MessageInput, RespondInput, ResponseDecision, ResponseOutcomeView, RpcClient, RpcMethod,
     RpcOutcome, RpcRequest, RpcSuccess, SubmissionDispositionView, SystemStatusView,
-    TaskActivityStateView, TaskActivityView, TaskListQuery, TaskPhaseFilter, TaskPollQuery,
-    TaskResultView, TaskView, TelemetryStatusView, RPC_VERSION,
+    TaskActivityStateView, TaskActivityView, TaskListQuery, TaskObservationView, TaskPhaseFilter,
+    TaskPollQuery, TaskResultView, TaskView, TelemetryStatusView, RPC_VERSION,
 };
 
 use crate::{
@@ -56,10 +57,11 @@ impl From<PublicPermissionMode> for PermissionMode {
     }
 }
 
-pub const PUBLIC_TOOLS: [&str; 9] = [
+pub const PUBLIC_TOOLS: [&str; 10] = [
     "zcode_subagent_cancel",
     "zcode_subagent_close",
     "zcode_subagent_list",
+    "zcode_subagent_observe",
     "zcode_subagent_poll",
     "zcode_subagent_respond",
     "zcode_subagent_result",
@@ -141,6 +143,24 @@ pub struct PublicAgentCapabilities {
     pub max_rpc_frame_bytes: usize,
     pub max_wait_ms: u64,
     pub maturity: BTreeMap<String, PublicCapabilityMaturity>,
+    pub observation: PublicObservationCapability,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PublicObservationCapability {
+    pub protocol: String,
+    pub public_reasoning_default: bool,
+    pub runtime_source_verified: bool,
+    pub defaults: PublicObservationDefaults,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PublicObservationDefaults {
+    pub top_tools: usize,
+    pub recent_calls_per_tool: usize,
+    pub reasoning_chars: usize,
 }
 
 impl From<AgentCapabilitiesView> for PublicAgentCapabilities {
@@ -154,7 +174,179 @@ impl From<AgentCapabilitiesView> for PublicAgentCapabilities {
             max_rpc_frame_bytes: value.max_rpc_frame_bytes,
             max_wait_ms: value.max_wait_ms,
             maturity,
+            observation: PublicObservationCapability {
+                protocol: value.observation.protocol,
+                public_reasoning_default: value.observation.public_reasoning_default,
+                runtime_source_verified: value.observation.runtime_source_verified,
+                defaults: PublicObservationDefaults {
+                    top_tools: value.observation.defaults.top_tools,
+                    recent_calls_per_tool: value.observation.defaults.recent_calls_per_tool,
+                    reasoning_chars: value.observation.defaults.reasoning_chars,
+                },
+            },
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
+pub enum PublicObservationSchema {
+    #[serde(rename = "zas-observation/1.1")]
+    Version1_1,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicObservationCountScope {
+    AgentLifetime,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
+pub enum PublicReasoningSourceStatus {
+    #[serde(rename = "VERIFIED_RUNTIME_PUBLIC")]
+    VerifiedRuntimePublic,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentObserveOutput {
+    pub schema: PublicObservationSchema,
+    pub agent_id: String,
+    pub service_generation: String,
+    pub snapshot_seq: u64,
+    pub count_scope: PublicObservationCountScope,
+    pub tools: Vec<PublicObservedTool>,
+    pub reasoning: PublicObservedReasoning,
+    pub coverage: PublicObservationCoverage,
+}
+
+impl JsonSchema for AgentObserveOutput {
+    fn schema_name() -> Cow<'static, str> {
+        "ZAS suspicion-only observation 4.3.1".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schema/zas-observation-v1.1.schema.json"
+        ))
+        .expect("packaged observation schema must be valid JSON");
+        value
+            .as_object_mut()
+            .expect("packaged observation schema must be an object")
+            .remove("$schema");
+        value
+            .try_into()
+            .expect("packaged observation schema must be a JSON Schema object")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PublicObservedTool {
+    #[schemars(length(min = 1))]
+    pub tool_name: String,
+    #[schemars(range(min = 1))]
+    pub call_count: u64,
+    #[schemars(length(min = 1, max = 5))]
+    pub recent_calls: Vec<PublicObservedCall>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PublicObservedCall {
+    #[schemars(range(min = 1))]
+    pub seq: u64,
+    #[schemars(length(min = 1))]
+    pub tool_call_id: String,
+    pub arguments: serde_json::Map<String, serde_json::Value>,
+    pub arguments_truncated: bool,
+    pub redacted_fields: u64,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PublicObservedReasoning {
+    #[schemars(length(max = 200))]
+    pub text: String,
+    #[schemars(range(max = 200))]
+    pub char_count: usize,
+    pub truncated: bool,
+    pub source: PublicReasoningSource,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PublicReasoningSource {
+    pub status: PublicReasoningSourceStatus,
+    #[schemars(length(min = 1))]
+    pub runtime_version: String,
+    #[schemars(length(min = 1))]
+    pub event_type: String,
+    #[schemars(regex(pattern = "^/"))]
+    pub delta_pointer: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PublicObservationCoverage {
+    pub tool_history_complete: bool,
+    pub reasoning_complete: bool,
+    pub dropped_events: u64,
+}
+
+impl TryFrom<TaskObservationView> for AgentObserveOutput {
+    type Error = String;
+
+    fn try_from(value: TaskObservationView) -> Result<Self, Self::Error> {
+        if value.schema != "zas-observation/1.1"
+            || value.count_scope != "agent_lifetime"
+            || value.reasoning.source.status != "VERIFIED_RUNTIME_PUBLIC"
+            || value.reasoning.source.runtime_version != "3.11.2"
+            || value.reasoning.source.event_type != "model.streaming"
+            || value.reasoning.source.delta_pointer != "/params/payload/delta"
+        {
+            return Err(protocol_error());
+        }
+        Ok(Self {
+            schema: PublicObservationSchema::Version1_1,
+            agent_id: value.agent_id,
+            service_generation: value.service_generation,
+            snapshot_seq: value.snapshot_seq,
+            count_scope: PublicObservationCountScope::AgentLifetime,
+            tools: value
+                .tools
+                .into_iter()
+                .map(|tool| PublicObservedTool {
+                    tool_name: tool.tool_name,
+                    call_count: tool.call_count,
+                    recent_calls: tool
+                        .recent_calls
+                        .into_iter()
+                        .map(|call| PublicObservedCall {
+                            seq: call.seq,
+                            tool_call_id: call.tool_call_id,
+                            arguments: call.arguments,
+                            arguments_truncated: call.arguments_truncated,
+                            redacted_fields: call.redacted_fields,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            reasoning: PublicObservedReasoning {
+                text: value.reasoning.text,
+                char_count: value.reasoning.char_count,
+                truncated: value.reasoning.truncated,
+                source: PublicReasoningSource {
+                    status: PublicReasoningSourceStatus::VerifiedRuntimePublic,
+                    runtime_version: value.reasoning.source.runtime_version,
+                    event_type: value.reasoning.source.event_type,
+                    delta_pointer: value.reasoning.source.delta_pointer,
+                },
+            },
+            coverage: PublicObservationCoverage {
+                tool_history_complete: value.coverage.tool_history_complete,
+                reasoning_complete: value.coverage.reasoning_complete,
+                dropped_events: value.coverage.dropped_events,
+            },
+        })
     }
 }
 
@@ -213,7 +405,9 @@ pub struct AgentSpawnOutput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
 pub struct AgentInput {
+    #[schemars(length(min = 1))]
     pub agent_id: String,
 }
 
@@ -852,6 +1046,29 @@ impl SubagentMcp {
     }
 
     #[tool(
+        name = "zcode_subagent_observe",
+        description = "仅在怀疑 zcode subagent 陷入无意义循环时才调用，检查最近公开推理和工具调用过程；不要用于健康任务的例行轮询。只读已捕获的本 Agent 数据，不启动模型或工具。默认按本 Agent 任务生命周期内的调用次数选最多的 3 类工具，每类返回最近最多 5 次调用（名称、ID、参数，不含结果），并返回已验证公开 reasoning delta 合并后的最新 200 个 Unicode 字符。encrypted_content 始终排除。ZAS 不判断循环、不返回进展标签、不自动取消。调用方结合当前任务与这些事实判断：PROGRESSING（新增事实或有效推进）；EXPECTED_WAIT（有目的的计算、权限或外部等待）；NEEDS_CLARIFICATION（具体输入或决定缺失）；NO_PROGRESS_LOOP（无新信息的等价行动循环，且合理重读、等待、状态变化等解释已排除）；INSUFFICIENT_OBSERVABILITY（截断、缺口或缺少上下文，不能断言循环）。相同文本、重复 read 或 true/echo 本身不是循环；没有工具结果也不能推断工具成功、文件未变化或任务失败。判断和取消由调用方独立决定。",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn agent_observe(
+        &self,
+        Parameters(input): Parameters<AgentInput>,
+    ) -> Result<Json<AgentObserveOutput>, String> {
+        validate_text(&input.agent_id, "agent_id", MAX_ID_BYTES)?;
+        match self.rpc(RpcMethod::TaskObserve {
+            agent_id: input.agent_id,
+        })? {
+            RpcSuccess::TaskObserved { observation } => Ok(Json(observation.try_into()?)),
+            _ => Err(protocol_error()),
+        }
+    }
+
+    #[tool(
         name = "zcode_subagent_list",
         description = "List tasks within an explicit daemon-enforced scope",
         annotations(
@@ -1042,10 +1259,12 @@ pub async fn serve_stdio(
 #[cfg(test)]
 mod contract_default_tests {
     use super::{
-        default_result_limit, AgentListInput, AgentPollInput, AgentResultInput, AgentSendInput,
-        SubagentMcp,
+        default_result_limit, AgentListInput, AgentObserveOutput, AgentPollInput, AgentResultInput,
+        AgentSendInput, SubagentMcp, PUBLIC_TOOLS,
     };
+    use sha2::{Digest, Sha256};
     use std::{collections::HashSet, path::PathBuf, time::Duration};
+    use zcode_agentd::{observation::ObservationSnapshot, rpc::TaskObservationView};
 
     #[test]
     fn omitted_public_fields_use_the_frozen_defaults() {
@@ -1096,5 +1315,68 @@ mod contract_default_tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
+    }
+
+    #[test]
+    fn observation_tool_catalog_matches_the_frozen_description_and_bounds() {
+        let facade = SubagentMcp::new(PathBuf::from("/tmp/observe.sock"), Duration::from_secs(1));
+        let tools = facade.tool_router.list_all();
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.name.as_ref())
+                .collect::<Vec<_>>(),
+            PUBLIC_TOOLS
+        );
+        let observe = tools
+            .iter()
+            .find(|tool| tool.name == "zcode_subagent_observe")
+            .unwrap();
+        let description = observe.description.as_deref().unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(description.as_bytes())),
+            "27da41da0527693fa8841d1604c4803c5fa31602a596ab1f73edc7c5a3535f84"
+        );
+        let input = serde_json::to_value(&observe.input_schema).unwrap();
+        assert_eq!(input["additionalProperties"], false);
+        assert_eq!(input["required"], serde_json::json!(["agent_id"]));
+        let output = serde_json::to_value(observe.output_schema.as_ref().unwrap()).unwrap();
+        assert_eq!(output["additionalProperties"], false);
+        assert_eq!(
+            output["properties"]["schema"]["const"],
+            "zas-observation/1.1"
+        );
+        assert_eq!(
+            output["properties"]["count_scope"]["const"],
+            "agent_lifetime"
+        );
+        assert_eq!(output["properties"]["tools"]["maxItems"], 3);
+        assert_eq!(
+            output["properties"]["tools"]["items"]["properties"]["recent_calls"]["maxItems"],
+            5
+        );
+        assert_eq!(
+            output["properties"]["reasoning"]["properties"]["text"]["maxLength"],
+            200
+        );
+    }
+
+    #[test]
+    fn observation_projection_rejects_source_contract_drift() {
+        let snapshot = ObservationSnapshot::unavailable();
+        let view = TaskObservationView {
+            schema: "zas-observation/1.1".into(),
+            agent_id: "agent".into(),
+            service_generation: "generation".into(),
+            snapshot_seq: snapshot.snapshot_seq,
+            count_scope: "agent_lifetime".into(),
+            tools: snapshot.tools,
+            reasoning: snapshot.reasoning,
+            coverage: snapshot.coverage,
+        };
+        assert!(AgentObserveOutput::try_from(view.clone()).is_ok());
+        let mut drifted = view;
+        drifted.reasoning.source.delta_pointer = "/private/field".into();
+        assert!(AgentObserveOutput::try_from(drifted).is_err());
     }
 }

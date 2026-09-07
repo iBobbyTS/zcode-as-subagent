@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         format!("agentd-{}", std::process::id()),
         store,
         runtime_factory,
-        production_scheduler_config(),
+        production_scheduler_config(config.runtime.clone()),
     )?;
     let daemon = match Daemon::start_with_shutdown(
         &config.socket,
@@ -73,10 +73,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn production_scheduler_config() -> SchedulerConfig {
+fn production_scheduler_config(runtime_source: Option<PathBuf>) -> SchedulerConfig {
     SchedulerConfig {
         bootstrap_timeout: PRODUCTION_BOOTSTRAP_TIMEOUT,
         control_timeout: PRODUCTION_CONTROL_TIMEOUT,
+        runtime_source,
         ..SchedulerConfig::default()
     }
 }
@@ -195,7 +196,7 @@ mod tests {
     #[test]
     fn production_scheduler_allows_the_verified_official_runtime_bootstrap_window() {
         let defaults = SchedulerConfig::default();
-        let production = production_scheduler_config();
+        let production = production_scheduler_config(None);
 
         assert_eq!(production.bootstrap_timeout, Duration::from_secs(90));
         assert_eq!(production.control_timeout, Duration::from_secs(5));
@@ -205,5 +206,6 @@ mod tests {
             defaults.per_workspace_max_agents
         );
         assert_eq!(production.stop_grace, defaults.stop_grace);
+        assert!(production.runtime_source.is_none());
     }
 }
