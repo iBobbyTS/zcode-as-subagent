@@ -182,6 +182,7 @@ pub struct Driver {
     pending: Arc<Mutex<PendingMap>>,
     subscribers: Arc<Mutex<Vec<Sender<Inbound>>>>,
     diagnostics: Arc<Mutex<Vec<u8>>>,
+    diagnostics_done: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl Driver {
@@ -227,9 +228,16 @@ impl Driver {
         // noisy runtime must not block stdout. The bounded diagnostic tail is
         // retained for the daemon's failure projection, never raw-unbounded.
         let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let diagnostics_done = Arc::new((Mutex::new(false), Condvar::new()));
         thread::spawn({
             let diagnostics = Arc::clone(&diagnostics);
-            move || drain_stderr(stderr, diagnostics)
+            let diagnostics_done = Arc::clone(&diagnostics_done);
+            move || {
+                drain_stderr(stderr, diagnostics);
+                let (done, cvar) = &*diagnostics_done;
+                *done.lock().unwrap() = true;
+                cvar.notify_all();
+            }
         });
         let child_ref = Arc::new(Mutex::new(Some(child)));
         let monitor_ref = Arc::clone(&child_ref);
@@ -257,6 +265,7 @@ impl Driver {
             pending,
             subscribers,
             diagnostics,
+            diagnostics_done,
         })
     }
     #[cfg(test)]
@@ -382,6 +391,12 @@ impl Driver {
     pub fn diagnostic_tail(&self) -> String {
         String::from_utf8_lossy(&self.diagnostics.lock().unwrap()).into_owned()
     }
+
+    fn wait_diagnostics(&self, timeout: Duration) {
+        let (done, cvar) = &*self.diagnostics_done;
+        let guard = done.lock().unwrap();
+        let _ = cvar.wait_timeout_while(guard, timeout, |finished| !*finished);
+    }
     pub fn stop_and_reap(&self, timeout: Duration) -> std::io::Result<StopOutcome> {
         let generation = match self.begin_stop()? {
             BeginStop::Perform(generation) => generation,
@@ -481,6 +496,9 @@ impl Driver {
             }
         }
         ready.notify_all();
+        if result.is_ok() {
+            self.wait_diagnostics(Duration::from_secs(1));
+        }
         result.map_err(|failure| failure.to_error())
     }
 
@@ -536,12 +554,13 @@ impl Driver {
         while guard.is_none() {
             guard = cvar.wait(guard).unwrap();
         }
-        Ok(
-            match guard.as_ref().expect("child monitor publishes before wake") {
-                ChildExit::Exited(code) => *code,
-                _ => None,
-            },
-        )
+        let exit_code = match guard.as_ref().expect("child monitor publishes before wake") {
+            ChildExit::Exited(code) => *code,
+            _ => None,
+        };
+        drop(guard);
+        self.wait_diagnostics(Duration::from_secs(1));
+        Ok(exit_code)
     }
 }
 

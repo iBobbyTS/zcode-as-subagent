@@ -4801,6 +4801,27 @@ impl Scheduler {
             .cloned()
     }
 
+    /// Returns the bounded runtime stderr tail for an active task. This is a
+    /// diagnostic projection only; it is never used for task outcome or
+    /// persisted result text.
+    pub(crate) fn diagnostic_tail(&self, agent_id: &str) -> String {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .active
+            .get(agent_id)
+            .map(|active| {
+                active
+                    .runtime
+                    .diagnostic_tail()
+                    .chars()
+                    .take(4096)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn shutdown_all(&self) {
         let agent_ids = self
             .inner
@@ -4964,7 +4985,10 @@ impl Daemon {
         let claim_thread = thread::spawn(move || {
             while !loop_shutdown.load(Ordering::Acquire) {
                 if let Err(error) = loop_scheduler.start_ready() {
-                    let _ = error;
+                    // Claim-loop failures are non-fatal scheduling diagnostics:
+                    // preserve the existing daemon error projection without
+                    // rejecting or altering any task outcome.
+                    loop_scheduler.record_failure("__daemon__", error.to_string());
                 }
                 thread::sleep(claim_interval);
             }
