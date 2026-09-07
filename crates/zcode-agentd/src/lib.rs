@@ -4115,7 +4115,14 @@ impl Scheduler {
                                         continue;
                                     }
                                     Err(error) => {
-                                        scheduler.record_failure(&agent_id, error.to_string());
+                                        scheduler.record_runtime_failure(
+                                            &agent_id,
+                                            Some(&session_id),
+                                            "message_delivery",
+                                            "SESSION_SEND_FAILED",
+                                            &error.to_string(),
+                                            Some(runtime.as_ref()),
+                                        );
                                         drop(_guard);
                                         continue;
                                     }
@@ -5170,6 +5177,87 @@ sleep 2
                 .outcome,
             Some(TaskOutcome::Completed)
         );
+    }
+
+    #[test]
+    fn natural_completion_queued_send_failure_records_tail_without_changing_outcomes() {
+        struct CompletedRuntime;
+        impl ManagedRuntime for CompletedRuntime {
+            fn identity(&self) -> Option<ProcessIdentity> {
+                None
+            }
+            fn stop(&self, _: Duration) -> RuntimeTerminal {
+                RuntimeTerminal::Completed(StopOutcome::AlreadyExited(ChildExit::Exited(Some(0))))
+            }
+            fn wait_terminal(&self, _: Duration) -> Option<RuntimeTerminal> {
+                Some(self.stop(Duration::ZERO))
+            }
+            fn bootstrap_session(
+                &self,
+                _: &TaskRecord,
+                _: Duration,
+            ) -> Result<SessionReady, RuntimeCommandError> {
+                Ok(SessionReady {
+                    session_id: "completed-session".into(),
+                    initial_turn_id: None,
+                    observed_model: None,
+                })
+            }
+            fn send_turn(
+                &self,
+                _: &str,
+                _: &str,
+                _: Duration,
+            ) -> Result<Option<String>, RuntimeCommandError> {
+                Err(RuntimeCommandError::Transport(
+                    "completed child closed stdin".into(),
+                ))
+            }
+            fn diagnostic_tail(&self) -> String {
+                "queued-send-tail".into()
+            }
+        }
+        struct CompletedFactory;
+        impl RuntimeFactory for CompletedFactory {
+            fn spawn(
+                &self,
+                _: &TaskRecord,
+                sink: Arc<dyn LifecycleSink>,
+            ) -> io::Result<Arc<dyn ManagedRuntime>> {
+                for (index, params) in [
+                    serde_json::json!({"type":"model.streaming", "payload":{"kind":"text_delta", "delta":"completed answer", "assistantMessageId":"m1"}}),
+                    serde_json::json!({"type":"message.finished", "payload":{"assistantMessageId":"m1"}}),
+                ].into_iter().enumerate() {
+                    sink.emit(LifecycleRecord {
+                        sequence: index as u64 + 1,
+                        event: RuntimeEvent::Driver(Inbound::Message(WireMessage::Event(zcode_protocol::EventEnvelope { method: "session/event".into(), params }))),
+                    });
+                }
+                Ok(Arc::new(CompletedRuntime))
+            }
+        }
+        let (_workspace, mut scheduler, agent_id) = diagnostic_scheduler("unused");
+        Arc::get_mut(&mut scheduler.inner).unwrap().factory = Arc::new(CompletedFactory);
+        scheduler
+            .store()
+            .insert_message("queued-after-completion", &agent_id, "queue", "follow-up")
+            .unwrap();
+        scheduler.start_ready().unwrap();
+        let result = await_result(&scheduler, &agent_id);
+        let record = failure_record(&scheduler, &agent_id);
+        assert_eq!(record["stage"], "message_delivery");
+        assert_eq!(record["error_code"], "SESSION_SEND_FAILED");
+        assert_eq!(record["session_id"], "completed-session");
+        assert_eq!(record["stderr_tail"], "queued-send-tail");
+        assert_eq!(result.result.outcome, TaskOutcome::Completed);
+        assert_eq!(result.result.final_text, "completed answer");
+        let message = scheduler
+            .store()
+            .message("queued-after-completion")
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.state, zcode_agent_store::MessageState::Failed);
+        assert_eq!(message.failure_code.as_deref(), Some("SESSION_SEND_FAILED"));
     }
 
     #[test]
