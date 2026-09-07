@@ -163,7 +163,11 @@ test('Agent A diagnostics survive Agent B displacing global tails and finite rot
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-target-'));
   const paths = pathsFor(home);
   fs.mkdirSync(paths.logs);
-  const target = '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify({ agent_id: 'Agent-A', stage: 'bootstrap', message: 'A-owned-failure token=private-token' }) + '\n';
+  const target = '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify({
+    agent_id: 'Agent-A', session_id: null, stage: 'bootstrap', error_code: 'SESSION_START_FAILED',
+    message: 'A-owned-failure token=private-token ' + JSON.stringify({ password: 'NESTED_MESSAGE_SECRET' }),
+    stderr_tail: JSON.stringify({ token: 'NESTED_STDERR_TOKEN', api_key: 'NESTED_STDERR_KEY' }),
+  }) + '\n';
   const noise = '[zcode-agentd] failure agent=Agent-B: B-owned-failure\n'.repeat(1000);
   fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), target + noise);
   await withDaemon(paths, statusOrTask, async () => {
@@ -172,12 +176,18 @@ test('Agent A diagnostics survive Agent B displacing global tails and finite rot
         fs.renameSync(path.join(paths.logs, 'daemon-error.log'), path.join(paths.logs, 'daemon-error.log.1'));
         fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), noise);
       }
-      const report = await diagnose(paths, ['--agent', 'Agent-A']);
+      const report = await diagnose(paths, ['--agent', 'Agent-A', '--output', path.join(home, 'export')]);
       assert.doesNotMatch(report.logs.files.map((file) => file.tail).join(''), /A-owned-failure/);
       assert.equal(report.agent.task.reason_code, 'RUNTIME_START_FAILED');
       assert.equal(report.agent.diagnostics.status, 'found');
       assert.match(report.agent.diagnostics.record.text, /A-owned-failure/);
-      assert.doesNotMatch(report.agent.diagnostics.record.text, /B-owned-failure|private-token/);
+      assert.doesNotMatch(report.agent.diagnostics.record.text, /B-owned-failure|private-token|NESTED_MESSAGE_SECRET|NESTED_STDERR_TOKEN|NESTED_STDERR_KEY/);
+      assert.doesNotMatch(fs.readFileSync(report.output.path, 'utf8'), /private-token|NESTED_MESSAGE_SECRET|NESTED_STDERR_TOKEN|NESTED_STDERR_KEY/);
+      const decoded = JSON.parse(report.agent.diagnostics.record.text);
+      assert.equal(decoded.agent_id, 'Agent-A');
+      assert.equal(decoded.session_id, null);
+      assert.equal(decoded.error_code, 'SESSION_START_FAILED');
+      assert.match(decoded.stderr_tail, /REDACTED/);
       assert.equal(report.agent.diagnostics.record.file, rotated ? 'daemon-error.log.1' : 'daemon-error.log');
       assert.ok(report.agent.diagnostics.scanned_bytes <= 3 * 1024 * 1024);
     }

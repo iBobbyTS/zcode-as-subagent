@@ -111,7 +111,13 @@ function agentDiagnosticLogs(logDirectory, agentId) {
         let structured;
         try { structured = JSON.parse(raw); } catch { structured = null; }
         if (structured && structured.agent_id !== agentId) continue;
-        const redacted = redactDiagnosticText(raw);
+        // Decode the known failure fields before redacting: stderr/message can
+        // contain JSON whose quotes were escaped by the outer log record.
+        const redacted = structured ? JSON.stringify(Object.fromEntries(
+          ['agent_id', 'session_id', 'stage', 'error_code', 'message', 'stderr_tail']
+            .filter((field) => typeof structured[field] === 'string' || structured[field] === null)
+            .map((field) => [field, typeof structured[field] === 'string' ? redactDiagnosticText(structured[field]) : null]),
+        )) : redactDiagnosticText(raw);
         const encoded = Buffer.from(redacted);
         let end = Math.min(encoded.length, DIAGNOSTIC_TAIL_BYTES);
         while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
