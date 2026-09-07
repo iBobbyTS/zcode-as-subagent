@@ -339,3 +339,27 @@ test('diagnostic output caps UTF-8 bytes and distinguishes unfinished target rec
     assert.ok(report.agent.diagnostics.incomplete.includes('record_incomplete:daemon-error.log'));
   });
 });
+
+for (const tail of ['x'.repeat(16384 - 18) + 'FINAL_ERROR_MARKER', '界\n"'.repeat(2000) + 'FINAL_ERROR_MARKER']) test(`agent export budgets JSON fields and retains final stderr (${Buffer.byteLength(tail)} bytes)`, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-last-error-'));
+  try {
+    const paths = pathsFor(home);
+    fs.mkdirSync(paths.logs);
+    const record = { agent_id: 'target', session_id: 's'.repeat(4096), stage: 'runtime_terminal', error_code: 'SESSION_SEND_FAILED', message: 'm'.repeat(4096), stderr_tail: tail, operation: 'session/send', remote_code: -32031, remote_message: 'model unavailable token=hide-this', cleanup_result: 'Signaled(15)' };
+    // Produce a legal driver tail, then evict this record from the global tail.
+    fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), `[zcode-agentd] failure agent=target: ${JSON.stringify(record)}\n` + 'other agent\n'.repeat(4000));
+    const report = await diagnose(paths, ['--agent', 'target', '--output', path.join(home, 'out')]);
+    assert.equal(report.agent.diagnostics.status, 'found');
+    const found = report.agent.diagnostics.record;
+    assert.equal(found.truncated, true);
+    assert.ok(Buffer.byteLength(found.text) <= 16 * 1024);
+    const decoded = JSON.parse(found.text);
+    assert.equal(decoded.agent_id, 'target');
+    assert.equal(decoded.remote_code, -32031);
+    assert.equal(decoded.operation, 'session/send');
+    assert.equal(decoded.cleanup_result, 'Signaled(15)');
+    assert.ok(!found.text.includes('hide-this'));
+    assert.ok(decoded.stderr_tail.endsWith('FINAL_ERROR_MARKER'));
+    assert.ok(fs.readFileSync(report.output.path, 'utf8').includes('FINAL_ERROR_MARKER'));
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
