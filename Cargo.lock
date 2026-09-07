@@ -1701,6 +1701,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "uuid",
  "zcode-agent-preparation",
  "zcode-agent-store",
  "zcode-agentd",

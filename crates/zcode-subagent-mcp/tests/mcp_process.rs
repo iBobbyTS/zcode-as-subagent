@@ -74,6 +74,10 @@ fn stdio_catalog_is_exactly_the_generic_nine_tools() {
         false
     );
     assert_eq!(
+        by_name("zcode_subagent_send")["annotations"]["idempotentHint"],
+        false
+    );
+    assert_eq!(
         by_name("zcode_subagent_list")["inputSchema"]["properties"]["limit"]["default"],
         100
     );
