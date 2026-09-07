@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { BUSINESS_COMMANDS, PRODUCT_NAME, VERSION, ZCODE_RUNTIME } from './constants.mjs';
 import { CliError } from './errors.mjs';
 import { runInit, installHooks, installMcp, installPlan, nativeBinary } from './installer.mjs';
@@ -20,6 +21,83 @@ function value(args, name) {
 
 function output(valueToWrite) {
   process.stdout.write(`${JSON.stringify({ ok: true, product: PRODUCT_NAME, ...valueToWrite }, null, 2)}\n`);
+}
+
+const DIAGNOSTIC_TAIL_BYTES = 16 * 1024;
+
+function diagnosticLogs(logDirectory) {
+  const incomplete = [];
+  if (!fs.existsSync(logDirectory)) return { directory: logDirectory, complete: false, incomplete: ['log_directory_missing'], files: [] };
+  let entries;
+  try { entries = fs.readdirSync(logDirectory, { withFileTypes: true }); }
+  catch (error) { return { directory: logDirectory, complete: false, incomplete: [`log_directory_unreadable:${error.code || 'error'}`], files: [] }; }
+  const files = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.isSymbolicLink()) continue;
+    const name = entry.name;
+    const rotated = /(?:\.\d+|\.gz|\.old)$/u.test(name);
+    if (rotated) incomplete.push(`log_rotated:${name}`);
+    try {
+      const target = path.join(logDirectory, name);
+      const stat = fs.statSync(target);
+      const bytes = fs.readFileSync(target);
+      const start = Math.max(0, bytes.length - DIAGNOSTIC_TAIL_BYTES);
+      files.push({ name, bytes: stat.size, modified_at_ms: stat.mtimeMs, rotated, truncated: start > 0, tail: bytes.subarray(start).toString('utf8') });
+      if (start > 0) incomplete.push(`log_tail_truncated:${name}`);
+    } catch (error) { incomplete.push(`log_unreadable:${name}:${error.code || 'error'}`); }
+  }
+  if (files.length === 0) incomplete.push('log_files_missing');
+  return { directory: logDirectory, complete: incomplete.length === 0, incomplete, files };
+}
+
+function diagnoseInput(args) {
+  const agent = value(args, '--agent');
+  const outputDirectory = value(args, '--output');
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg.startsWith('--')) throw new CliError('INVALID_ARGUMENT', `unexpected diagnose argument: ${arg}`, 2);
+    if (!['--agent', '--output'].includes(arg)) throw new CliError('INVALID_ARGUMENT', `unsupported diagnose option: ${arg}`, 2);
+    index += 1;
+  }
+  return { agent, outputDirectory };
+}
+
+async function diagnose(paths, args) {
+  const { agent, outputDirectory } = diagnoseInput(args);
+  const report = {
+    schema_version: 1,
+    scope: agent ? { agent_id: agent } : { kind: 'global' },
+    platform: platform(),
+    runtime: { path: ZCODE_RUNTIME, exists: fs.existsSync(ZCODE_RUNTIME) },
+    daemon: { socket: paths.socket, socket_exists: fs.existsSync(paths.socket), available: false },
+    logs: diagnosticLogs(paths.logs),
+  };
+  if (agent) {
+    try {
+      const snapshot = await callDaemon(paths.socket, 'poll', { agent_id: agent, timeout_ms: 0 });
+      report.daemon.available = true;
+      report.agent = {
+        task: snapshot.task,
+        activity: snapshot.activity,
+        pending_request_count: Array.isArray(snapshot.pending_requests) ? snapshot.pending_requests.length : null,
+        result_available: snapshot.result_available ?? false,
+        observed_at_ms: Date.now(),
+      };
+    } catch (error) {
+      report.daemon.error = { code: error.code || 'DAEMON_ERROR', message: error.message };
+      report.logs.incomplete.push('agent_store_unavailable');
+      report.logs.complete = false;
+      report.agent = { agent_id: agent, unavailable: true };
+    }
+  }
+  if (outputDirectory) {
+    const destination = path.resolve(outputDirectory);
+    fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+    const target = path.join(destination, 'diagnose.json');
+    report.output = { path: target, complete: report.logs.complete && !report.agent?.unavailable };
+    fs.writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  }
+  return report;
 }
 
 export async function main(args) {
@@ -50,7 +128,8 @@ export async function main(args) {
     output({ installed: fs.existsSync(paths.state), launch_agent: fs.existsSync(paths.launchAgent), data: fs.existsSync(paths.data) }); return;
   }
   if (command === 'diagnose') {
-    output({ platform: platform(), runtime: ZCODE_RUNTIME, runtime_exists: fs.existsSync(ZCODE_RUNTIME), daemon_binary: nativeBinary('zcode-as-subagentd'), daemon_binary_exists: fs.existsSync(nativeBinary('zcode-as-subagentd')) }); return;
+    const report = await diagnose(paths, args.slice(1));
+    output({ ...report, daemon_binary: nativeBinary('zcode-as-subagentd'), daemon_binary_exists: fs.existsSync(nativeBinary('zcode-as-subagentd')) }); return;
   }
   if (command === 'backup') { output(backupData(value(args, '--output'), paths)); return; }
   if (command === 'restore') { output(restoreData(value(args, '--input'), paths)); return; }
@@ -70,4 +149,4 @@ export async function main(args) {
   output({ command, result });
 }
 
-export { DAEMON_HELP, HELP, installPlan };
+export { DAEMON_HELP, HELP, installPlan, diagnose, diagnosticLogs };
