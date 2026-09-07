@@ -1372,7 +1372,7 @@ fn map_scheduler(error: SchedulerError) -> RpcError {
             RpcError::new(RpcErrorCode::RuntimeLost, "runtime operation failed")
         }
         SchedulerError::RuntimeCommand { .. } => {
-            RpcError::new(RpcErrorCode::Unavailable, "runtime command failed")
+            RpcError::new(RpcErrorCode::Unavailable, "RUNTIME_COMMAND_FAILED")
         }
     }
 }
@@ -1394,10 +1394,36 @@ fn map_store(error: StoreError) -> RpcError {
             error.active_agent_id = active_agent_id;
             error
         }
+        StoreError::Conflict(message)
+            if message == "message id is already bound to different content"
+                || message == "MESSAGE_ID_CONFLICT"
+                || (message.starts_with("message ") && message.ends_with(" already exists")) =>
+        {
+            RpcError::new(RpcErrorCode::Conflict, "MESSAGE_ID_CONFLICT")
+        }
         StoreError::Conflict(_) => RpcError::new(RpcErrorCode::Conflict, "durable state conflict"),
         StoreError::InvalidState(_) => RpcError::new(
             RpcErrorCode::Validation,
             "durable state rejected the operation",
         ),
+    }
+}
+
+#[cfg(test)]
+mod error_classification_tests {
+    use super::*;
+    #[test]
+    fn preserves_safe_reasons_without_exposing_store_or_runtime_details() {
+        let conflict = map_store(StoreError::Conflict(
+            "message id is already bound to different content".into(),
+        ));
+        assert_eq!(conflict.code, RpcErrorCode::Conflict);
+        assert_eq!(conflict.message, "MESSAGE_ID_CONFLICT");
+        let rejection = map_scheduler(SchedulerError::RuntimeCommand {
+            agent_id: "a".into(),
+            message: "sensitive".into(),
+        });
+        assert_eq!(rejection.code, RpcErrorCode::Unavailable);
+        assert_eq!(rejection.message, "RUNTIME_COMMAND_FAILED");
     }
 }

@@ -30,8 +30,11 @@ runtime 会被回收，即使 `closed=false`，再次发送也属于冷恢复。
 
 真实调用结果：`session/resume` 与 `session/subscribe` 成功，但
 `session/send` 被官方 runtime 拒绝，原始错误为
-`-32031 / ZCODE_RUNTIME_MODEL_UNAVAILABLE`。本产品可能显示通用
-`daemon_unavailable` 调用错误，消息最终为 `FAILED / SESSION_SEND_FAILED`。
+`-32031 / ZCODE_RUNTIME_MODEL_UNAVAILABLE`。本产品将 runtime 命令失败显示为
+`runtime_command_failed`，消息最终为 `FAILED / SESSION_SEND_FAILED`。
+旧版 facade 曾将此错误误报为 `daemon_unavailable`。发送失败诊断保留
+`operation`、`remote_code` 和有界脱敏的 `remote_message`；后续进程清理状态
+另列为 `cleanup_result`，不覆盖最初拒绝原因。
 原任务的结果会保留；旧结果中的 `COMPLETED` 不代表追加消息成功。
 
 同一官方 runtime、session、工作区与已有配置下，直接使用官方 CLI
@@ -57,3 +60,12 @@ python3 tests/live-agent/non-git-based/real_terminal_send_case.py
 用例先完成真实文件读取，再重启自己的 MCP facade，向同一未 close 的
 已完成 Agent 发送追加读取，记录重试、消息状态、结果与清理。失败证据保留在
 `tests/live-agent/workspace/real-terminal-send-*`，不会作为成功验收。
+
+## 调用错误与恢复动作
+
+- `conflict: WORKSPACE_BUSY`：工作区已有活动任务；可查询 `active_agent_id`。
+- `conflict: MESSAGE_ID_CONFLICT`：消息 ID 已绑定其他 Agent 或内容。新消息使用新 ID；只有同一消息的重试才复用 ID。
+- `runtime_command_failed`：daemon 已处理请求，但 runtime 命令失败。先用 `poll`、`result` 和 `diagnose` 查看状态；此错误不表示 daemon 离线。
+- `daemon_unavailable`：MCP 无法通过 socket 联系 daemon。检查服务与 socket；不要因上述两类业务拒绝自动重启服务。
+
+按 Agent 导出的结构化诊断在 16 KiB 序列化预算内保留有效 JSON：元数据使用有界前缀，`stderr_tail` 优先保留末尾，并明确标记 `truncated`。全局日志尾部与按 Agent 的保留窗口查询仍是两个不同范围。

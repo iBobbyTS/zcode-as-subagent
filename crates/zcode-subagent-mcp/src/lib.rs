@@ -115,12 +115,25 @@ pub(crate) fn public_error(error: RpcError) -> String {
         }
         RpcErrorCode::UnknownMethod => ("protocol_error", "daemon method is unavailable"),
         RpcErrorCode::NotFound => ("not_found", "agent task was not found"),
-        RpcErrorCode::Conflict => ("conflict", "WORKSPACE_BUSY"),
+        RpcErrorCode::Conflict => (
+            "conflict",
+            match detail.as_str() {
+                "WORKSPACE_BUSY" => "WORKSPACE_BUSY",
+                "MESSAGE_ID_CONFLICT" => "MESSAGE_ID_CONFLICT",
+                _ => "durable state conflict",
+            },
+        ),
+        RpcErrorCode::Unavailable if detail == "RUNTIME_COMMAND_FAILED" => (
+            "runtime_command_failed",
+            "runtime could not complete the command",
+        ),
         RpcErrorCode::Timeout => ("timeout", "daemon operation timed out"),
         RpcErrorCode::RuntimeLost => ("runtime_lost", "agent runtime was lost"),
         RpcErrorCode::ResultInvalid => ("result_invalid", "stored task result failed verification"),
-        RpcErrorCode::Persistence | RpcErrorCode::Unavailable | RpcErrorCode::Internal => (
-            "daemon_unavailable",
+        RpcErrorCode::Persistence => ("persistence", "durable store operation failed"),
+        RpcErrorCode::Internal => ("internal", "daemon operation failed"),
+        RpcErrorCode::Unavailable => (
+            "unavailable",
             "subagent daemon could not complete the operation",
         ),
     };
@@ -157,6 +170,30 @@ pub(crate) fn protocol_error() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn errors_distinguish_conflicts_rejections_and_unreachable_socket() {
+        assert_eq!(
+            public_error(RpcError::new(RpcErrorCode::Conflict, "MESSAGE_ID_CONFLICT")),
+            "conflict: MESSAGE_ID_CONFLICT"
+        );
+        assert_eq!(
+            public_error(RpcError::new(
+                RpcErrorCode::Conflict,
+                "private store details"
+            )),
+            "conflict: durable state conflict"
+        );
+        assert!(public_error(RpcError::new(
+            RpcErrorCode::Unavailable,
+            "RUNTIME_COMMAND_FAILED"
+        ))
+        .starts_with("runtime_command_failed:"));
+        assert!(public_transport_error(std::io::Error::from(
+            std::io::ErrorKind::ConnectionRefused
+        ))
+        .starts_with("daemon_unavailable:"));
+    }
 
     #[test]
     fn workspace_busy_preserves_code_message_and_active_agent() {

@@ -38,10 +38,34 @@ function redactDiagnosticText(text) {
 function redactFailureFields(record) {
   // Decode known fields before redacting embedded JSON credential values.
   return JSON.stringify(Object.fromEntries(
-    ['agent_id', 'session_id', 'stage', 'error_code', 'message', 'stderr_tail']
-      .filter((field) => typeof record[field] === 'string' || record[field] === null)
-      .map((field) => [field, typeof record[field] === 'string' ? redactDiagnosticText(record[field]) : null]),
+    ['agent_id', 'session_id', 'stage', 'error_code', 'message', 'stderr_tail', 'operation', 'remote_code', 'remote_message', 'cleanup_result']
+      .filter((field) => typeof record[field] === 'string' || record[field] === null || (field === 'remote_code' && Number.isSafeInteger(record[field])))
+      .map((field) => [field, typeof record[field] === 'string' ? redactDiagnosticText(record[field]) : record[field]]),
   ));
+}
+
+// Budget the serialized fields, so escaping and UTF-8 cannot invalidate JSON.
+// Metadata has bounded prefixes; stderr receives the remaining budget as a tail.
+function boundedFailureRecord(record) {
+  const redacted = redactFailureFields(record);
+  if (Buffer.byteLength(redacted) <= DIAGNOSTIC_TAIL_BYTES) return { text: redacted, truncated: false };
+  const fields = JSON.parse(redacted);
+  for (const key of Object.keys(fields)) {
+    if (key !== 'stderr_tail' && typeof fields[key] === 'string') {
+      fields[key] = Array.from(fields[key]).slice(0, key === 'message' ? 512 : 256).join('');
+    }
+  }
+  const tail = Array.from(fields.stderr_tail || '');
+  let low = 0;
+  let high = tail.length;
+  while (low < high) {
+    const keep = Math.ceil((low + high) / 2);
+    fields.stderr_tail = tail.slice(tail.length - keep).join('');
+    if (Buffer.byteLength(JSON.stringify(fields)) <= DIAGNOSTIC_TAIL_BYTES) low = keep;
+    else high = keep - 1;
+  }
+  fields.stderr_tail = tail.slice(tail.length - low).join('');
+  return { text: JSON.stringify(fields), truncated: true };
 }
 
 function redactDiagnosticTail(text) {
@@ -148,11 +172,14 @@ function agentDiagnosticLogs(logDirectory, agentId) {
         let structured;
         try { structured = JSON.parse(raw); } catch { structured = null; }
         if (structured && structured.agent_id !== agentId) continue;
-        const redacted = structured ? redactFailureFields(structured) : redactDiagnosticText(raw);
-        const encoded = Buffer.from(redacted);
-        let end = Math.min(encoded.length, DIAGNOSTIC_TAIL_BYTES);
-        while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
-        report.record = { file: name, text: encoded.subarray(0, end).toString('utf8'), truncated: encoded.length > end };
+        if (structured) {
+          report.record = { file: name, ...boundedFailureRecord(structured) };
+        } else {
+          const encoded = Buffer.from(redactDiagnosticText(raw));
+          let start = Math.max(0, encoded.length - DIAGNOSTIC_TAIL_BYTES);
+          while (start < encoded.length && (encoded[start] & 0xc0) === 0x80) start += 1;
+          report.record = { file: name, text: encoded.subarray(start).toString('utf8'), truncated: start > 0 };
+        }
         report.status = 'found';
         break;
       }

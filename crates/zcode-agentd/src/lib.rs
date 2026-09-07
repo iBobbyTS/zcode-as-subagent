@@ -822,6 +822,38 @@ impl fmt::Display for RuntimeCommandError {
     }
 }
 
+impl RuntimeCommandError {
+    fn diagnostic(&self, operation: &str) -> String {
+        let mut detail = serde_json::json!({"operation": operation, "message": bounded_error(&self.to_string())});
+        if let Self::Remote(value) = self {
+            detail["remote_code"] = value.get("code").and_then(serde_json::Value::as_i64).into();
+            detail["remote_message"] = value
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_remote_message)
+                .into();
+        }
+        detail.to_string()
+    }
+}
+
+// Keep only the remote code/message, never error.data or provider configuration.
+// Redact before clipping so a budget boundary cannot expose a credential suffix.
+fn redact_remote_message(message: &str) -> String {
+    static PATTERNS: OnceLock<Vec<regex::Regex>> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| [
+        r"(?s)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
+        r#"(?i)["']?(?:token|secret|password|api[_-]?key|private[_-]?key)["']?\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"#,
+        r#"(?i)(?:authorization["']?\s*[:=]\s*["']?(?:bearer\s+)?|bearer\s+["']?)[^\s,;"']+"#,
+        r"(?i)https?://[^\s]+",
+    ].iter().map(|pattern| regex::Regex::new(pattern).unwrap()).collect());
+    let mut redacted = message.to_owned();
+    for pattern in patterns {
+        redacted = pattern.replace_all(&redacted, "[REDACTED]").into_owned();
+    }
+    bounded_prefix(&redacted, 1024)
+}
+
 impl std::error::Error for RuntimeCommandError {}
 
 impl From<RequestError> for RuntimeCommandError {
@@ -2441,6 +2473,7 @@ struct TerminalDecision {
     terminal: RuntimeTerminal,
     natural_completion: bool,
     forced_outcome: Option<(CompletionOutcome, String)>,
+    failure_message: Option<String>,
 }
 
 struct MonitorContext {
@@ -3639,13 +3672,16 @@ impl Scheduler {
                 &runtime_lifecycle,
                 self.control_deadline(),
             ) {
-                self.record_failure(&claim.task.agent_id, error.to_string());
+                let message = match &error {
+                    SchedulerError::RuntimeCommand { message, .. } => message.clone(),
+                    _ => error.to_string(),
+                };
                 self.cleanup_registered_runtime(
                     &claim.task.agent_id,
                     claim.owner_epoch,
                     &runtime,
                     &sink,
-                    Some(("SESSION_SEND_FAILED", error.to_string())),
+                    Some(("SESSION_SEND_FAILED", message)),
                 )?;
                 return Err(error);
             }
@@ -3808,6 +3844,7 @@ impl Scheduler {
                         terminal,
                         natural_completion: false,
                         forced_outcome: forced,
+                        failure_message: failure.as_ref().map(|(_, message)| message.clone()),
                     },
                 )
             } else {
@@ -3893,6 +3930,7 @@ impl Scheduler {
             terminal,
             natural_completion,
             forced_outcome,
+            failure_message,
         } = decision;
         sink.runtime_lifecycle.terminalize();
         match route {
@@ -3923,12 +3961,24 @@ impl Scheduler {
                     CompletionOutcome::Completed | CompletionOutcome::Cancelled
                 ) {
                     let session_id = self.active_session(agent_id).map(|active| active.2);
+                    let message = if let Some(cause) = failure_message {
+                        let mut detail = serde_json::from_str::<serde_json::Value>(&cause)
+                            .ok()
+                            .filter(serde_json::Value::is_object)
+                            .unwrap_or_else(
+                                || serde_json::json!({"message": bounded_error(&cause)}),
+                            );
+                        detail["cleanup_result"] = format!("{terminal:?}").into();
+                        detail.to_string()
+                    } else {
+                        format!("{terminal:?}")
+                    };
                     self.record_runtime_failure(
                         agent_id,
                         session_id.as_deref(),
                         "runtime_terminal",
                         &reason,
-                        &format!("{terminal:?}"),
+                        &message,
                         Some(runtime.as_ref()),
                     );
                 }
@@ -4062,6 +4112,7 @@ impl Scheduler {
                 terminal,
                 natural_completion,
                 forced_outcome,
+                failure_message: None,
             },
         )
     }
@@ -4117,12 +4168,18 @@ impl Scheduler {
                                         continue;
                                     }
                                     Err(error) => {
+                                        let detail = match &error {
+                                            SchedulerError::RuntimeCommand { message, .. } => {
+                                                message.clone()
+                                            }
+                                            _ => error.to_string(),
+                                        };
                                         scheduler.record_runtime_failure(
                                             &agent_id,
                                             Some(&session_id),
                                             "message_delivery",
                                             "SESSION_SEND_FAILED",
-                                            &error.to_string(),
+                                            &detail,
                                             Some(runtime.as_ref()),
                                         );
                                         drop(_guard);
@@ -4270,11 +4327,21 @@ impl Scheduler {
                         }
                         Err(error) => {
                             check.cancel();
-                            scheduler.record_failure(&agent_id, error.to_string());
+                            let cause = match &error {
+                                SchedulerError::RuntimeCommand { message, .. } => message.clone(),
+                                _ => error.to_string(),
+                            };
                             let terminal = runtime.finish_turn(
                                 TurnBoundary::Failed,
                                 deadline.cleanup_grace(scheduler.inner.config.stop_grace),
                             );
+                            let mut detail = serde_json::from_str::<serde_json::Value>(&cause)
+                                .ok()
+                                .filter(serde_json::Value::is_object)
+                                .unwrap_or_else(
+                                    || serde_json::json!({"message": bounded_error(&cause)}),
+                                );
+                            detail["cleanup_result"] = format!("{terminal:?}").into();
                             if let Err(finish_error) = scheduler.finish_locked_monitor_terminal(
                                 &agent_id,
                                 owner_epoch,
@@ -4288,6 +4355,14 @@ impl Scheduler {
                             ) {
                                 scheduler.record_failure(&agent_id, finish_error.to_string());
                             }
+                            scheduler.record_runtime_failure(
+                                &agent_id,
+                                Some(&session_id),
+                                "message_delivery",
+                                "SESSION_SEND_FAILED",
+                                &detail.to_string(),
+                                Some(runtime.as_ref()),
+                            );
                             scheduler.release_active(&agent_id, owner_epoch);
                             if let Err(start_error) = scheduler.start_ready() {
                                 scheduler.record_failure(&agent_id, start_error.to_string());
@@ -4339,14 +4414,23 @@ impl Scheduler {
                 Ok(self.inner.store.message(&message.message_id)?)
             }
             Err(error) => {
+                let detail = error.diagnostic("session/send");
+                self.record_runtime_failure(
+                    agent_id,
+                    Some(session_id),
+                    "message_delivery",
+                    "SESSION_SEND_FAILED",
+                    &detail,
+                    Some(runtime.as_ref()),
+                );
                 self.inner.store.fail_message(
                     &message.message_id,
                     "SESSION_SEND_FAILED",
-                    &error.to_string(),
+                    &detail,
                 )?;
                 Err(SchedulerError::RuntimeCommand {
                     agent_id: agent_id.into(),
-                    message: error.to_string(),
+                    message: detail,
                 })
             }
         }
@@ -4374,6 +4458,9 @@ impl Scheduler {
                     MessageState::Queued | MessageState::Sending => MessageDisposition::Queued,
                 });
             }
+            return Err(SchedulerError::Store(StoreError::Conflict(
+                "MESSAGE_ID_CONFLICT".into(),
+            )));
         }
         if self
             .inner
@@ -4813,6 +4900,7 @@ impl Scheduler {
                 terminal,
                 natural_completion: false,
                 forced_outcome: Some((CompletionOutcome::Cancelled, "CANCELLED".into())),
+                failure_message: None,
             },
         );
         self.release_active(agent_id, decision.owner_epoch);
@@ -4965,15 +5053,30 @@ fn runtime_failure_record(
     while !stderr_tail.is_char_boundary(start) {
         start += 1;
     }
-    serde_json::json!({
+    let detail = serde_json::from_str::<serde_json::Value>(message).ok();
+    let mut record = serde_json::json!({
         "agent_id": bounded_error(agent_id),
         "session_id": session_id.map(bounded_error),
         "stage": bounded_prefix(stage, 128),
         "error_code": bounded_prefix(error_code, 128),
-        "message": bounded_error(message),
+        "message": bounded_error(detail.as_ref().and_then(|v| v.get("message"))
+            .and_then(serde_json::Value::as_str).unwrap_or(message)),
         "stderr_tail": &stderr_tail[start..],
-    })
-    .to_string()
+    });
+    if let Some(detail) = detail {
+        for field in ["operation", "remote_message", "cleanup_result"] {
+            if let Some(value) = detail.get(field).and_then(serde_json::Value::as_str) {
+                record[field] = bounded_prefix(value, 1024).into();
+            }
+        }
+        if let Some(code) = detail
+            .get("remote_code")
+            .and_then(serde_json::Value::as_i64)
+        {
+            record["remote_code"] = code.into();
+        }
+    }
+    record.to_string()
 }
 
 fn bounded_error(message: &str) -> String {
@@ -5308,9 +5411,10 @@ sleep 2
                 _: &str,
                 _: Duration,
             ) -> Result<Option<String>, RuntimeCommandError> {
-                Err(RuntimeCommandError::Transport(
-                    "completed child closed stdin".into(),
-                ))
+                Err(RuntimeCommandError::Remote(serde_json::json!({
+                    "code": -32031, "message": "ZCODE_RUNTIME_MODEL_UNAVAILABLE api_key=secret-value",
+                    "data": {"provider": "must-not-record"}
+                })))
             }
             fn diagnostic_tail(&self) -> String {
                 "queued-send-tail".into()
@@ -5348,6 +5452,14 @@ sleep 2
         assert_eq!(record["error_code"], "SESSION_SEND_FAILED");
         assert_eq!(record["session_id"], "completed-session");
         assert_eq!(record["stderr_tail"], "queued-send-tail");
+        assert_eq!(record["operation"], "session/send");
+        assert_eq!(record["remote_code"], -32031);
+        assert!(record["remote_message"]
+            .as_str()
+            .unwrap()
+            .contains("ZCODE_RUNTIME_MODEL_UNAVAILABLE"));
+        assert!(!record.to_string().contains("secret-value"));
+        assert!(!record.to_string().contains("must-not-record"));
         assert_eq!(result.result.outcome, TaskOutcome::Completed);
         assert_eq!(result.result.final_text, "completed answer");
         let message = scheduler
@@ -5357,6 +5469,70 @@ sleep 2
             .unwrap();
         assert_eq!(message.state, zcode_agent_store::MessageState::Failed);
         assert_eq!(message.failure_code.as_deref(), Some("SESSION_SEND_FAILED"));
+    }
+
+    #[test]
+    fn message_id_collision_rejects_other_content_or_agent_without_mutation() {
+        let (_workspace, scheduler, agent_id) = diagnostic_scheduler("unused");
+        scheduler
+            .store()
+            .insert_message("existing", &agent_id, "queue", "original")
+            .unwrap();
+        for (agent, content) in [
+            (agent_id.as_str(), "changed"),
+            ("different-agent", "original"),
+        ] {
+            let error = scheduler
+                .queue_message(agent, "existing", "queue", content)
+                .unwrap_err();
+            assert!(
+                matches!(error, SchedulerError::Store(StoreError::Conflict(ref message)) if message == "MESSAGE_ID_CONFLICT")
+            );
+        }
+        let message = scheduler.store().message("existing").unwrap().unwrap();
+        assert_eq!(message.agent_id, agent_id);
+        assert_eq!(message.content, "original");
+        assert_eq!(message.state, MessageState::Queued);
+        assert_eq!(
+            scheduler
+                .queue_message(&agent_id, "existing", "queue", "original")
+                .unwrap(),
+            MessageDisposition::Queued
+        );
+    }
+
+    #[test]
+    fn remote_rejection_is_bounded_redacted_and_separate_from_cleanup() {
+        let error = RuntimeCommandError::Remote(serde_json::json!({
+            "code": -32031,
+            "message": "unavailable Authorization: Bearer abc-secret password=def-secret api_key=\"quoted secret words\" https://user:pass@host/path",
+            "data": {"api_key": "do-not-copy"}
+        }));
+        let mut detail: serde_json::Value =
+            serde_json::from_str(&error.diagnostic("session/send")).unwrap();
+        detail["cleanup_result"] = "Stopped(Terminated(Signaled(15)))".into();
+        let record = runtime_failure_record(
+            "a",
+            Some("s"),
+            "runtime_terminal",
+            "SESSION_SEND_FAILED",
+            &detail.to_string(),
+            "stderr-end",
+        );
+        let value: serde_json::Value = serde_json::from_str(&record).unwrap();
+        assert_eq!(value["remote_code"], -32031);
+        assert_eq!(value["operation"], "session/send");
+        assert_eq!(value["cleanup_result"], "Stopped(Terminated(Signaled(15)))");
+        for secret in [
+            "abc-secret",
+            "def-secret",
+            "user:pass",
+            "do-not-copy",
+            "quoted secret words",
+        ] {
+            assert!(!record.contains(secret));
+        }
+        assert!(redact_remote_message(&"界".repeat(5000)).len() <= 1024);
     }
 
     #[test]
