@@ -422,6 +422,14 @@ pub struct TaskView {
     pub close_requested: bool,
     pub closed: bool,
     pub reaped: bool,
+    pub input_identity: InputIdentityView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputIdentityView {
+    pub workspace_path: Option<String>,
+    pub permission_mode: Option<String>,
+    pub caller_prompt_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1149,6 +1157,7 @@ fn task_view(task: TaskRecord) -> TaskView {
         close_requested: task.close_requested,
         closed: task.closed_at.is_some(),
         reaped: task.reaped_at.is_some(),
+        input_identity: InputIdentityView { workspace_path: None, permission_mode: None, caller_prompt_sha256: None },
     }
 }
 

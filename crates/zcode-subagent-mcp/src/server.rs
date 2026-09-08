@@ -557,7 +557,11 @@ pub struct PublicTask {
     pub close_requested: bool,
     pub closed: bool,
     pub resources_reaped: bool,
+    pub input_identity: Option<PublicInputIdentity>,
 }
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PublicInputIdentity { pub workspace_path: Option<String>, pub permission_mode: Option<String>, pub caller_prompt_sha256: Option<String> }
 
 impl From<TaskView> for PublicTask {
     fn from(value: TaskView) -> Self {
@@ -570,6 +574,7 @@ impl From<TaskView> for PublicTask {
             close_requested: value.close_requested,
             closed: value.closed,
             resources_reaped: value.reaped,
+            input_identity: Some(PublicInputIdentity { workspace_path: value.input_identity.workspace_path, permission_mode: value.input_identity.permission_mode, caller_prompt_sha256: value.input_identity.caller_prompt_sha256 }),
         }
     }
 }
