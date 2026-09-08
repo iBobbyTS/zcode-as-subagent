@@ -715,6 +715,8 @@ pub struct AgentPollInput {
     #[serde(default)]
     #[schemars(range(min = 0, max = 5000))]
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
@@ -857,7 +859,10 @@ pub struct AgentPollOutput {
     pub result: Option<PublicResult>,
     pub instruction: Option<String>,
     pub timed_out: bool,
+    pub message_receipt: Option<PublicMessageReceipt>,
 }
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PublicMessageReceipt { pub message_id: String, pub state: String, pub target_turn_id: Option<String>, pub failure_code: Option<String>, pub created_at_ms: i64, pub delivered_at_ms: Option<i64> }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1217,6 +1222,7 @@ impl SubagentMcp {
             agent_id: input.agent_id,
             after_revision: input.after_revision,
             timeout_ms: input.timeout_ms,
+            message_id: input.message_id,
         }))? {
             RpcSuccess::TaskPoll {
                 task,
@@ -1229,7 +1235,7 @@ impl SubagentMcp {
                 latest_progress,
                 result,
                 instruction,
-                timed_out,
+                timed_out, message_receipt,
             } => Ok(Json(AgentPollOutput {
                 task: task.into(),
                 revision,
@@ -1242,6 +1248,7 @@ impl SubagentMcp {
                 result: result.map(TryInto::try_into).transpose()?,
                 instruction,
                 timed_out,
+                message_receipt: message_receipt.map(|r| PublicMessageReceipt { message_id:r.message_id, state:r.state, target_turn_id:r.target_turn_id, failure_code:r.failure_code, created_at_ms:r.created_at_ms, delivered_at_ms:r.delivered_at_ms }),
             })),
             _ => Err(protocol_error().with_operation("poll")),
         }

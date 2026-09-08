@@ -414,6 +414,8 @@ pub struct StoredMessage {
     pub state: MessageState,
     pub target_turn_id: Option<String>,
     pub failure_code: Option<String>,
+    pub created_at: i64,
+    pub delivered_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1941,7 +1943,7 @@ fn query_task_result(
 fn query_message(connection: &Connection, message_id: &str) -> StoreResult<Option<StoredMessage>> {
     let row = connection
         .query_row(
-            "SELECT message_id,agent_id,mode,content,state,target_turn_id,failure_code
+            "SELECT message_id,agent_id,mode,content,state,target_turn_id,failure_code,created_at,delivered_at
              FROM messages WHERE message_id=?1",
             [message_id],
             |row| {
@@ -1952,7 +1954,7 @@ fn query_message(connection: &Connection, message_id: &str) -> StoreResult<Optio
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(6)?, row.get::<_, i64>(7)?, row.get::<_, Option<i64>>(8)?,
                 ))
             },
         )
@@ -1977,6 +1979,8 @@ fn query_message(connection: &Connection, message_id: &str) -> StoreResult<Optio
             state,
             target_turn_id: row.5,
             failure_code: row.6,
+            created_at: row.7,
+            delivered_at: row.8,
         })
     })
     .transpose()
