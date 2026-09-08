@@ -38,12 +38,23 @@ function pluginManifest(source) {
   return manifest;
 }
 
+function treeDigest(root) {
+  const hash = crypto.createHash('sha256');
+  const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).forEach((entry) => {
+    const target = path.join(dir, entry.name);
+    if (entry.isDirectory()) walk(target);
+    else if (entry.isFile() && entry.name !== '.mcp.json') { hash.update(path.relative(root, target)); hash.update(fs.readFileSync(target)); }
+  });
+  walk(root); return hash.digest('hex');
+}
+
 function stagePlugin(source, staging, paths) {
   if (fs.existsSync(staging)) {
     const existing = path.join(staging, '.codex-plugin', 'plugin.json');
     if (!fs.existsSync(existing) || JSON.parse(fs.readFileSync(existing, 'utf8')).name !== PLUGIN_NAME) {
       throw new CliError('PLUGIN_STAGING_CONFLICT', `staging path is not managed by ${PLUGIN_NAME}`);
     }
+    if (treeDigest(source) !== treeDigest(staging)) throw new CliError('PLUGIN_STAGING_CONFLICT', 'staging content differs from managed plugin source');
   }
   fs.mkdirSync(path.dirname(staging), { recursive: true, mode: 0o700 });
   fs.cpSync(source, staging, { recursive: true, force: true });
@@ -65,7 +76,15 @@ function updateMarketplace(file, staging) {
   const rel = `./${path.relative(root, staging)}`;
   const entry = { name: PLUGIN_NAME, source: { source: 'local', path: rel }, policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' }, category: 'Productivity' };
   const index = doc.plugins.findIndex((p) => p.name === PLUGIN_NAME);
-  if (index >= 0) doc.plugins[index] = entry; else doc.plugins.push(entry);
+  if (index >= 0) {
+    const current = doc.plugins[index];
+    const currentPath = current?.source?.path;
+    const resolved = currentPath ? path.resolve(root, currentPath) : null;
+    const manifest = resolved && fs.existsSync(path.join(resolved, '.codex-plugin', 'plugin.json')) ? JSON.parse(fs.readFileSync(path.join(resolved, '.codex-plugin', 'plugin.json'), 'utf8')) : null;
+    if (currentPath !== entry.source.path || !manifest || manifest.name !== PLUGIN_NAME) throw new CliError('PLUGIN_MARKETPLACE_CONFLICT', 'marketplace entry is not a managed zcode-as-subagent source');
+    return { marketplace: file, marketplace_name: doc.name, entry: currentPath };
+  }
+  doc.plugins.push(entry);
   fs.writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`, { mode: 0o600 });
   return { marketplace: file, marketplace_name: doc.name, entry: rel };
 }
@@ -77,18 +96,29 @@ export function installPlugin(paths = productPaths(), options = {}) {
   const marketplace = options.marketplacePath || path.join(home, '.agents', 'plugins', 'marketplace.json');
   const codexHome = options.codexHome || process.env.CODEX_HOME || path.join(home, '.codex');
   const env = { CODEX_HOME: codexHome };
-  pluginManifest(source);
   const probe = runCodex(['plugin', 'add', '--help'], { codexCli: options.codexCli, env });
   if (options.dryRun) return { dry_run: true, operation: options.uninstall ? 'uninstall' : 'install', source, staging, marketplace, codex_home: codexHome, cli: 'codex', help_exit: probe.status };
   if (options.uninstall) {
     const result = runCodex(['plugin', 'remove', PLUGIN_NAME, '--json'], { codexCli: options.codexCli, env });
     return { uninstalled: true, source, staging, marketplace, codex_home: codexHome, codex: result.json || result.stdout.trim() };
   }
+  pluginManifest(source);
+  const priorStaging = fs.existsSync(staging);
+  const priorMarketplace = fs.existsSync(marketplace) ? fs.readFileSync(marketplace) : null;
   stagePlugin(source, staging, paths);
-  const market = updateMarketplace(marketplace, staging);
+  let market;
+  try { market = updateMarketplace(marketplace, staging); } catch (error) {
+    if (!priorStaging) fs.rmSync(staging, { recursive: true, force: true });
+    throw error;
+  }
   // Explicitly configured marketplaces must be registered; the personal default is implicit.
   if (options.registerMarketplace) runCodex(['plugin', 'marketplace', 'add', path.dirname(marketplace), '--json'], { codexCli: options.codexCli, env });
-  const add = runCodex(['plugin', 'add', PLUGIN_NAME, '--marketplace', market.marketplace_name, '--json'], { codexCli: options.codexCli, env });
+  let add;
+  try { add = runCodex(['plugin', 'add', PLUGIN_NAME, '--marketplace', market.marketplace_name, '--json'], { codexCli: options.codexCli, env }); } catch (error) {
+    if (priorMarketplace === null) fs.rmSync(marketplace, { force: true }); else fs.writeFileSync(marketplace, priorMarketplace, { mode: 0o600 });
+    if (!priorStaging) fs.rmSync(staging, { recursive: true, force: true });
+    throw error;
+  }
   return { installed: true, source, staging, marketplace, codex_home: codexHome, cache: add.json?.installedPath || add.json?.installed_path || null, codex: add.json || add.stdout.trim(), ...market };
 }
 
