@@ -1138,6 +1138,10 @@ fn format_task_cursor(cursor: u64) -> String {
 }
 
 fn task_view(task: TaskRecord) -> TaskView {
+    let prepared = serde_json::from_str::<serde_json::Value>(&task.prepared_launch_json).ok();
+    let permission_mode = prepared.as_ref().and_then(|v| v.get("permission_mode").and_then(|x| x.as_str()).map(str::to_owned));
+    let caller_prompt_sha256 = prepared.as_ref().and_then(|v| v.get("prompt_sha256").and_then(|x| x.as_str()).map(str::to_owned));
+    let workspace_path = Some(task.workspace_path.clone());
     TaskView {
         agent_id: task.agent_id,
         session_id: task.zcode_session_id,
@@ -1157,7 +1161,7 @@ fn task_view(task: TaskRecord) -> TaskView {
         close_requested: task.close_requested,
         closed: task.closed_at.is_some(),
         reaped: task.reaped_at.is_some(),
-        input_identity: InputIdentityView { workspace_path: None, permission_mode: None, caller_prompt_sha256: None },
+        input_identity: InputIdentityView { workspace_path, permission_mode, caller_prompt_sha256 },
     }
 }
 
