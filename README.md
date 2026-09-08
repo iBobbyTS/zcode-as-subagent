@@ -55,7 +55,7 @@ payload or configured model is not presented as observed execution identity.
 `zcode_subagent_observe` is a suspicion-only, read-only snapshot. Call it with
 only `agent_id` when recent behavior may be looping; ordinary progress remains
 on `poll`. It returns at most the top three tool names by lifetime invocation
-count, the latest five calls per returned tool with bounded redacted arguments
+count, the latest five calls per returned tool with bounded arguments
 and no results, plus the newest 200 Unicode characters from the locally
 verified public reasoning stream. It does not classify progress or cancel a
 task. The same daemon projection is available as
