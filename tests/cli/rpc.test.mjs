@@ -68,6 +68,7 @@ test('CLI preserves daemon error code, message, and active agent id', async () =
 test('CLI rejects daemon responses with wrong RPC version or request id', async () => {
   for (const response of [
     { version: 11, request_id: 'ignored', outcome: 'success', result: {} },
+    { version: 12, request_id: 'ignored', outcome: 'success', result: {} },
     { version: 13, request_id: 'other-request', outcome: 'success', result: {} },
   ]) {
     const socketPath = path.join(os.tmpdir(), `zcode-cli-rpc-protocol-${process.pid}-${Date.now()}-${response.version}.sock`);
@@ -145,4 +146,51 @@ test('CLI public projection removes private RPC fields and result digest', () =>
 
 test('CLI reports unavailable daemon socket', async () => {
   await assert.rejects(() => callDaemon(path.join(os.tmpdir(), `missing-zcode-${process.pid}.sock`), 'cancel', { agent_id: 'missing' }), (error) => error.code === 'SOCKET_UNAVAILABLE');
+});
+
+test('CLI accepts a response exactly at the 2MiB frame cap and rejects one byte over', async () => {
+  const responseFor = (request, targetBytes) => {
+    const response = { version: 13, request_id: request.request_id, outcome: 'success', result: { tasks: [] }, padding: '' };
+    const base = Buffer.byteLength(JSON.stringify(response), 'utf8');
+    response.padding = 'x'.repeat(Math.max(0, targetBytes - base));
+    while (Buffer.byteLength(JSON.stringify(response), 'utf8') < targetBytes) response.padding += 'x';
+    while (Buffer.byteLength(JSON.stringify(response), 'utf8') > targetBytes) response.padding = response.padding.slice(0, -1);
+    return JSON.stringify(response) + '\n';
+  };
+  for (const [targetBytes, expectedError] of [[2 * 1024 * 1024 - 1, false], [2 * 1024 * 1024, true]]) {
+    const socketPath = path.join(os.tmpdir(), `zcode-cli-rpc-cap-${process.pid}-${targetBytes}.sock`);
+    const server = net.createServer((socket) => {
+      let body = '';
+      socket.on('data', (chunk) => { body += chunk; if (body.includes('\n')) socket.end(responseFor(JSON.parse(body), targetBytes)); });
+    });
+    await new Promise((resolve) => server.listen(socketPath, resolve));
+    try {
+      const call = callDaemon(socketPath, 'list', { repository: '/workspace' });
+      if (expectedError) await assert.rejects(call, (error) => error instanceof CliError && error.code === 'OVERSIZED');
+      else await call;
+    } finally { await new Promise((resolve) => server.close(resolve)); }
+  }
+});
+
+test('CLI rejects a chunked response that exceeds the cap before newline', async () => {
+  const socketPath = path.join(os.tmpdir(), `zcode-cli-rpc-chunked-${process.pid}-${Date.now()}.sock`);
+  const server = net.createServer((socket) => socket.once('data', () => {
+    socket.write(Buffer.alloc(1024 * 1024, 0x78));
+    setImmediate(() => socket.end(Buffer.alloc(1024 * 1024 + 1, 0x78)));
+  }));
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  try { await assert.rejects(() => callDaemon(socketPath, 'list', { repository: '/workspace' }), (error) => error instanceof CliError && error.code === 'OVERSIZED'); }
+  finally { await new Promise((resolve) => server.close(resolve)); }
+});
+
+test('CLI preserves a maximum control and Unicode result page', async () => {
+  const socketPath = path.join(os.tmpdir(), `zcode-cli-rpc-result-${process.pid}-${Date.now()}.sock`);
+  const expected = '\u0001'.repeat(100000) + '你好🙂';
+  const server = net.createServer((socket) => socket.once('data', (chunk) => {
+    const request = JSON.parse(chunk);
+    socket.end(JSON.stringify({ version: 13, request_id: request.request_id, outcome: 'success', result: { kind: 'task_result', task: { agent_id: 'a', phase: 'TERMINAL', outcome: 'COMPLETED', reason_code: null, stop_requested: false, close_requested: false, closed: false, reaped: true }, result: { outcome: 'COMPLETED', final_text: expected, partial: false, offset: 0, total_bytes: Buffer.byteLength(expected), next_offset: null, complete: true } } }) + '\n');
+  }));
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  try { const result = await callDaemon(socketPath, 'result', { agent_id: 'a', limit: 100000 }); assert.equal(result.result.final_text, expected); }
+  finally { await new Promise((resolve) => server.close(resolve)); }
 });

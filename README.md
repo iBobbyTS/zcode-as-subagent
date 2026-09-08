@@ -45,7 +45,7 @@ daemon uses the protected repository workspace scope, while `plan` remains
 read-only. A canonical workspace has one active Agent; a collision is reported
 as `WORKSPACE_BUSY` with the active id. Terminal results expose stable outcome,
 partial status, task reason code, and bounded result segments; use
-`offset`/`limit` (default and maximum 81920 bytes) for large text.
+`offset`/`limit` (default and maximum 262144 UTF-8 bytes) for large text.
 
 Business execution failures preserve the bounded text and add a typed
 `structuredContent.error` object. `status.identity` reports the running daemon

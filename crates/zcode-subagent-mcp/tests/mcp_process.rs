@@ -95,6 +95,10 @@ fn stdio_catalog_is_exactly_the_generic_ten_tools() {
         by_name("zcode_subagent_result")["inputSchema"]["properties"]["limit"]["default"],
         256 * 1024
     );
+    assert_eq!(
+        by_name("zcode_subagent_result")["inputSchema"]["properties"]["limit"]["maximum"],
+        256 * 1024
+    );
 }
 
 #[test]
