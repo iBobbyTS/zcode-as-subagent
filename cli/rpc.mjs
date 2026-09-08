@@ -3,9 +3,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { CliError } from './errors.mjs';
 
-export const RPC_VERSION = 12;
+export const RPC_VERSION = 13;
 export const MAX_FRAME_BYTES = 512 * 1024;
-export const MAX_RESULT_CHUNK_BYTES = 80 * 1024;
+export const MAX_RESPONSE_FRAME_BYTES = 2 * 1024 * 1024;
+export const MAX_RESULT_CHUNK_BYTES = 256 * 1024;
 
 function readJsonInput(args) {
   const inline = args.find((arg) => arg.startsWith('--json='));
@@ -34,7 +35,7 @@ function methodFor(command, input) {
   switch (command) {
     case 'status': return { method: 'system_status' };
     case 'create': case 'spawn': return { method: 'submit_general', params: { input: { manifest: manifest(input) } } };
-    case 'get': case 'poll': return { method: 'task_poll', params: { agent_id: input.agent_id, after_revision: input.after_revision || 0, timeout_ms: input.timeout_ms ?? 0 } };
+    case 'get': case 'poll': return { method: 'task_poll', params: { agent_id: input.agent_id, after_revision: input.after_revision || 0, timeout_ms: input.timeout_ms ?? 0, ...(input.message_id ? { message_id: input.message_id } : {}) } };
     case 'list': {
       const repository = input.repository ?? input.workspace;
       if (!repository) throw new CliError('INVALID_ARGUMENT', 'list requires repository or workspace scope', 2);
@@ -106,12 +107,17 @@ export function callDaemon(socketPath, command, input, timeoutMs = 6000) {
     throw new CliError('OVERSIZED', 'encoded RPC request exceeds frame cap', 2);
   }
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(socketPath); let data = ''; let settled = false;
+    const socket = net.createConnection(socketPath); let data = ''; let dataBytes = 0; let settled = false;
     const finish = (fn, value) => { if (!settled) { settled = true; socket.destroy(); fn(value); } };
     const timer = setTimeout(() => finish(reject, new CliError('SOCKET_UNAVAILABLE', `daemon socket unavailable: ${socketPath}`)), timeoutMs);
     socket.setEncoding('utf8');
     socket.on('connect', () => socket.end(request));
     socket.on('data', (chunk) => {
+      dataBytes += Buffer.byteLength(chunk, 'utf8');
+      if (dataBytes > MAX_RESPONSE_FRAME_BYTES) {
+        finish(reject, new CliError('OVERSIZED', 'encoded RPC response exceeds frame cap', 2));
+        return;
+      }
       data += chunk;
       const newline = data.indexOf('\n');
       if (newline < 0) return;

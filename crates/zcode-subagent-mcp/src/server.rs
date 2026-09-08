@@ -152,7 +152,8 @@ impl From<ComponentStateView> for PublicComponentState {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct PublicAgentCapabilities {
-    pub max_rpc_frame_bytes: usize,
+    pub max_rpc_request_frame_bytes: usize,
+    pub max_rpc_response_frame_bytes: usize,
     pub max_wait_ms: u64,
     pub maturity: BTreeMap<String, PublicCapabilityMaturity>,
     pub observation: PublicObservationCapability,
@@ -183,7 +184,8 @@ impl From<AgentCapabilitiesView> for PublicAgentCapabilities {
             .map(|(name, maturity)| (name, maturity.into()))
             .collect();
         Self {
-            max_rpc_frame_bytes: value.max_rpc_frame_bytes,
+            max_rpc_request_frame_bytes: value.max_rpc_request_frame_bytes,
+            max_rpc_response_frame_bytes: value.max_rpc_response_frame_bytes,
             max_wait_ms: value.max_wait_ms,
             maturity,
             observation: PublicObservationCapability {
@@ -555,7 +557,11 @@ pub struct PublicTask {
     pub close_requested: bool,
     pub closed: bool,
     pub resources_reaped: bool,
+    pub input_identity: Option<PublicInputIdentity>,
 }
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PublicInputIdentity { pub workspace_path: Option<String>, pub permission_mode: Option<String>, pub caller_prompt_sha256: Option<String> }
 
 impl From<TaskView> for PublicTask {
     fn from(value: TaskView) -> Self {
@@ -568,6 +574,7 @@ impl From<TaskView> for PublicTask {
             close_requested: value.close_requested,
             closed: value.closed,
             resources_reaped: value.reaped,
+            input_identity: Some(PublicInputIdentity { workspace_path: value.input_identity.workspace_path, permission_mode: value.input_identity.permission_mode, caller_prompt_sha256: value.input_identity.caller_prompt_sha256 }),
         }
     }
 }
@@ -708,6 +715,8 @@ pub struct AgentPollInput {
     #[serde(default)]
     #[schemars(range(min = 0, max = 5000))]
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
@@ -850,7 +859,10 @@ pub struct AgentPollOutput {
     pub result: Option<PublicResult>,
     pub instruction: Option<String>,
     pub timed_out: bool,
+    pub message_receipt: Option<PublicMessageReceipt>,
 }
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PublicMessageReceipt { pub message_id: String, pub state: String, pub target_turn_id: Option<String>, pub failure_code: Option<String>, pub created_at_ms: i64, pub delivered_at_ms: Option<i64> }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -873,6 +885,7 @@ pub enum PublicMessageDisposition {
 #[derive(Debug, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AgentSendOutput {
+    pub message_id: String,
     pub disposition: PublicMessageDisposition,
 }
 
@@ -909,7 +922,7 @@ pub struct AgentResultInput {
     #[serde(default)]
     pub offset: usize,
     #[serde(default = "default_result_limit")]
-    #[schemars(range(min = 1, max = 81920))]
+    #[schemars(range(min = 1, max = 262144))]
     pub limit: usize,
 }
 
@@ -1209,6 +1222,7 @@ impl SubagentMcp {
             agent_id: input.agent_id,
             after_revision: input.after_revision,
             timeout_ms: input.timeout_ms,
+            message_id: input.message_id,
         }))? {
             RpcSuccess::TaskPoll {
                 task,
@@ -1221,7 +1235,7 @@ impl SubagentMcp {
                 latest_progress,
                 result,
                 instruction,
-                timed_out,
+                timed_out, message_receipt,
             } => Ok(Json(AgentPollOutput {
                 task: task.into(),
                 revision,
@@ -1234,6 +1248,7 @@ impl SubagentMcp {
                 result: result.map(TryInto::try_into).transpose()?,
                 instruction,
                 timed_out,
+                message_receipt: message_receipt.map(|r| PublicMessageReceipt { message_id:r.message_id, state:r.state, target_turn_id:r.target_turn_id, failure_code:r.failure_code, created_at_ms:r.created_at_ms, delivered_at_ms:r.delivered_at_ms }),
             })),
             _ => Err(protocol_error().with_operation("poll")),
         }
@@ -1340,7 +1355,8 @@ impl SubagentMcp {
             mode: "queue".into(),
             content: input.content,
         }))? {
-            RpcSuccess::Message { disposition, .. } => Ok(Json(AgentSendOutput {
+            RpcSuccess::Message { message_id, disposition, .. } => Ok(Json(AgentSendOutput {
+                message_id,
                 disposition: match disposition {
                     zcode_agentd::rpc::MessageDispositionView::Queued => {
                         PublicMessageDisposition::Queued
@@ -1577,11 +1593,12 @@ mod contract_default_tests {
     fn legacy_daemon_status_keeps_readiness_and_real_facade_identity() {
         let status = SystemStatusView {
             api_surface: "generic_agent".into(),
-            protocol_version: 12,
+            protocol_version: 13,
             service_generation: "legacy-generation".into(),
             components: BTreeMap::from([("daemon".into(), ComponentStateView::Ready)]),
             capabilities: AgentCapabilitiesView {
-                max_rpc_frame_bytes: 512 * 1024,
+                max_rpc_request_frame_bytes: 512 * 1024,
+                max_rpc_response_frame_bytes: 2 * 1024 * 1024,
                 max_wait_ms: 5000,
                 maturity: BTreeMap::from([("spawn".into(), CapabilityMaturityView::BetaReady)]),
                 observation: ObservationCapabilityView {
@@ -1717,8 +1734,8 @@ mod contract_default_tests {
             "path":"/running/component","sha256":"00","source":"running_executable","captured_at_ms":1
         });
         let status = serde_json::json!({
-            "api_surface":"generic_agent","protocol_version":12,"service_generation":"generation",
-            "components":{},"capabilities":{"max_rpc_frame_bytes":524288,"max_wait_ms":5000,
+            "api_surface":"generic_agent","protocol_version":13,"service_generation":"generation",
+            "components":{},"capabilities":{"max_rpc_request_frame_bytes":524288,"max_rpc_response_frame_bytes":2097152,"max_wait_ms":5000,
                 "maturity":{},"observation":{"protocol":"zas-observation/1.1",
                     "public_reasoning_default":true,"runtime_source_verified":false,
                     "defaults":{"top_tools":3,"recent_calls_per_tool":5,"reasoning_chars":200}}},
@@ -1746,7 +1763,7 @@ mod contract_default_tests {
             ),
             (
                 "zcode_subagent_send",
-                serde_json::json!({"disposition":"queued"}),
+                serde_json::json!({"message_id":"message-1","disposition":"queued"}),
             ),
             (
                 "zcode_subagent_respond",

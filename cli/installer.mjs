@@ -16,6 +16,136 @@ export function nativeBinary(name) {
 }
 
 const CODEX_MCP_SECTION = 'mcp_servers.zcode_as_subagent';
+const PLUGIN_NAME = 'zcode-as-subagent';
+
+function pluginSourceRoot() { return path.join(packageRoot, 'plugins', PLUGIN_NAME); }
+
+function runCodex(args, options = {}) {
+  const cli = options.codexCli || 'codex';
+  const result = spawnSync(cli, args, { encoding: 'utf8', env: { ...process.env, ...(options.env || {}) } });
+  if (result.error) throw new CliError('CODEX_CLI_UNAVAILABLE', result.error.message);
+  if (result.status !== 0) throw new CliError('CODEX_CLI_FAILED', (result.stderr || result.stdout || '').trim() || `codex exited ${result.status}`);
+  let parsed = null;
+  if ((result.stdout || '').trim()) { try { parsed = JSON.parse(result.stdout); } catch {} }
+  return { status: result.status, stdout: result.stdout || '', stderr: result.stderr || '', json: parsed };
+}
+
+function pluginManifest(source) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(source, '.codex-plugin', 'plugin.json'), 'utf8'));
+  if (manifest.name !== PLUGIN_NAME || manifest.skills !== './skills/' || manifest.mcpServers !== './.mcp.json') {
+    throw new CliError('INVALID_PLUGIN_SOURCE', 'plugin manifest identity or relative paths are invalid');
+  }
+  return manifest;
+}
+
+function treeDigest(root) {
+  const hash = crypto.createHash('sha256');
+  const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).forEach((entry) => {
+    const target = path.join(dir, entry.name);
+    if (entry.isDirectory()) walk(target);
+    else if (entry.isFile() && entry.name !== '.mcp.json') { hash.update(path.relative(root, target)); hash.update(fs.readFileSync(target)); }
+  });
+  walk(root); return hash.digest('hex');
+}
+
+function stagePlugin(source, staging, paths) {
+  if (fs.existsSync(staging)) {
+    const existing = path.join(staging, '.codex-plugin', 'plugin.json');
+    if (!fs.existsSync(existing) || JSON.parse(fs.readFileSync(existing, 'utf8')).name !== PLUGIN_NAME) {
+      throw new CliError('PLUGIN_STAGING_CONFLICT', `staging path is not managed by ${PLUGIN_NAME}`);
+    }
+    // Managed staging is refreshable: skill/docs may have changed since the last install.
+    // Keep the ownership check above, then replace its contents from the current source.
+    const priorMcp = JSON.parse(fs.readFileSync(path.join(staging, '.mcp.json'), 'utf8'));
+    const priorServer = priorMcp.mcpServers?.zcode_as_subagent;
+    if (!priorServer || priorServer.command !== nativeBinary('zcode-as-subagent-mcp') || priorServer.env?.ZCODE_AGENTD_SOCKET !== paths.socket) {
+      throw new CliError('PLUGIN_STAGING_CONFLICT', 'staging MCP binding differs from the managed product endpoint');
+    }
+  }
+  fs.mkdirSync(path.dirname(staging), { recursive: true, mode: 0o700 });
+  fs.cpSync(source, staging, { recursive: true, force: true });
+  const mcpPath = path.join(staging, '.mcp.json');
+  const mcp = JSON.parse(fs.readFileSync(mcpPath, 'utf8'));
+  const server = mcp.mcpServers?.zcode_as_subagent;
+  if (!server) throw new CliError('INVALID_PLUGIN_SOURCE', 'plugin MCP server is missing');
+  server.command = nativeBinary('zcode-as-subagent-mcp');
+  server.env = { ...(server.env || {}), ZCODE_AGENTD_SOCKET: paths.socket };
+  fs.writeFileSync(mcpPath, `${JSON.stringify(mcp, null, 2)}\n`, { mode: 0o600 });
+}
+
+function updateMarketplace(file, staging) {
+  const root = path.basename(path.dirname(file)) === 'plugins' && path.basename(path.dirname(path.dirname(file))) === '.agents'
+    ? path.dirname(path.dirname(path.dirname(file))) : path.dirname(file);
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  let doc = { name: 'personal', interface: { displayName: 'Personal' }, plugins: [] };
+  if (fs.existsSync(file)) doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (!Array.isArray(doc.plugins)) throw new CliError('PLUGIN_MARKETPLACE_CONFLICT', 'marketplace file is not a source marketplace manifest');
+  const rel = `./${path.relative(root, staging)}`;
+  const entry = { name: PLUGIN_NAME, source: { source: 'local', path: rel }, policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' }, category: 'Productivity' };
+  const index = doc.plugins.findIndex((p) => p.name === PLUGIN_NAME);
+  if (index >= 0) {
+    const current = doc.plugins[index];
+    const currentPath = current?.source?.path;
+    const resolved = currentPath ? path.resolve(root, currentPath) : null;
+    const manifest = resolved && fs.existsSync(path.join(resolved, '.codex-plugin', 'plugin.json')) ? JSON.parse(fs.readFileSync(path.join(resolved, '.codex-plugin', 'plugin.json'), 'utf8')) : null;
+    if (currentPath !== entry.source.path || !manifest || manifest.name !== PLUGIN_NAME) throw new CliError('PLUGIN_MARKETPLACE_CONFLICT', 'marketplace entry is not a managed zcode-as-subagent source');
+    return { marketplace: file, marketplace_name: doc.name, entry: currentPath };
+  }
+  doc.plugins.push(entry);
+  fs.writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`, { mode: 0o600 });
+  return { marketplace: file, marketplace_name: doc.name, entry: rel };
+}
+
+export function installPlugin(paths = productPaths(), options = {}) {
+  const source = options.source || pluginSourceRoot();
+  const home = options.home || paths.home;
+  let staging = options.stagingPath || path.join(home, 'plugins', PLUGIN_NAME);
+  let marketplace = options.marketplacePath || path.join(home, '.agents', 'plugins', 'marketplace.json');
+  // The default ~/.agents file can be an installed-registry projection, not a source.
+  // Never overwrite it; use a private local marketplace root in that case.
+  if (!options.marketplacePath && fs.existsSync(marketplace)) {
+    try { if (!Array.isArray(JSON.parse(fs.readFileSync(marketplace, 'utf8')).plugins)) {
+      const root = path.join(home, '.zcode-as-subagent-marketplace');
+      staging = path.join(root, 'plugins', PLUGIN_NAME);
+      marketplace = path.join(root, '.agents', 'plugins', 'marketplace.json');
+    } } catch {
+      const root = path.join(home, '.zcode-as-subagent-marketplace');
+      staging = path.join(root, 'plugins', PLUGIN_NAME);
+      marketplace = path.join(root, '.agents', 'plugins', 'marketplace.json');
+    }
+  }
+  const codexHome = options.codexHome || process.env.CODEX_HOME || path.join(home, '.codex');
+  const env = { CODEX_HOME: codexHome };
+  const probe = runCodex(['plugin', 'add', '--help'], { codexCli: options.codexCli, env });
+  if (options.dryRun) return { dry_run: true, operation: options.uninstall ? 'uninstall' : 'install', source, staging, marketplace, codex_home: codexHome, cli: 'codex', help_exit: probe.status };
+  if (options.uninstall) {
+    const result = runCodex(['plugin', 'remove', PLUGIN_NAME, '--json'], { codexCli: options.codexCli, env });
+    return { uninstalled: true, source, staging, marketplace, codex_home: codexHome, codex: result.json || result.stdout.trim() };
+  }
+  pluginManifest(source);
+  const priorStaging = fs.existsSync(staging);
+  const priorMarketplace = fs.existsSync(marketplace) ? fs.readFileSync(marketplace) : null;
+  stagePlugin(source, staging, paths);
+  let market;
+  try { market = updateMarketplace(marketplace, staging); } catch (error) {
+    if (!priorStaging) fs.rmSync(staging, { recursive: true, force: true });
+    throw error;
+  }
+  // Explicitly configured marketplaces must be registered; the personal default is implicit.
+  let add;
+  try {
+    const marketplaceRoot = path.basename(path.dirname(marketplace)) === 'plugins' && path.basename(path.dirname(path.dirname(marketplace))) === '.agents'
+      ? path.dirname(path.dirname(path.dirname(marketplace))) : path.dirname(marketplace);
+    if (options.registerMarketplace !== false) runCodex(['plugin', 'marketplace', 'add', marketplaceRoot, '--json'], { codexCli: options.codexCli, env });
+    add = runCodex(['plugin', 'add', PLUGIN_NAME, '--marketplace', market.marketplace_name, '--json'], { codexCli: options.codexCli, env });
+  } catch (error) {
+    if (priorMarketplace === null) fs.rmSync(marketplace, { force: true }); else fs.writeFileSync(marketplace, priorMarketplace, { mode: 0o600 });
+    if (!priorStaging) fs.rmSync(staging, { recursive: true, force: true });
+    throw error;
+  }
+  return { installed: true, source, staging, marketplace, codex_home: codexHome, cache: add.json?.installedPath || add.json?.installed_path || null, codex: add.json || add.stdout.trim(), ...market };
+}
 
 function codexMcpConfig(paths) {
   const command = nativeBinary('zcode-as-subagent-mcp');
