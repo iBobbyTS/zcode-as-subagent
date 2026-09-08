@@ -260,6 +260,7 @@ pub enum RpcSuccess {
         result: Option<TaskResultView>,
     },
     Message {
+        message_id: String,
         disposition: MessageDispositionView,
         task: TaskView,
     },
@@ -826,6 +827,7 @@ impl RpcService {
                     .map_err(map_scheduler)?;
                 let task = self.require_task(&input.agent_id)?;
                 Ok(RpcSuccess::Message {
+                    message_id: input.message_id,
                     disposition: disposition.into(),
                     task: task_view(task),
                 })

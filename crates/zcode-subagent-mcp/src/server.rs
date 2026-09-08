@@ -875,6 +875,7 @@ pub enum PublicMessageDisposition {
 #[derive(Debug, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AgentSendOutput {
+    pub message_id: String,
     pub disposition: PublicMessageDisposition,
 }
 
@@ -1342,7 +1343,8 @@ impl SubagentMcp {
             mode: "queue".into(),
             content: input.content,
         }))? {
-            RpcSuccess::Message { disposition, .. } => Ok(Json(AgentSendOutput {
+            RpcSuccess::Message { message_id, disposition, .. } => Ok(Json(AgentSendOutput {
+                message_id,
                 disposition: match disposition {
                     zcode_agentd::rpc::MessageDispositionView::Queued => {
                         PublicMessageDisposition::Queued
