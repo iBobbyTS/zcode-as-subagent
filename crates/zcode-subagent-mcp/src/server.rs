@@ -375,7 +375,34 @@ pub struct SystemStatusOutput {
 
 impl SystemStatusOutput {
     fn from_view(value: SystemStatusView, facade: PublicComponentIdentity) -> Self {
-        let daemon_identity = value.identity;
+        let (daemon, runtime, models) = match value.identity {
+            Some(identity) => (
+                Some(identity.daemon.into()),
+                PublicRuntimeIdentity {
+                    configured_path: identity.runtime.configured_path,
+                    configured_path_source: identity.runtime.configured_path_source,
+                    observed_version: identity.runtime.observed_version,
+                    observed_version_source: identity.runtime.observed_version_source,
+                },
+                PublicModelIdentity {
+                    configured: identity.models.configured.map(Into::into),
+                    observed_response: identity.models.observed_response.map(Into::into),
+                },
+            ),
+            None => (
+                None,
+                PublicRuntimeIdentity {
+                    configured_path: None,
+                    configured_path_source: "unknown".into(),
+                    observed_version: None,
+                    observed_version_source: "unknown".into(),
+                },
+                PublicModelIdentity {
+                    configured: None,
+                    observed_response: None,
+                },
+            ),
+        };
         Self {
             api_surface: value.api_surface,
             protocol_version: value.protocol_version,
@@ -387,18 +414,10 @@ impl SystemStatusOutput {
                 .collect(),
             capabilities: value.capabilities.into(),
             identity: PublicDeploymentIdentity {
-                daemon: daemon_identity.daemon.into(),
+                daemon,
                 facade,
-                runtime: PublicRuntimeIdentity {
-                    configured_path: daemon_identity.runtime.configured_path,
-                    configured_path_source: daemon_identity.runtime.configured_path_source,
-                    observed_version: daemon_identity.runtime.observed_version,
-                    observed_version_source: daemon_identity.runtime.observed_version_source,
-                },
-                models: PublicModelIdentity {
-                    configured: daemon_identity.models.configured.map(Into::into),
-                    observed_response: daemon_identity.models.observed_response.map(Into::into),
-                },
+                runtime,
+                models,
             },
         }
     }
@@ -407,7 +426,8 @@ impl SystemStatusOutput {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct PublicDeploymentIdentity {
-    pub daemon: PublicComponentIdentity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon: Option<PublicComponentIdentity>,
     pub facade: PublicComponentIdentity,
     pub runtime: PublicRuntimeIdentity,
     pub models: PublicModelIdentity,
@@ -1007,7 +1027,7 @@ impl SubagentMcp {
 fn rpc_context(method: &RpcMethod) -> (&'static str, Option<String>) {
     match method {
         RpcMethod::SystemStatus => ("status", None),
-        RpcMethod::SubmitGeneral { input } => ("spawn", Some(input.manifest.agent_id.clone())),
+        RpcMethod::SubmitGeneral { .. } => ("spawn", None),
         RpcMethod::TaskList(_) => ("list", None),
         RpcMethod::TaskPoll(input) => ("poll", Some(input.agent_id.clone())),
         RpcMethod::TaskMessage(input) => ("send", Some(input.agent_id.clone())),
@@ -1466,8 +1486,9 @@ pub async fn serve_stdio(
 #[cfg(test)]
 mod contract_default_tests {
     use super::{
-        default_result_limit, AgentListInput, AgentObserveOutput, AgentPollInput, AgentResultInput,
-        AgentSendInput, SubagentMcp, PUBLIC_TOOLS,
+        default_result_limit, rpc_context, AgentListInput, AgentObserveOutput, AgentPollInput,
+        AgentResultInput, AgentSendInput, PublicArtifactIdentity, PublicComponentIdentity,
+        SubagentMcp, SystemStatusOutput, PUBLIC_TOOLS,
     };
     use sha2::{Digest, Sha256};
     use std::{
@@ -1475,7 +1496,14 @@ mod contract_default_tests {
         path::PathBuf,
         time::Duration,
     };
-    use zcode_agentd::{observation::ObservationSnapshot, rpc::TaskObservationView};
+    use zcode_agentd::{
+        observation::ObservationSnapshot,
+        rpc::{
+            AgentCapabilitiesView, CapabilityMaturityView, ComponentStateView, GeneralSubmitInput,
+            ObservationCapabilityView, ObservationDefaultsView, RpcMethod, SystemStatusView,
+            TaskObservationView,
+        },
+    };
 
     #[test]
     fn omitted_public_fields_use_the_frozen_defaults() {
@@ -1525,6 +1553,82 @@ mod contract_default_tests {
                 .next_request
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
+        );
+    }
+
+    #[test]
+    fn spawn_rpc_context_omits_the_preallocation_placeholder() {
+        let method = RpcMethod::SubmitGeneral {
+            input: GeneralSubmitInput {
+                manifest: zcode_agent_preparation::GeneralTaskManifest {
+                    schema: zcode_agent_preparation::GENERAL_TASK_SCHEMA.into(),
+                    agent_id: "daemon-prepared".into(),
+                    repository: PathBuf::from("/tmp/repository"),
+                    permission_mode: zcode_agent_preparation::PermissionMode::Plan,
+                    prompt: "test".into(),
+                    write_manifest: Vec::new(),
+                },
+            },
+        };
+        assert_eq!(rpc_context(&method), ("spawn", None));
+    }
+
+    #[test]
+    fn legacy_daemon_status_keeps_readiness_and_real_facade_identity() {
+        let status = SystemStatusView {
+            api_surface: "generic_agent".into(),
+            protocol_version: 12,
+            service_generation: "legacy-generation".into(),
+            components: BTreeMap::from([("daemon".into(), ComponentStateView::Ready)]),
+            capabilities: AgentCapabilitiesView {
+                max_rpc_frame_bytes: 512 * 1024,
+                max_wait_ms: 5000,
+                maturity: BTreeMap::from([("spawn".into(), CapabilityMaturityView::BetaReady)]),
+                observation: ObservationCapabilityView {
+                    protocol: "zas-observation/1.1".into(),
+                    public_reasoning_default: true,
+                    runtime_source_verified: false,
+                    defaults: ObservationDefaultsView {
+                        top_tools: 3,
+                        recent_calls_per_tool: 5,
+                        reasoning_chars: 200,
+                    },
+                },
+            },
+            identity: None,
+        };
+        let facade = PublicComponentIdentity {
+            component: "facade".into(),
+            version: "0.1.0".into(),
+            source_revision: Some("facade-revision".into()),
+            source_dirty: Some(false),
+            artifact: PublicArtifactIdentity {
+                path: Some("/running/facade".into()),
+                sha256: Some("facade-hash".into()),
+                source: "running_executable".into(),
+                captured_at_ms: 7,
+            },
+        };
+        let output = SystemStatusOutput::from_view(status, facade);
+        assert_eq!(output.service_generation, "legacy-generation");
+        assert!(matches!(
+            output.components.get("daemon"),
+            Some(super::PublicComponentState::Ready)
+        ));
+        assert!(output.identity.daemon.is_none());
+        assert_eq!(output.identity.facade.component, "facade");
+        assert_eq!(
+            output.identity.facade.source_revision.as_deref(),
+            Some("facade-revision")
+        );
+        assert_eq!(output.identity.runtime.configured_path, None);
+        assert_eq!(output.identity.runtime.configured_path_source, "unknown");
+        assert!(output.identity.models.configured.is_none());
+        let serialized = serde_json::to_value(output).unwrap();
+        assert!(serialized["identity"].get("daemon").is_none());
+        assert_eq!(
+            serialized["identity"]["facade"]["artifact"]["path"],
+            "/running/facade"
         );
     }
 
@@ -1673,6 +1777,18 @@ mod contract_default_tests {
                 tool.name,
                 validator.iter_errors(success).collect::<Vec<_>>()
             );
+            if tool.name == "zcode_subagent_status" {
+                let mut legacy_status = success.clone();
+                legacy_status["identity"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("daemon");
+                assert!(
+                    validator.is_valid(&legacy_status),
+                    "status rejected unknown daemon identity: {:?}",
+                    validator.iter_errors(&legacy_status).collect::<Vec<_>>()
+                );
+            }
             assert!(
                 validator.is_valid(&error),
                 "{} rejected error: {:?}",
