@@ -1,5 +1,6 @@
 use super::{
-    RpcError, RpcErrorCode, RpcOutcome, RpcRequest, RpcResponse, RpcService, MAX_FRAME_BYTES,
+    RpcError, RpcErrorCode, RpcOutcome, RpcRequest, RpcResponse, RpcService,
+    MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES,
     RPC_VERSION,
 };
 use socket2::{Domain, SockAddr, Socket, Type};
@@ -160,7 +161,7 @@ impl RpcClient {
         let mut stream = unsafe { UnixStream::from_raw_fd(socket.into_raw_fd()) };
         let mut frame = serde_json::to_vec(request)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        if frame.len() + 1 > MAX_FRAME_BYTES {
+        if frame.len() + 1 > MAX_REQUEST_FRAME_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "request frame exceeds cap",
@@ -168,7 +169,11 @@ impl RpcClient {
         }
         frame.push(b'\n');
         write_all_until(&mut stream, &frame, deadline)?;
-        let response = read_limited_frame_until(&mut stream, MAX_FRAME_BYTES, deadline)?;
+        let response = read_limited_frame_until(
+            &mut stream,
+            MAX_RESPONSE_FRAME_BYTES - 1,
+            deadline,
+        )?;
         serde_json::from_slice(&response)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
@@ -354,7 +359,7 @@ fn handle_connection(mut stream: UnixStream, service: &RpcService, timeout: Dura
     let _ = stream.set_write_timeout(Some(timeout));
     let response = {
         let mut reader = BufReader::new(&mut stream);
-        match read_limited_frame(&mut reader, MAX_FRAME_BYTES) {
+        match read_limited_frame(&mut reader, MAX_REQUEST_FRAME_BYTES - 1) {
             Ok(frame) => service.handle_bytes(&frame),
             Err(error) if error.kind() == io::ErrorKind::InvalidData => RpcResponse::error(
                 None,
@@ -378,7 +383,7 @@ fn write_busy(mut stream: UnixStream, timeout: Duration) {
 fn write_response(stream: &mut UnixStream, mut response: RpcResponse) -> io::Result<()> {
     let mut frame = serde_json::to_vec(&response)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if frame.len() + 1 > MAX_FRAME_BYTES {
+    if frame.len() + 1 > MAX_RESPONSE_FRAME_BYTES {
         response = RpcResponse {
             version: RPC_VERSION,
             request_id: response
@@ -390,7 +395,7 @@ fn write_response(stream: &mut UnixStream, mut response: RpcResponse) -> io::Res
         };
         frame = serde_json::to_vec(&response)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if frame.len() + 1 > MAX_FRAME_BYTES {
+        if frame.len() + 1 > MAX_RESPONSE_FRAME_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "oversized fallback response exceeds cap",
@@ -432,7 +437,26 @@ fn read_limited_frame<R: BufRead>(reader: &mut R, cap: usize) -> io::Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
+    use std::io::{Cursor, Read};
+
+    #[test]
+    fn request_and_response_frame_caps_include_the_trailing_newline() {
+        for cap in [MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES] {
+            let mut exact = vec![b'x'; cap - 1];
+            exact.push(b'\n');
+            assert_eq!(
+                read_limited_frame(&mut Cursor::new(exact), cap - 1)
+                    .unwrap()
+                    .len(),
+                cap - 1
+            );
+
+            let mut oversized = vec![b'x'; cap];
+            oversized.push(b'\n');
+            let error = read_limited_frame(&mut Cursor::new(oversized), cap - 1).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+    }
 
     #[test]
     fn ambiguous_connect_error_preserves_socket() {

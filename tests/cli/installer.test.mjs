@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { installMcp, installPlan, runInit } from '../../cli/installer.mjs';
+import { installMcp, installPlan, runInit, installPlugin } from '../../cli/installer.mjs';
 import { codexConfigPath, productPaths } from '../../cli/paths.mjs';
 import { ZCODE_RUNTIME } from '../../cli/constants.mjs';
 
@@ -130,6 +130,33 @@ test('install-mcp --uninstall removes only the managed Codex section', () => {
   assert.match(content, /\[mcp_servers\.other\]/);
   assert.doesNotMatch(content, /zcode_as_subagent/);
   assert.equal(installMcp(paths, { configPath: config, uninstall: true }).uninstalled, true);
+});
+
+test('install-plugin fails closed on marketplace source conflict and missing source can uninstall', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-as-subagent-plugin-conflict-'));
+  const paths = productPaths(home);
+  const codexHome = path.join(home, 'codex');
+  const cli = path.join(home, 'codex-fake');
+  fs.writeFileSync(cli, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  const marketplace = path.join(home, '.agents', 'plugins', 'marketplace.json');
+  fs.mkdirSync(path.dirname(marketplace), { recursive: true });
+  fs.writeFileSync(marketplace, JSON.stringify({ name: 'personal', plugins: [{ name: 'zcode-as-subagent', source: { source: 'local', path: './other' } }] }));
+  assert.throws(() => installPlugin(paths, { home, codexHome, marketplacePath: marketplace, codexCli: cli }), (error) => error.code === 'PLUGIN_MARKETPLACE_CONFLICT');
+  const missing = path.join(home, 'missing-plugin');
+  assert.doesNotThrow(() => installPlugin(paths, { source: missing, home, codexHome, marketplacePath: marketplace, codexCli: cli, uninstall: true }));
+});
+
+test('install-plugin rolls back staging and marketplace when marketplace registration fails', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-as-subagent-plugin-register-'));
+  const paths = productPaths(home);
+  const codexHome = path.join(home, 'codex');
+  const cli = path.join(home, 'codex-fake');
+  fs.writeFileSync(cli, '#!/bin/sh\ncase "$*" in *"marketplace add"*) exit 7;; esac\nexit 0\n', { mode: 0o700 });
+  const staging = path.join(home, 'plugins', 'zcode-as-subagent');
+  const marketplace = path.join(home, '.agents', 'plugins', 'marketplace.json');
+  assert.throws(() => installPlugin(paths, { home, codexHome, stagingPath: staging, marketplacePath: marketplace, codexCli: cli, registerMarketplace: true }), (error) => error.code === 'CODEX_CLI_FAILED');
+  assert.equal(fs.existsSync(staging), false);
+  assert.equal(fs.existsSync(marketplace), false);
 });
 
 for (const failStep of ['write-product-config', 'install-launch-agent']) {

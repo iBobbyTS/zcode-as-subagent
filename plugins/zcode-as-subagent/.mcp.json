@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "zcode_as_subagent": {
+      "command": "__ZAS_MCP_EXECUTABLE__",
+      "args": [],
+      "env": {
+        "ZCODE_AGENTD_SOCKET": "__ZAS_AGENTD_SOCKET__"
+      }
+    }
+  }
+}

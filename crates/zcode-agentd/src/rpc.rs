@@ -24,15 +24,16 @@ use zcode_agent_store::{
     TaskPageFilter, TaskPhase, TaskQueryScope, TaskRecord, TaskSubmissionDisposition,
 };
 
-pub const RPC_VERSION: u16 = 12;
-pub const MAX_FRAME_BYTES: usize = 512 * 1024;
+pub const RPC_VERSION: u16 = 13;
+pub const MAX_REQUEST_FRAME_BYTES: usize = 512 * 1024;
+pub const MAX_RESPONSE_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_LIST_TASKS: usize = 100;
 pub const MAX_PENDING_REQUESTS: usize = 100;
 /// A result page is capped below the transport frame cap so that even the
 /// worst-case JSON escaping (one input byte becoming a six-byte `\\u00XX`
 /// escape), the response envelope, and the trailing newline fit in one frame.
-pub const MAX_RESULT_CHUNK_BYTES: usize = 80 * 1024;
+pub const MAX_RESULT_CHUNK_BYTES: usize = 256 * 1024;
 pub const MAX_WAIT: Duration = Duration::from_secs(5);
 pub const RPC_TRANSPORT_SUPPORTED: bool = cfg!(unix);
 
@@ -153,6 +154,8 @@ pub struct TaskPollQuery {
     #[serde(default)]
     pub after_revision: u64,
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,12 +256,14 @@ pub enum RpcSuccess {
         result: Option<TaskResultView>,
         instruction: Option<String>,
         timed_out: bool,
+        message_receipt: Option<MessageReceiptView>,
     },
     TaskResult {
         task: TaskView,
         result: Option<TaskResultView>,
     },
     Message {
+        message_id: String,
         disposition: MessageDispositionView,
         task: TaskView,
     },
@@ -275,6 +280,16 @@ pub enum RpcSuccess {
     TaskObserved {
         observation: TaskObservationView,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageReceiptView {
+    pub message_id: String,
+    pub state: String,
+    pub target_turn_id: Option<String>,
+    pub failure_code: Option<String>,
+    pub created_at_ms: i64,
+    pub delivered_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -374,7 +389,8 @@ pub struct ModelIdentityFactView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCapabilitiesView {
-    pub max_rpc_frame_bytes: usize,
+    pub max_rpc_request_frame_bytes: usize,
+    pub max_rpc_response_frame_bytes: usize,
     pub max_wait_ms: u64,
     pub maturity: BTreeMap<String, CapabilityMaturityView>,
     pub observation: ObservationCapabilityView,
@@ -419,6 +435,14 @@ pub struct TaskView {
     pub close_requested: bool,
     pub closed: bool,
     pub reaped: bool,
+    pub input_identity: InputIdentityView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputIdentityView {
+    pub workspace_path: Option<String>,
+    pub permission_mode: Option<String>,
+    pub caller_prompt_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -657,7 +681,7 @@ impl RpcService {
     }
 
     pub fn handle_bytes(&self, frame: &[u8]) -> RpcResponse {
-        if frame.len() > MAX_FRAME_BYTES {
+        if frame.len().saturating_add(1) > MAX_REQUEST_FRAME_BYTES {
             return RpcResponse::error(
                 None,
                 RpcError::new(RpcErrorCode::Oversized, "request frame exceeds the RPC cap"),
@@ -824,6 +848,7 @@ impl RpcService {
                     .map_err(map_scheduler)?;
                 let task = self.require_task(&input.agent_id)?;
                 Ok(RpcSuccess::Message {
+                    message_id: input.message_id,
                     disposition: disposition.into(),
                     task: task_view(task),
                 })
@@ -868,7 +893,9 @@ impl RpcService {
                 if limit == 0 || limit > MAX_RESULT_CHUNK_BYTES {
                     return Err(RpcError::new(
                         RpcErrorCode::Validation,
-                        "result limit is outside the allowed range",
+                        format!(
+                            "result limit must be between 1 and {MAX_RESULT_CHUNK_BYTES} bytes; received {limit}"
+                        ),
                     ));
                 }
                 let result = self
@@ -999,6 +1026,14 @@ impl RpcService {
         let deadline = Instant::now() + Duration::from_millis(query.timeout_ms);
         loop {
             let task = self.require_task(&query.agent_id)?;
+            let message_receipt = if let Some(id) = &query.message_id {
+                self.store.message(id).map_err(map_store)?.and_then(|m| {
+                    (m.agent_id == query.agent_id).then(|| MessageReceiptView {
+                        message_id: m.message_id, state: format!("{:?}", m.state).to_lowercase(), target_turn_id: m.target_turn_id,
+                        failure_code: m.failure_code, created_at_ms: m.created_at, delivered_at_ms: m.delivered_at,
+                    })
+                })
+            } else { None };
             let pending_requests = self
                 .store
                 .pending_requests_bounded(&task.agent_id, MAX_PENDING_REQUESTS)
@@ -1022,7 +1057,7 @@ impl RpcService {
                 .max(task.last_event_seq);
             let terminal = task.phase == TaskPhase::Terminal;
             let now = Instant::now();
-            if revision > query.after_revision
+            if query.message_id.is_some() || revision > query.after_revision
                 || !pending_requests.is_empty()
                 || terminal
                 || now >= deadline
@@ -1048,6 +1083,7 @@ impl RpcService {
                     result: None,
                     instruction: (!terminal).then(|| "Use poll for progress".to_owned()),
                     timed_out,
+                    message_receipt,
                 });
             }
             thread::sleep((deadline - now).min(Duration::from_millis(10)));
@@ -1093,7 +1129,8 @@ fn opaque_generation() -> Result<String, RpcServiceConfigError> {
 fn agent_capabilities(runtime_source_verified: bool) -> AgentCapabilitiesView {
     let maturity = BTreeMap::new();
     AgentCapabilitiesView {
-        max_rpc_frame_bytes: MAX_FRAME_BYTES,
+        max_rpc_request_frame_bytes: MAX_REQUEST_FRAME_BYTES,
+        max_rpc_response_frame_bytes: MAX_RESPONSE_FRAME_BYTES,
         max_wait_ms: MAX_WAIT.as_millis() as u64,
         maturity,
         observation: ObservationCapabilityView {
@@ -1123,6 +1160,10 @@ fn format_task_cursor(cursor: u64) -> String {
 }
 
 fn task_view(task: TaskRecord) -> TaskView {
+    let prepared = serde_json::from_str::<serde_json::Value>(&task.prepared_launch_json).ok();
+    let permission_mode = prepared.as_ref().and_then(|v| v.get("permission_mode").and_then(|x| x.as_str()).map(str::to_owned));
+    let caller_prompt_sha256 = prepared.as_ref().and_then(|v| v.get("prompt_sha256").and_then(|x| x.as_str()).map(str::to_owned));
+    let workspace_path = Some(task.workspace_path.clone());
     TaskView {
         agent_id: task.agent_id,
         session_id: task.zcode_session_id,
@@ -1142,6 +1183,7 @@ fn task_view(task: TaskRecord) -> TaskView {
         close_requested: task.close_requested,
         closed: task.closed_at.is_some(),
         reaped: task.reaped_at.is_some(),
+        input_identity: InputIdentityView { workspace_path, permission_mode, caller_prompt_sha256 },
     }
 }
 
@@ -1374,7 +1416,8 @@ fn pending_request_view(request: StoredPendingRequest) -> PendingRequestView {
 #[cfg(test)]
 mod result_paging_tests {
     use super::{
-        result_page_bounds, RpcResponse, RpcSuccess, TaskResultView, TaskView, MAX_FRAME_BYTES,
+        result_page_bounds, RpcResponse, RpcSuccess, TaskResultView, TaskView,
+        MAX_RESPONSE_FRAME_BYTES,
         MAX_RESULT_CHUNK_BYTES,
     };
     use zcode_agent_store::TaskOutcome;
@@ -1427,7 +1470,7 @@ mod result_paging_tests {
                 }),
             },
         );
-        assert!(serde_json::to_vec(&response).unwrap().len() + 1 <= MAX_FRAME_BYTES);
+        assert!(serde_json::to_vec(&response).unwrap().len() + 1 <= MAX_RESPONSE_FRAME_BYTES);
     }
 
     #[test]
