@@ -20,10 +20,13 @@ observation source unavailable and sets the status capability to false. Use
 
 Within one daemon lifetime, observation retains at most 64 KiB of accumulated
 public reasoning source so cross-delta redaction can be applied before the
-200-character projection. If the next delta would exceed that budget, the
-tracker clears its reasoning text, sets `reasoning_complete=false`, increments
-`dropped_events`, and keeps later reasoning text disabled for that tracker.
-This is a bounded fail-closed limit, not an unlimited rolling reasoning tail.
+200-character projection. When that budget is reached, the tracker evicts old
+source, records a coverage gap with `reasoning_complete=false`, and keeps only
+the bounded redaction context needed to avoid exposing a secret across the
+eviction boundary. Later deltas are processed in a new bounded window: safe
+text can resume updating the latest 200-character tail, while an unsafe or
+unprovable boundary remains redacted until it is safe again. The tracker never
+reconstructs the discarded prefix or stores an unlimited reasoning history.
 
 ## Data and terminal history
 
