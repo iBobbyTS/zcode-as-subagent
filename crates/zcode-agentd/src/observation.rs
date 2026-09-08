@@ -6,6 +6,7 @@ use std::{
     fs::File,
     io::Read,
     path::Path,
+    sync::OnceLock,
 };
 
 pub const OBSERVATION_SCHEMA: &str = "zas-observation/1.1";
@@ -112,6 +113,12 @@ struct ToolGroup {
     recent_calls: VecDeque<ObservedCall>,
 }
 
+#[derive(Clone, Copy)]
+enum ReasoningQuarantine {
+    Boundary { saw_value: bool },
+    PrivateKey,
+}
+
 pub struct ObservationState {
     snapshot_seq: u64,
     next_call_seq: u64,
@@ -121,7 +128,7 @@ pub struct ObservationState {
     reasoning_raw: String,
     reasoning_text: String,
     reasoning_truncated: bool,
-    reasoning_redaction_overflow: bool,
+    reasoning_quarantine: Option<ReasoningQuarantine>,
     tool_history_complete: bool,
     reasoning_complete: bool,
     dropped_events: u64,
@@ -138,7 +145,7 @@ impl Default for ObservationState {
             reasoning_raw: String::new(),
             reasoning_text: String::new(),
             reasoning_truncated: false,
-            reasoning_redaction_overflow: false,
+            reasoning_quarantine: None,
             tool_history_complete: true,
             reasoning_complete: true,
             dropped_events: 0,
@@ -183,36 +190,91 @@ impl ObservationState {
                     self.bump_snapshot();
                     return;
                 };
-                if self.reasoning_redaction_overflow
-                    || self.reasoning_raw.len().saturating_add(delta.len())
-                        > MAX_REASONING_REDACTION_BYTES
-                {
-                    self.reasoning_raw.clear();
-                    self.reasoning_text.clear();
-                    self.reasoning_truncated = true;
-                    self.reasoning_redaction_overflow = true;
-                    self.reasoning_complete = false;
-                    self.dropped_events = self.dropped_events.saturating_add(1);
-                    self.bump_snapshot();
-                    return;
-                }
-                self.reasoning_raw.push_str(delta);
-                let redacted = redact_text(&self.reasoning_raw);
-                let redacted_chars = redacted.chars().count();
-                self.reasoning_text = redacted
-                    .chars()
-                    .rev()
-                    .take(MAX_REASONING_CHARS)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect();
-                self.reasoning_truncated |= redacted_chars > MAX_REASONING_CHARS;
+                self.observe_reasoning(delta, redact_text);
                 self.bump_snapshot();
             }
             Some("tool_call") => self.observe_tool(params, payload, redact_text),
             _ => unreachable!("kind was filtered above"),
         }
+    }
+
+    fn observe_reasoning(&mut self, delta: &str, redact_text: fn(&str) -> String) {
+        self.reasoning_raw.push_str(delta);
+
+        if let Some(quarantine) = self.reasoning_quarantine {
+            let terminator = match quarantine {
+                ReasoningQuarantine::Boundary { saw_value } => {
+                    boundary_quarantine_terminator(&self.reasoning_raw, saw_value)
+                }
+                ReasoningQuarantine::PrivateKey => private_key_end()
+                    .find(&self.reasoning_raw)
+                    .map(|found| found.end()),
+            };
+            let Some(terminator) = terminator else {
+                self.bound_reasoning_raw();
+                return;
+            };
+            let suffix = self.reasoning_raw.split_off(terminator);
+            self.reasoning_raw = format!("[REDACTED]{suffix}");
+            self.reasoning_quarantine = None;
+        }
+
+        let redacted = redact_text(&self.reasoning_raw);
+        self.update_reasoning_text(&redacted);
+
+        if self.reasoning_raw.len() <= MAX_REASONING_REDACTION_BYTES {
+            return;
+        }
+
+        self.reasoning_truncated = true;
+        self.reasoning_complete = false;
+        self.dropped_events = self.dropped_events.saturating_add(1);
+
+        let minimum_cut = utf8_boundary_at_or_after(
+            &self.reasoning_raw,
+            self.reasoning_raw.len() - MAX_REASONING_REDACTION_BYTES,
+        );
+        let mut safe_cut = minimum_cut;
+        match private_key_safe_cut(&self.reasoning_raw, safe_cut) {
+            PrivateKeyCut::Safe(adjusted) => safe_cut = adjusted,
+            PrivateKeyCut::Open => {
+                self.reasoning_quarantine = Some(ReasoningQuarantine::PrivateKey);
+                self.bound_reasoning_raw();
+                return;
+            }
+        }
+
+        let retained = &self.reasoning_raw[safe_cut..];
+        let retained_redacted = redact_text(retained);
+        if reasoning_tail(&retained_redacted) != self.reasoning_text
+            || sensitive_prefix_awaiting_value(&self.reasoning_raw)
+        {
+            self.reasoning_quarantine = Some(ReasoningQuarantine::Boundary {
+                saw_value: !sensitive_prefix_awaiting_value(&self.reasoning_raw),
+            });
+            self.bound_reasoning_raw();
+            return;
+        }
+
+        self.reasoning_raw.drain(..safe_cut);
+        self.update_reasoning_text(&retained_redacted);
+    }
+
+    fn update_reasoning_text(&mut self, redacted: &str) {
+        let redacted_chars = redacted.chars().count();
+        self.reasoning_text = reasoning_tail(redacted);
+        self.reasoning_truncated |= redacted_chars > MAX_REASONING_CHARS;
+    }
+
+    fn bound_reasoning_raw(&mut self) {
+        if self.reasoning_raw.len() <= MAX_REASONING_REDACTION_BYTES {
+            return;
+        }
+        let cut = utf8_boundary_at_or_after(
+            &self.reasoning_raw,
+            self.reasoning_raw.len() - MAX_REASONING_REDACTION_BYTES,
+        );
+        self.reasoning_raw.drain(..cut);
     }
 
     fn observe_tool(&mut self, params: &Value, payload: &Value, redact_text: fn(&str) -> String) {
@@ -329,6 +391,93 @@ impl ObservationState {
             },
         }
     }
+}
+
+fn utf8_boundary_at_or_after(value: &str, mut index: usize) -> usize {
+    while index < value.len() && !value.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+fn reasoning_separator(byte: u8) -> bool {
+    byte.is_ascii_whitespace() || matches!(byte, b',' | b';')
+}
+
+fn boundary_quarantine_terminator(value: &str, saw_value: bool) -> Option<usize> {
+    let start = if saw_value {
+        0
+    } else {
+        value
+            .as_bytes()
+            .iter()
+            .position(|byte| !reasoning_separator(*byte))?
+    };
+    value.as_bytes()[start..]
+        .iter()
+        .position(|byte| reasoning_separator(*byte))
+        .map(|offset| start + offset + 1)
+}
+
+fn reasoning_tail(value: &str) -> String {
+    value
+        .chars()
+        .rev()
+        .take(MAX_REASONING_CHARS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn sensitive_prefix_awaiting_value(value: &str) -> bool {
+    static PREFIX: OnceLock<regex::Regex> = OnceLock::new();
+    PREFIX
+        .get_or_init(|| {
+            regex::Regex::new(
+                r#"(?i)(?:["']?(?:token|secret|password|api[_-]?key|private[_-]?key)["']?\s*[:=]\s*|(?:authorization["']?\s*[:=]\s*["']?(?:bearer\s+)?)|(?:bearer\s+)|https?://)$"#,
+            )
+            .unwrap()
+        })
+        .is_match(value)
+}
+
+fn private_key_markers() -> &'static (regex::Regex, regex::Regex) {
+    static MARKERS: OnceLock<(regex::Regex, regex::Regex)> = OnceLock::new();
+    MARKERS.get_or_init(|| {
+        (
+            regex::Regex::new(r"-----BEGIN [^-]*PRIVATE KEY-----").unwrap(),
+            regex::Regex::new(r"-----END [^-]*PRIVATE KEY-----").unwrap(),
+        )
+    })
+}
+
+fn private_key_end() -> &'static regex::Regex {
+    &private_key_markers().1
+}
+
+enum PrivateKeyCut {
+    Safe(usize),
+    Open,
+}
+
+fn private_key_safe_cut(value: &str, mut cut: usize) -> PrivateKeyCut {
+    let (begin, end) = private_key_markers();
+    let mut cursor = 0;
+    while let Some(start) = begin.find_at(value, cursor) {
+        let Some(finish) = end.find_at(value, start.end()) else {
+            return if cut > start.start() {
+                PrivateKeyCut::Open
+            } else {
+                PrivateKeyCut::Safe(cut)
+            };
+        };
+        if cut > start.start() && cut < finish.end() {
+            cut = finish.end();
+        }
+        cursor = finish.end();
+    }
+    PrivateKeyCut::Safe(cut)
 }
 
 fn valid_id(value: Option<&Value>) -> Option<&str> {
@@ -615,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_redaction_budget_fails_closed_with_explicit_coverage_loss() {
+    fn reasoning_redaction_budget_recovers_latest_tail_after_coverage_loss() {
         let mut state = ObservationState::default();
         state.observe_message(
             "session/event",
@@ -631,15 +780,96 @@ mod tests {
             &event(
                 "2",
                 "reasoning_delta",
-                serde_json::json!({"delta":"api_key=must-not-leak"}),
+                serde_json::json!({"delta":" post-overflow-unique-marker"}),
             ),
             production_redact,
         );
         let snapshot = state.snapshot();
-        assert_eq!(snapshot.reasoning.text, "");
+        assert!(snapshot
+            .reasoning
+            .text
+            .ends_with("post-overflow-unique-marker"));
+        assert!(state.reasoning_raw.len() <= MAX_REASONING_REDACTION_BYTES);
+        assert!(snapshot.reasoning.char_count <= MAX_REASONING_CHARS);
         assert!(snapshot.reasoning.truncated);
         assert!(!snapshot.coverage.reasoning_complete);
         assert_eq!(snapshot.coverage.dropped_events, 1);
+    }
+
+    #[test]
+    fn reasoning_overflow_tail_counts_chinese_and_emoji_as_unicode_scalars() {
+        let mut state = ObservationState::default();
+        state.observe_message(
+            "session/event",
+            &event(
+                "1",
+                "reasoning_delta",
+                serde_json::json!({"delta":"x".repeat(MAX_REASONING_REDACTION_BYTES)}),
+            ),
+            production_redact,
+        );
+        state.observe_message(
+            "session/event",
+            &event(
+                "2",
+                "reasoning_delta",
+                serde_json::json!({"delta":format!(" {}", "中🙂".repeat(110))}),
+            ),
+            production_redact,
+        );
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.reasoning.char_count, MAX_REASONING_CHARS);
+        assert_eq!(snapshot.reasoning.text, "中🙂".repeat(100));
+        assert!(state.reasoning_raw.len() <= MAX_REASONING_REDACTION_BYTES);
+        assert!(!snapshot.coverage.reasoning_complete);
+    }
+
+    #[test]
+    fn private_key_crossing_eviction_is_hidden_until_terminator_then_recovers() {
+        let mut state = ObservationState::default();
+        let chunks = [
+            format!(
+                "{}\n-----BEGIN PRIVATE KEY-----\nSENSITIVE_PREFIX",
+                "x".repeat(MAX_REASONING_REDACTION_BYTES - 200)
+            ),
+            "SENSITIVE_BODY".repeat(100),
+            "SENSITIVE_CONTINUATION".repeat(4_000),
+            "\n-----END PRIVATE KEY-----".to_owned(),
+            " safe-after-private-key".to_owned(),
+        ];
+
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            state.observe_message(
+                "session/event",
+                &event(
+                    &index.to_string(),
+                    "reasoning_delta",
+                    serde_json::json!({"delta":chunk}),
+                ),
+                production_redact,
+            );
+            let snapshot = state.snapshot();
+            assert!(snapshot.reasoning.char_count <= MAX_REASONING_CHARS);
+            assert!(state.reasoning_raw.len() <= MAX_REASONING_REDACTION_BYTES);
+            for forbidden in [
+                "SENSITIVE_PREFIX",
+                "SENSITIVE_BODY",
+                "SENSITIVE_CONTINUATION",
+            ] {
+                assert!(
+                    !snapshot.reasoning.text.contains(forbidden),
+                    "snapshot {index} leaked {forbidden}: {}",
+                    snapshot.reasoning.text
+                );
+            }
+        }
+
+        let snapshot = state.snapshot();
+        assert!(snapshot.reasoning.text.contains("[REDACTED]"));
+        assert!(snapshot.reasoning.text.ends_with("safe-after-private-key"));
+        assert!(snapshot.reasoning.truncated);
+        assert!(!snapshot.coverage.reasoning_complete);
+        assert_eq!(snapshot.coverage.dropped_events, 2);
     }
 
     #[test]
