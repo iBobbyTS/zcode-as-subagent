@@ -152,7 +152,8 @@ impl From<ComponentStateView> for PublicComponentState {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct PublicAgentCapabilities {
-    pub max_rpc_frame_bytes: usize,
+    pub max_rpc_request_frame_bytes: usize,
+    pub max_rpc_response_frame_bytes: usize,
     pub max_wait_ms: u64,
     pub maturity: BTreeMap<String, PublicCapabilityMaturity>,
     pub observation: PublicObservationCapability,
@@ -183,7 +184,8 @@ impl From<AgentCapabilitiesView> for PublicAgentCapabilities {
             .map(|(name, maturity)| (name, maturity.into()))
             .collect();
         Self {
-            max_rpc_frame_bytes: value.max_rpc_frame_bytes,
+            max_rpc_request_frame_bytes: value.max_rpc_request_frame_bytes,
+            max_rpc_response_frame_bytes: value.max_rpc_response_frame_bytes,
             max_wait_ms: value.max_wait_ms,
             maturity,
             observation: PublicObservationCapability {
@@ -909,7 +911,7 @@ pub struct AgentResultInput {
     #[serde(default)]
     pub offset: usize,
     #[serde(default = "default_result_limit")]
-    #[schemars(range(min = 1, max = 81920))]
+    #[schemars(range(min = 1, max = 262144))]
     pub limit: usize,
 }
 
@@ -1577,11 +1579,12 @@ mod contract_default_tests {
     fn legacy_daemon_status_keeps_readiness_and_real_facade_identity() {
         let status = SystemStatusView {
             api_surface: "generic_agent".into(),
-            protocol_version: 12,
+            protocol_version: 13,
             service_generation: "legacy-generation".into(),
             components: BTreeMap::from([("daemon".into(), ComponentStateView::Ready)]),
             capabilities: AgentCapabilitiesView {
-                max_rpc_frame_bytes: 512 * 1024,
+                max_rpc_request_frame_bytes: 512 * 1024,
+                max_rpc_response_frame_bytes: 2 * 1024 * 1024,
                 max_wait_ms: 5000,
                 maturity: BTreeMap::from([("spawn".into(), CapabilityMaturityView::BetaReady)]),
                 observation: ObservationCapabilityView {
@@ -1717,8 +1720,8 @@ mod contract_default_tests {
             "path":"/running/component","sha256":"00","source":"running_executable","captured_at_ms":1
         });
         let status = serde_json::json!({
-            "api_surface":"generic_agent","protocol_version":12,"service_generation":"generation",
-            "components":{},"capabilities":{"max_rpc_frame_bytes":524288,"max_wait_ms":5000,
+            "api_surface":"generic_agent","protocol_version":13,"service_generation":"generation",
+            "components":{},"capabilities":{"max_rpc_request_frame_bytes":524288,"max_rpc_response_frame_bytes":2097152,"max_wait_ms":5000,
                 "maturity":{},"observation":{"protocol":"zas-observation/1.1",
                     "public_reasoning_default":true,"runtime_source_verified":false,
                     "defaults":{"top_tools":3,"recent_calls_per_tool":5,"reasoning_chars":200}}},

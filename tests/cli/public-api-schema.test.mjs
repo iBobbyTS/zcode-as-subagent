@@ -22,7 +22,7 @@ test('packaged public schema is the reduced zcode_subagent catalog', () => {
   assert.equal(schema.properties.poll.properties.after_revision.default, 0);
   assert.equal(schema.properties.poll.properties.timeout_ms.default, 0);
   assert.equal(schema.properties.result.properties.offset.default, 0);
-  assert.equal(schema.properties.result.properties.limit.default, 81920);
+  assert.equal(schema.properties.result.properties.limit.default, 262144);
   assert.deepEqual(schema.properties.observe.required, ['agent_id']);
   assert.equal(schema.properties.observe.additionalProperties, false);
   assert.deepEqual(schema.properties.contracts.properties.zcode_subagent_observe.input, ['agent_id']);
