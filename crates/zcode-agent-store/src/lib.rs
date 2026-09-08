@@ -2277,4 +2277,24 @@ mod tests {
         );
         assert!(reopened.task_result("agent").unwrap().is_none());
     }
+
+    #[test]
+    fn message_receipt_contains_delivery_timestamps_and_agent_scope() {
+        let (_directory, _path, store) = store();
+        store.enqueue_task_authoritative(&task("agent", "/repo", None)).unwrap();
+        running(&store, "agent");
+        store.insert_message("m1", "agent", "queue", "hello").unwrap();
+        let queued = store.message("m1").unwrap().unwrap();
+        assert_eq!(queued.state, MessageState::Queued);
+        assert!(queued.created_at > 0);
+        assert!(queued.delivered_at.is_none());
+        assert!(store.message("missing").unwrap().is_none());
+        let claimed = store.claim_next_message("agent").unwrap().unwrap();
+        assert_eq!(claimed.state, MessageState::Sending);
+        store.complete_message("m1", Some("turn-1")).unwrap();
+        let delivered = store.message("m1").unwrap().unwrap();
+        assert_eq!(delivered.state, MessageState::Delivered);
+        assert_eq!(delivered.target_turn_id.as_deref(), Some("turn-1"));
+        assert!(delivered.delivered_at.unwrap() >= delivered.created_at);
+    }
 }
