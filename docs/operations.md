@@ -38,6 +38,21 @@ Poll exposes bounded visible text, active tool classes, model request clocks, an
 
 Pending requests and terminal transitions wake long polls immediately. Unknown telemetry shapes degrade telemetry status without failing the Agent.
 
+Tool execution failures preserve the bounded text and also return
+`structuredContent.error`. The object always has `code` and `message`;
+`component`, `operation`, `request_id`, `agent_id`, and `cleanup` appear only
+when their producer supplied a trustworthy value. JSON-RPC protocol failures
+remain outer JSON-RPC errors. The rmcp pre-handler argument decoder retains its
+SDK-owned `isError` text and does not masquerade as a product structured error.
+Reading a terminal `FAILED` or `CANCELLED` task through `poll` or `result` is
+still a successful tool query.
+
+`zcode_subagent_status.identity` separates daemon and facade build/process
+identity from configured runtime facts. Running artifact hashes include their
+source and capture time. Missing build, runtime-version, and response-model
+facts stay absent or `unknown`; session/create configuration does not prove
+which model produced a response.
+
 ## Completion and bounded control waits
 
 A matching `turn.completed` converges the task to `TERMINAL` after runtime cleanup. The terminal response text is the authoritative final text.

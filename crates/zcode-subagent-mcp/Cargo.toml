@@ -27,3 +27,4 @@ zcode-agent-store = { path = "../zcode-agent-store" }
 zcode-driver = { path = "../zcode-driver" }
 zcode-protocol = { path = "../zcode-protocol" }
 tempfile = "3"
+jsonschema = { version = "0.51", default-features = false }

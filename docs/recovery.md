@@ -83,4 +83,9 @@ python3 tests/live-agent/non-git-based/real_terminal_send_case.py
 - `runtime_command_failed`：daemon 已处理请求，但 runtime 命令失败。先用 `poll`、`result` 和 `diagnose` 查看状态；此错误不表示 daemon 离线。
 - `daemon_unavailable`：MCP 无法通过 socket 联系 daemon。检查服务与 socket；不要因上述两类业务拒绝自动重启服务。
 
+先比较 `status.identity.daemon` 与 `status.identity.facade` 中来源为
+`running_executable` 的路径、hash 和采集时间，再比较 CLI diagnose 中来源为
+`distributed_payload` 的磁盘产物。磁盘新文件不能证明旧进程已重启；CLI
+未经过 MCP facade 时会把 facade running identity 明确报告为未观察。
+
 按 Agent 导出的结构化诊断在 16 KiB 序列化预算内保留有效 JSON：元数据使用有界前缀，`stderr_tail` 优先保留末尾，并明确标记 `truncated`。全局日志尾部与按 Agent 的保留窗口查询仍是两个不同范围。
