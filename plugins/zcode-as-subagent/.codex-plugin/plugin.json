@@ -1,0 +1,19 @@
+{
+  "name": "zcode-as-subagent",
+  "version": "0.1.0",
+  "description": "Run ZCode as a local Codex subagent with lifecycle tools and guidance.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Zcode As Subagent",
+    "shortDescription": "Use ZCode as a local subagent.",
+    "longDescription": "Adds the ZCode MCP lifecycle server and a companion skill for safe task execution.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": ["Check ZCode subagent status", "Spawn a repository-scoped task", "Review a complete task result"]
+  },
+  "mcpServers": "./.mcp.json"
+}

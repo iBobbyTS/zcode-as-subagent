@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { BUSINESS_COMMANDS, PRODUCT_NAME, VERSION, ZCODE_RUNTIME } from './constants.mjs';
 import { CliError } from './errors.mjs';
-import { runInit, installHooks, installMcp, installPlan, nativeBinary } from './installer.mjs';
+import { runInit, installHooks, installPlugin, installPlan, nativeBinary } from './installer.mjs';
 import { backupData, cleanupLegacy, purge, restoreData, uninstall } from './maintenance.mjs';
 import { platform, productPaths } from './paths.mjs';
 import { startService, stopService } from './service.mjs';
@@ -280,7 +280,7 @@ async function diagnose(paths, args) {
 export async function main(args) {
   const command = args[0] || 'help';
   if (command === 'help' || command === '--help' || command === '-h') {
-    process.stdout.write(HELP + DAEMON_HELP); return;
+    process.stdout.write(HELP.replace('install-mcp [codex] [--dry-run|--uninstall] Install or remove the Codex MCP configuration', 'install-plugin [--dry-run|--uninstall] Install or remove the Codex plugin (MCP + skill)') + DAEMON_HELP); return;
   }
   if (command === 'version' || command === '--version' || command === '-v') {
     process.stdout.write(`${VERSION}\n`); return;
@@ -296,10 +296,9 @@ export async function main(args) {
     if (args[1] !== 'install') throw new CliError('INVALID_ARGUMENT', 'usage: hooks install [--dry-run]', 2);
     output(installHooks(paths, { dryRun: args.includes('--dry-run') })); return;
   }
-  if (command === 'install-mcp') {
-    const target = args.slice(1).find((arg) => !arg.startsWith('--')) || 'codex';
-    if (target !== 'codex') throw new CliError('INVALID_ARGUMENT', `unsupported MCP target: ${target}`, 2);
-    output(installMcp(paths, { dryRun: args.includes('--dry-run'), uninstall: args.includes('--uninstall') })); return;
+  if (command === 'install-plugin') {
+    if (args.slice(1).some((arg) => !['--dry-run', '--uninstall'].includes(arg))) throw new CliError('INVALID_ARGUMENT', 'usage: install-plugin [--dry-run|--uninstall]', 2);
+    output(installPlugin(paths, { dryRun: args.includes('--dry-run'), uninstall: args.includes('--uninstall') })); return;
   }
   if (command === 'status') {
     const local = { installed: fs.existsSync(paths.state), launch_agent: fs.existsSync(paths.launchAgent), data: fs.existsSync(paths.data) };
