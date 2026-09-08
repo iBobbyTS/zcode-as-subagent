@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { BUSINESS_COMMANDS, PRODUCT_NAME, VERSION, ZCODE_RUNTIME } from './constants.mjs';
 import { CliError } from './errors.mjs';
 import { runInit, installHooks, installMcp, installPlan, nativeBinary } from './installer.mjs';
@@ -26,6 +27,16 @@ function output(valueToWrite) {
 const DIAGNOSTIC_TAIL_BYTES = 16 * 1024;
 const DIAGNOSTIC_TOTAL_BYTES = 32 * 1024;
 const DIAGNOSTIC_LOG_NAMES = ['daemon.log', 'daemon-error.log'];
+
+function fileArtifact(target, source, capturedAtMs = Date.now()) {
+  const artifact = { path: target, source, captured_at_ms: capturedAtMs };
+  try {
+    const stat = fs.lstatSync(target);
+    if (!stat.isFile() || stat.isSymbolicLink()) return artifact;
+    artifact.sha256 = crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+  } catch {}
+  return artifact;
+}
 
 function redactDiagnosticText(text) {
   return text
@@ -211,7 +222,16 @@ async function diagnose(paths, args) {
     schema_version: 1,
     scope: agent ? { agent_id: agent } : { kind: 'global' },
     platform: platform(),
-    runtime: { path: ZCODE_RUNTIME, exists: fs.existsSync(ZCODE_RUNTIME) },
+    runtime: {
+      configured_artifact: fileArtifact(ZCODE_RUNTIME, 'cli_packaged_configuration'),
+      running_identity: null,
+      running_identity_source: 'not_observed_by_cli',
+    },
+    facade: {
+      running_identity: null,
+      running_identity_source: 'not_observed_by_cli',
+      packaged_artifact: fileArtifact(nativeBinary('zcode-as-subagent-mcp'), 'distributed_payload'),
+    },
     daemon: { socket, socket_exists: fs.existsSync(socket), query_status: 'unqueried', available: null },
     logs: diagnosticLogs(paths.logs),
   };
@@ -299,7 +319,10 @@ export async function main(args) {
   }
   if (command === 'diagnose') {
     const report = await diagnose(paths, args.slice(1));
-    output({ ...report, daemon_binary: nativeBinary('zcode-as-subagentd'), daemon_binary_exists: fs.existsSync(nativeBinary('zcode-as-subagentd')) }); return;
+    output({
+      ...report,
+      daemon_packaged_artifact: fileArtifact(nativeBinary('zcode-as-subagentd'), 'distributed_payload'),
+    }); return;
   }
   if (command === 'backup') { output(backupData(value(args, '--output'), paths)); return; }
   if (command === 'restore') { output(restoreData(value(args, '--input'), paths)); return; }
@@ -319,4 +342,4 @@ export async function main(args) {
   output({ command, result });
 }
 
-export { DAEMON_HELP, HELP, installPlan, diagnose, diagnosticLogs };
+export { DAEMON_HELP, HELP, installPlan, diagnose, diagnosticLogs, fileArtifact };

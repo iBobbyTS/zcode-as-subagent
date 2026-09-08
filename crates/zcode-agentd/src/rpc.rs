@@ -5,14 +5,16 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
+    env,
     fs::File,
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use zcode_agent_preparation::{
     canonical_general_repository, GeneralTaskManifest, PreparedGeneralTask,
@@ -314,6 +316,59 @@ pub struct SystemStatusView {
     pub service_generation: String,
     pub components: BTreeMap<String, ComponentStateView>,
     pub capabilities: AgentCapabilitiesView,
+    pub identity: DaemonIdentityView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonIdentityView {
+    pub daemon: ComponentIdentityView,
+    pub runtime: RuntimeIdentityView,
+    pub models: ModelIdentityView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComponentIdentityView {
+    pub component: String,
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_dirty: Option<bool>,
+    pub artifact: ArtifactIdentityView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactIdentityView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    pub source: String,
+    pub captured_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeIdentityView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_path: Option<String>,
+    pub configured_path_source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_version: Option<String>,
+    pub observed_version_source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelIdentityView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured: Option<ModelIdentityFactView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_response: Option<ModelIdentityFactView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelIdentityFactView {
+    pub value: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -569,6 +624,7 @@ pub struct RpcService {
     scheduler: Scheduler,
     store: Arc<Store>,
     service_generation: String,
+    daemon_identity: ComponentIdentityView,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -595,6 +651,7 @@ impl RpcService {
             scheduler,
             store,
             service_generation,
+            daemon_identity: running_component_identity("daemon", env!("CARGO_PKG_VERSION")),
         })
     }
 
@@ -882,6 +939,16 @@ impl RpcService {
             service_generation: self.service_generation.clone(),
             components,
             capabilities: agent_capabilities(self.scheduler.runtime_source_verified()),
+            identity: DaemonIdentityView {
+                daemon: self.daemon_identity.clone(),
+                runtime: configured_runtime_identity(self.scheduler.configured_runtime_source()),
+                // Status has no Agent/session scope, and the current runtime
+                // exposes no verified response-producer model identity.
+                models: ModelIdentityView {
+                    configured: None,
+                    observed_response: None,
+                },
+            },
         }
     }
 
@@ -1379,6 +1446,82 @@ mod result_paging_tests {
     }
 }
 
+fn configured_runtime_identity(path: Option<PathBuf>) -> RuntimeIdentityView {
+    RuntimeIdentityView {
+        configured_path_source: if path.is_some() {
+            "daemon_configuration".into()
+        } else {
+            "unknown".into()
+        },
+        configured_path: path.map(|path| path.to_string_lossy().into_owned()),
+        // A configured path is not proof that a process ran or which version
+        // answered. No status query starts the runtime to fill this field.
+        observed_version: None,
+        observed_version_source: "unknown".into(),
+    }
+}
+
+pub fn running_component_identity(component: &str, version: &str) -> ComponentIdentityView {
+    running_component_identity_from(
+        component,
+        version,
+        option_env!("ZAS_SOURCE_REVISION"),
+        option_env!("ZAS_SOURCE_DIRTY"),
+        env::current_exe().ok(),
+        SystemTime::now(),
+    )
+}
+
+fn running_component_identity_from(
+    component: &str,
+    version: &str,
+    revision: Option<&str>,
+    dirty: Option<&str>,
+    executable: Option<PathBuf>,
+    captured_at: SystemTime,
+) -> ComponentIdentityView {
+    let source_revision = revision
+        .filter(|value| *value != "unknown" && !value.is_empty())
+        .map(str::to_owned);
+    let source_dirty = match dirty {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
+    };
+    let (path, sha256) = executable.map_or((None, None), |path| {
+        let hash = File::open(&path).ok().and_then(|mut file| {
+            let mut hasher = Sha256::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let read = file.read(&mut buffer).ok()?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Some(format!("{:x}", hasher.finalize()))
+        });
+        (Some(path.to_string_lossy().into_owned()), hash)
+    });
+    ComponentIdentityView {
+        component: component.into(),
+        version: version.into(),
+        source_revision,
+        source_dirty,
+        artifact: ArtifactIdentityView {
+            path,
+            sha256,
+            source: "running_executable".into(),
+            captured_at_ms: captured_at
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+        },
+    }
+}
+
 fn operation_category(tool_name: &str) -> &'static str {
     match tool_name.to_ascii_lowercase().as_str() {
         "read" | "grep" | "glob" => "read",
@@ -1510,5 +1653,77 @@ mod error_classification_tests {
         });
         assert_eq!(rejection.code, RpcErrorCode::Unavailable);
         assert_eq!(rejection.message, "RUNTIME_COMMAND_FAILED");
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn missing_build_and_executable_facts_remain_unknown() {
+        let identity = running_component_identity_from(
+            "daemon",
+            "1.2.3",
+            Some("unknown"),
+            Some("unknown"),
+            None,
+            UNIX_EPOCH + Duration::from_millis(7),
+        );
+        assert_eq!(identity.source_revision, None);
+        assert_eq!(identity.source_dirty, None);
+        assert_eq!(identity.artifact.path, None);
+        assert_eq!(identity.artifact.sha256, None);
+        assert_eq!(identity.artifact.captured_at_ms, 7);
+    }
+
+    #[test]
+    fn artifact_hash_is_bound_to_the_reported_running_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("old-running-daemon");
+        let disk_payload = directory.path().join("new-distributed-daemon");
+        File::create(&executable)
+            .unwrap()
+            .write_all(b"old")
+            .unwrap();
+        File::create(&disk_payload)
+            .unwrap()
+            .write_all(b"new")
+            .unwrap();
+        let identity = running_component_identity_from(
+            "daemon",
+            "1.2.3",
+            Some("abc123"),
+            Some("true"),
+            Some(executable.clone()),
+            UNIX_EPOCH,
+        );
+        assert_eq!(identity.artifact.path.as_deref(), executable.to_str());
+        assert_eq!(
+            identity.artifact.sha256.as_deref(),
+            Some("cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4")
+        );
+        assert_ne!(identity.artifact.path.as_deref(), disk_payload.to_str());
+        assert_eq!(identity.source_revision.as_deref(), Some("abc123"));
+        assert_eq!(identity.source_dirty, Some(true));
+    }
+
+    #[test]
+    fn configured_runtime_is_not_promoted_to_observed_version_or_model() {
+        let runtime = configured_runtime_identity(Some(PathBuf::from("/runtime/zcode")));
+        assert_eq!(runtime.configured_path.as_deref(), Some("/runtime/zcode"));
+        assert_eq!(runtime.configured_path_source, "daemon_configuration");
+        assert_eq!(runtime.observed_version, None);
+        assert_eq!(runtime.observed_version_source, "unknown");
+        let models = ModelIdentityView {
+            configured: Some(ModelIdentityFactView {
+                value: "configured-model".into(),
+                source: "session_create_configuration".into(),
+            }),
+            observed_response: None,
+        };
+        assert!(models.configured.is_some());
+        assert!(models.observed_response.is_none());
     }
 }

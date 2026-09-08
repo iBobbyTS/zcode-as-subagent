@@ -831,7 +831,9 @@ fn classify_passive_tool(value: Option<&serde_json::Value>) -> PassiveToolKind {
 pub struct SessionReady {
     pub session_id: String,
     pub initial_turn_id: Option<String>,
-    pub observed_model: Option<String>,
+    /// Model echoed by session/create configuration. This is not evidence of
+    /// the model that produced a response.
+    pub configured_model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1413,7 +1415,7 @@ impl RuntimeOwner {
         Ok(SessionReady {
             session_id: session_id.to_owned(),
             initial_turn_id: None,
-            observed_model: None,
+            configured_model: None,
         })
     }
 
@@ -1474,8 +1476,8 @@ impl RuntimeOwner {
         // Correlation only: the command-plane session is still registered only
         // after subscribe succeeds. A rejected subscribe must remain diagnosable.
         *self.diagnostic_session_id.lock().unwrap() = Some(session_id.clone());
-        let observed_model = projection.requested_model;
-        validate_requested_model(requested_model, observed_model.as_deref())
+        let configured_model = projection.requested_model;
+        validate_requested_model(requested_model, configured_model.as_deref())
             .map_err(|code| RuntimeCommandError::InvalidSession(code.into()))?;
         let subscribe_params = serde_json::to_value(SubscribeParams {
             session_id: &session_id,
@@ -1493,7 +1495,7 @@ impl RuntimeOwner {
         Ok(SessionReady {
             session_id,
             initial_turn_id,
-            observed_model,
+            configured_model,
         })
     }
 
@@ -3268,6 +3270,12 @@ impl Scheduler {
         Arc::clone(&self.inner.store)
     }
 
+    /// Return only the configured runtime path. Reading this value never
+    /// starts or probes the runtime, so callers must not label it observed.
+    pub fn configured_runtime_source(&self) -> Option<PathBuf> {
+        self.inner.config.runtime_source.clone()
+    }
+
     pub fn enqueue_general(
         &self,
         manifest: &GeneralTaskManifest,
@@ -3578,7 +3586,7 @@ impl Scheduler {
             requested_model_from_prepared_launch(Some(claim.task.prepared_launch_json.as_str()));
         if let Err(code) = validate_requested_model(
             requested_model.as_deref(),
-            session.observed_model.as_deref(),
+            session.configured_model.as_deref(),
         ) {
             let message = "runtime model did not match the prepared request";
             let terminal = runtime.stop(self.inner.config.stop_grace);
@@ -5498,7 +5506,7 @@ sleep 2
                 Ok(SessionReady {
                     session_id: "completed-session".into(),
                     initial_turn_id: None,
-                    observed_model: None,
+                    configured_model: None,
                 })
             }
             fn send_turn(

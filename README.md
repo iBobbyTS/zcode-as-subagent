@@ -47,6 +47,11 @@ as `WORKSPACE_BUSY` with the active id. Terminal results expose stable outcome,
 partial status, task reason code, and bounded result segments; use
 `offset`/`limit` (default and maximum 81920 bytes) for large text.
 
+Business execution failures preserve the bounded text and add a typed
+`structuredContent.error` object. `status.identity` reports the running daemon
+and facade separately from configured runtime and model facts, so a disk
+payload or configured model is not presented as observed execution identity.
+
 `zcode_subagent_observe` is a suspicion-only, read-only snapshot. Call it with
 only `agent_id` when recent behavior may be looping; ordinary progress remains
 on `poll`. It returns at most the top three tool names by lifetime invocation

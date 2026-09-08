@@ -38,6 +38,11 @@ harness does not classify the outcome or decide goal success; that decision is
 left to the executing Agent or human. It exits non-zero only when a transport or
 protocol call fails.
 
+`non-git-based/real_logging_case.py` captures raw MCP envelopes for status, an
+expected business error, and a terminal result query. Expected `isError`
+results remain observed facts instead of becoming harness exceptions. The run
+keeps component hashes and transcripts under `workspace/real-logging-*`.
+
 The runner records observable runtime facts and safety invariants; it does not
 replace the task executor's or human evaluator's judgment of whether a goal was
 achieved. A task that achieves its stated goal may be classified as success or

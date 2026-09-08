@@ -4,7 +4,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { diagnose, diagnosticLogs } from '../../cli/main.mjs';
+import { diagnose, diagnosticLogs, fileArtifact } from '../../cli/main.mjs';
 
 function pathsFor(home) {
   return {
@@ -21,6 +21,43 @@ test('global diagnose is bounded and marks missing logs incomplete', async () =>
   assert.equal(report.logs.complete, false);
   assert.ok(report.logs.incomplete.includes('log_directory_missing'));
   assert.equal(report.agent, undefined);
+  assert.equal(report.facade.running_identity, null);
+  assert.equal(report.facade.running_identity_source, 'not_observed_by_cli');
+});
+
+test('artifact identity hashes only its labeled file and records source and capture time', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-artifact-identity-'));
+  const running = path.join(home, 'running');
+  const packaged = path.join(home, 'packaged');
+  fs.writeFileSync(running, 'old');
+  fs.writeFileSync(packaged, 'new');
+  const identity = fileArtifact(running, 'running_executable', 17);
+  assert.equal(identity.path, running);
+  assert.equal(identity.source, 'running_executable');
+  assert.equal(identity.captured_at_ms, 17);
+  assert.equal(identity.sha256, 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4');
+  assert.notEqual(identity.sha256, fileArtifact(packaged, 'distributed_payload', 18).sha256);
+});
+
+test('diagnose preserves daemon self identity and does not promote packaged facade to running', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-identity-'));
+  const paths = pathsFor(home);
+  const daemonIdentity = {
+    daemon: { component: 'daemon', version: '0.1.0', source_revision: 'old-revision', artifact: { path: '/running/old-daemon', sha256: 'old-hash', source: 'running_executable', captured_at_ms: 10 } },
+    runtime: { configured_path: '/configured/runtime', configured_path_source: 'daemon_configuration', observed_version_source: 'unknown' },
+    models: { configured: { value: 'configured-model', source: 'session_create_configuration' } },
+  };
+  await withDaemon(paths, (request) => {
+    assert.equal(request.method, 'system_status');
+    return { outcome: 'success', result: { status: { protocol_version: 12, identity: daemonIdentity } } };
+  }, async () => {
+    const report = await diagnose(paths, []);
+    assert.deepEqual(report.daemon.status.identity, daemonIdentity);
+    assert.equal(report.daemon.status.identity.models.observed_response, undefined);
+    assert.equal(report.facade.running_identity, null);
+    assert.equal(report.facade.packaged_artifact.source, 'distributed_payload');
+    assert.equal(report.runtime.running_identity, null);
+  });
 });
 
 test('agent diagnose reads only the public poll projection and exports a bounded report', async () => {

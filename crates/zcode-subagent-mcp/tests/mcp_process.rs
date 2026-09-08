@@ -19,6 +19,9 @@ fn discover() -> Vec<Value> {
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
         json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"zcode_subagent_result","arguments":{"agent_id":"missing-agent"}}}),
+        json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"zcode_subagent_result","arguments":{}}}),
+        json!({"jsonrpc":"2.0","id":5,"method":"unknown/protocol-method","params":{}}),
     ];
     {
         let stdin = child.stdin.as_mut().unwrap();
@@ -41,7 +44,7 @@ fn discover() -> Vec<Value> {
 }
 
 #[test]
-fn stdio_catalog_is_exactly_the_generic_nine_tools() {
+fn stdio_catalog_is_exactly_the_generic_ten_tools() {
     let frames = discover();
     let tools = frames.iter().find(|frame| frame["id"] == 2).unwrap()["result"]["tools"]
         .as_array()
@@ -89,4 +92,45 @@ fn stdio_catalog_is_exactly_the_generic_nine_tools() {
         by_name("zcode_subagent_result")["inputSchema"]["properties"]["limit"]["default"],
         80 * 1024
     );
+}
+
+#[test]
+fn stdio_business_failure_is_structured_and_protocol_failure_is_json_rpc_error() {
+    let frames = discover();
+    let business = frames.iter().find(|frame| frame["id"] == 3).unwrap();
+    assert!(business.get("error").is_none(), "{business}");
+    let result = &business["result"];
+    assert_eq!(result["isError"], true);
+    assert_eq!(
+        result["content"][0]["text"],
+        "daemon_unavailable: subagent daemon is unavailable"
+    );
+    assert_eq!(
+        result["structuredContent"]["error"]["code"],
+        "daemon_unavailable"
+    );
+    assert_eq!(
+        result["structuredContent"]["error"]["component"],
+        "daemon_transport"
+    );
+    assert_eq!(result["structuredContent"]["error"]["operation"], "result");
+    assert_eq!(
+        result["structuredContent"]["error"]["agent_id"],
+        "missing-agent"
+    );
+    assert!(result["structuredContent"]["error"]["request_id"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("subagent-mcp-")));
+
+    // rmcp rejects tool argument decoding before the product handler. Keep
+    // that SDK-owned result distinct from our typed execution error.
+    let invalid_arguments = frames.iter().find(|frame| frame["id"] == 4).unwrap();
+    assert_eq!(invalid_arguments["result"]["isError"], true);
+    assert!(invalid_arguments["result"]
+        .get("structuredContent")
+        .is_none());
+
+    let protocol = frames.iter().find(|frame| frame["id"] == 5).unwrap();
+    assert!(protocol.get("result").is_none(), "{protocol}");
+    assert!(protocol["error"]["code"].is_number(), "{protocol}");
 }
