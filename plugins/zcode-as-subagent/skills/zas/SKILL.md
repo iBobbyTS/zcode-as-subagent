@@ -9,10 +9,11 @@ Use this skill as a protocol guide; the MCP server is the source of runtime trut
 
 ## Preflight and planning
 
-Call `zcode_subagent_status` and `zcode_subagent_list` before acting. `list` is
-repository-scoped (use the exact repository path; `workspace` is an alias). Reconcile
-existing task IDs rather than assuming a previous spawn succeeded. A spawn is not
-idempotent: retain its returned `agent_id` and do not retry blindly.
+默认先执行一次目标明确的 `zcode_subagent_spawn`；不要为了例行预检先调用
+`status`/`list`。只有 spawn 返回错误、没有返回可用 `agent_id`、或任务无法推进时，
+才调用 `zcode_subagent_status` 和 repository-scoped `zcode_subagent_list`（使用精确仓库路径；
+`workspace` 是别名）进行诊断，并据此核对既有任务。spawn 不幂等：保留返回的
+`agent_id`，不得盲目重试。
 
 Plans must be explicit, small, and complete. Every plan prompt MUST say: **不得执行
 Bash 命令**. If Bash is needed, edit the plan first, then issue a separately authorized
