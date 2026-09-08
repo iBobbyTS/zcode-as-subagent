@@ -38,29 +38,22 @@ function fileArtifact(target, source, capturedAtMs = Date.now()) {
   return artifact;
 }
 
-function redactDiagnosticText(text) {
-  return text
-    .replace(/(Authorization\s*:\s*(?:Bearer\s+)?)(["']?)[A-Za-z0-9._~+/=-]+\2/giu, '$1$2[REDACTED]$2')
-    .replace(/(Bearer\s+)(["']?)[A-Za-z0-9._~+/=-]+\2/giu, '$1$2[REDACTED]$2')
-    .replace(/((?:["']?)(?:token|secret|password|api[_-]?key|authorization|private[_-]?key)(?:["']?)\s*[=:]\s*)(["']?)([^\s,;"']+)\2/giu, '$1$2[REDACTED]$2')
-    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gu, '[REDACTED_PRIVATE_KEY]');
-}
+function preserveDiagnosticText(text) { return text; }
 
-function redactFailureFields(record) {
-  // Decode known fields before redacting embedded JSON credential values.
+function diagnosticFields(record) {
   return JSON.stringify(Object.fromEntries(
     ['agent_id', 'session_id', 'stage', 'error_code', 'message', 'stderr_tail', 'operation', 'remote_code', 'remote_message', 'cleanup_result']
       .filter((field) => typeof record[field] === 'string' || record[field] === null || (field === 'remote_code' && Number.isSafeInteger(record[field])))
-      .map((field) => [field, typeof record[field] === 'string' ? redactDiagnosticText(record[field]) : record[field]]),
+      .map((field) => [field, record[field]]),
   ));
 }
 
 // Budget the serialized fields, so escaping and UTF-8 cannot invalidate JSON.
 // Metadata has bounded prefixes; stderr receives the remaining budget as a tail.
 function boundedFailureRecord(record) {
-  const redacted = redactFailureFields(record);
-  if (Buffer.byteLength(redacted) <= DIAGNOSTIC_TAIL_BYTES) return { text: redacted, truncated: false };
-  const fields = JSON.parse(redacted);
+  const projected = diagnosticFields(record);
+  if (Buffer.byteLength(projected) <= DIAGNOSTIC_TAIL_BYTES) return { text: projected, truncated: false };
+  const fields = JSON.parse(projected);
   for (const key of Object.keys(fields)) {
     if (key !== 'stderr_tail' && typeof fields[key] === 'string') {
       fields[key] = Array.from(fields[key]).slice(0, key === 'message' ? 512 : 256).join('');
@@ -79,14 +72,14 @@ function boundedFailureRecord(record) {
   return { text: JSON.stringify(fields), truncated: true };
 }
 
-function redactDiagnosticTail(text) {
+function diagnosticTail(text) {
   let incomplete = false;
   const decoded = text.split('\n').map((line) => {
     const match = line.match(/^(\[zcode-agentd\] failure agent=[^:\r\n]+: )(.+)$/u);
     if (match && match[2].startsWith('{')) {
       try {
         const record = JSON.parse(match[2]);
-        if (record && typeof record.agent_id === 'string') return redactDiagnosticText(match[1]) + redactFailureFields(record);
+        if (record && typeof record.agent_id === 'string') return preserveDiagnosticText(match[1]) + diagnosticFields(record);
       } catch {
         incomplete = true;
         return match[1] + '[INCOMPLETE_FAILURE_RECORD]';
@@ -94,7 +87,7 @@ function redactDiagnosticTail(text) {
     }
     return line;
   }).join('\n');
-  return { text: redactDiagnosticText(decoded), incomplete };
+  return { text: preserveDiagnosticText(decoded), incomplete };
 }
 
 function diagnosticLogs(logDirectory) {
@@ -135,9 +128,9 @@ function diagnosticLogs(logDirectory) {
       }
       // Legacy text keeps its original lookbehind; known records are decoded
       // (or marked incomplete) before any display clipping can hide the prefix.
-      const redacted = redactDiagnosticTail(buffer.subarray(decodeStart, read).toString('utf8'));
-      if (redacted.incomplete) incomplete.push(`record_incomplete:${name}`);
-      const encoded = Buffer.from(redacted.text, 'utf8');
+      const projected = diagnosticTail(buffer.subarray(decodeStart, read).toString('utf8'));
+      if (projected.incomplete) incomplete.push(`record_incomplete:${name}`);
+      const encoded = Buffer.from(projected.text, 'utf8');
       let tailStart = Math.max(0, encoded.length - Math.min(take, remaining));
       while (tailStart < encoded.length && (encoded[tailStart] & 0xc0) === 0x80) tailStart += 1;
       const bounded = encoded.subarray(tailStart);
@@ -186,7 +179,7 @@ function agentDiagnosticLogs(logDirectory, agentId) {
         if (structured) {
           report.record = { file: name, ...boundedFailureRecord(structured) };
         } else {
-          const encoded = Buffer.from(redactDiagnosticText(raw));
+          const encoded = Buffer.from(preserveDiagnosticText(raw));
           let start = Math.max(0, encoded.length - DIAGNOSTIC_TAIL_BYTES);
           while (start < encoded.length && (encoded[start] & 0xc0) === 0x80) start += 1;
           report.record = { file: name, text: encoded.subarray(start).toString('utf8'), truncated: start > 0 };

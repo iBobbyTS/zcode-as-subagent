@@ -19,14 +19,13 @@ observation source unavailable and sets the status capability to false. Use
 `poll` and `result` for durable lifecycle facts.
 
 Within one daemon lifetime, observation retains at most 64 KiB of accumulated
-public reasoning source so cross-delta redaction can be applied before the
-200-character projection. When that budget is reached, the tracker evicts old
-source, records a coverage gap with `reasoning_complete=false`, and keeps only
-the bounded redaction context needed to avoid exposing a secret across the
-eviction boundary. Later deltas are processed in a new bounded window: safe
-text can resume updating the latest 200-character tail, while an unsafe or
-unprovable boundary remains redacted until it is safe again. The tracker never
-reconstructs the discarded prefix or stores an unlimited reasoning history.
+public reasoning source so the 200-character projection can be maintained
+without retaining unlimited history. When that budget is reached, the tracker
+evicts old source, records a coverage gap with `reasoning_complete=false`, and
+continues updating the latest 200-character tail. Message content is not
+rewritten here; the two Agent layers own redaction before messages reach this
+middle layer. The tracker never reconstructs the discarded prefix or stores an
+unlimited reasoning history.
 
 ## Data and terminal history
 
@@ -51,7 +50,7 @@ runtime 会被回收，即使 `closed=false`，再次发送也属于冷恢复。
 `-32031 / ZCODE_RUNTIME_MODEL_UNAVAILABLE`。本产品将 runtime 命令失败显示为
 `runtime_command_failed`，消息最终为 `FAILED / SESSION_SEND_FAILED`。
 旧版 facade 曾将此错误误报为 `daemon_unavailable`。发送失败诊断保留
-`operation`、`remote_code` 和有界脱敏的 `remote_message`；后续进程清理状态
+`operation`、`remote_code` 和有界的 `remote_message`（不做消息内容改写）；后续进程清理状态
 另列为 `cleanup_result`，不覆盖最初拒绝原因。
 原任务的结果会保留；旧结果中的 `COMPLETED` 不代表追加消息成功。
 

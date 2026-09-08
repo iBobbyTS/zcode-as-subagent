@@ -259,17 +259,13 @@ impl PassiveActivityTracker {
         let mut state = self.state.lock().unwrap();
         match event {
             RuntimeEvent::Driver(Inbound::Message(WireMessage::Event(event))) => {
-                state.observation.observe_message(
-                    &event.method,
-                    &event.params,
-                    redact_observation_text,
-                );
+                state
+                    .observation
+                    .observe_message(&event.method, &event.params);
             }
             RuntimeEvent::Driver(Inbound::Message(WireMessage::UnknownEvent { method, raw })) => {
                 let params = raw.get("params").unwrap_or(&serde_json::Value::Null);
-                state
-                    .observation
-                    .observe_message(method, params, redact_observation_text);
+                state.observation.observe_message(method, params);
             }
             RuntimeEvent::Driver(Inbound::Malformed(_) | Inbound::OversizedLine { .. }) => {
                 state.observation.observe_loss();
@@ -865,7 +861,7 @@ impl RuntimeCommandError {
             detail["remote_message"] = value
                 .get("message")
                 .and_then(serde_json::Value::as_str)
-                .map(redact_remote_message)
+                .map(|message| bounded_prefix(message, 1024))
                 .into();
         }
         detail.to_string()
@@ -873,50 +869,6 @@ impl RuntimeCommandError {
 }
 
 // Keep only the remote code/message, never error.data or provider configuration.
-// Redact before clipping so a budget boundary cannot expose a credential suffix.
-fn redact_remote_message(message: &str) -> String {
-    bounded_prefix(&redact_sensitive_text(message), 1024)
-}
-
-fn redact_sensitive_text(message: &str) -> String {
-    static PATTERNS: OnceLock<Vec<regex::Regex>> = OnceLock::new();
-    let patterns = PATTERNS.get_or_init(|| [
-        r"(?s)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
-        r#"(?i)["']?(?:token|secret|password|api[_-]?key|private[_-]?key)["']?\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"#,
-        r#"(?i)(?:authorization["']?\s*[:=]\s*["']?(?:bearer\s+)?|bearer\s+["']?)[^\s,;"']+"#,
-        r"(?i)https?://[^\s]+",
-    ].iter().map(|pattern| regex::Regex::new(pattern).unwrap()).collect());
-    let mut redacted = message.to_owned();
-    for pattern in patterns {
-        redacted = pattern.replace_all(&redacted, "[REDACTED]").into_owned();
-    }
-    redacted
-}
-
-// The shared diagnostic redactor deliberately requires a complete PEM block.
-// Observation snapshots are incremental, so suppress an unmatched public PEM
-// block immediately; a later END marker can never undo an earlier disclosure.
-fn redact_observation_text(message: &str) -> String {
-    static PEM_MARKERS: OnceLock<(regex::Regex, regex::Regex)> = OnceLock::new();
-    let (begin, end) = PEM_MARKERS.get_or_init(|| {
-        (
-            regex::Regex::new(r"-----BEGIN [^-]*PRIVATE KEY-----").unwrap(),
-            regex::Regex::new(r"-----END [^-]*PRIVATE KEY-----").unwrap(),
-        )
-    });
-    let mut cursor = 0;
-    while let Some(start) = begin.find_at(message, cursor) {
-        if let Some(finish) = end.find_at(message, start.end()) {
-            cursor = finish.end();
-            continue;
-        }
-        let mut safe = redact_sensitive_text(&message[..start.start()]);
-        safe.push_str("[REDACTED]");
-        return safe;
-    }
-    redact_sensitive_text(message)
-}
-
 impl std::error::Error for RuntimeCommandError {}
 
 impl From<RequestError> for RuntimeCommandError {
@@ -5562,7 +5514,7 @@ sleep 2
             .as_str()
             .unwrap()
             .contains("ZCODE_RUNTIME_MODEL_UNAVAILABLE"));
-        assert!(!record.to_string().contains("secret-value"));
+        assert!(record.to_string().contains("secret-value"));
         assert!(!record.to_string().contains("must-not-record"));
         assert_eq!(result.result.outcome, TaskOutcome::Completed);
         assert_eq!(result.result.final_text, "completed answer");
@@ -5606,7 +5558,7 @@ sleep 2
     }
 
     #[test]
-    fn remote_rejection_is_bounded_redacted_and_separate_from_cleanup() {
+    fn remote_rejection_preserves_bounded_message_and_separates_cleanup() {
         let error = RuntimeCommandError::Remote(serde_json::json!({
             "code": -32031,
             "message": "unavailable Authorization: Bearer abc-secret password=def-secret api_key=\"quoted secret words\" https://user:pass@host/path",
@@ -5627,16 +5579,13 @@ sleep 2
         assert_eq!(value["remote_code"], -32031);
         assert_eq!(value["operation"], "session/send");
         assert_eq!(value["cleanup_result"], "Stopped(Terminated(Signaled(15)))");
-        for secret in [
-            "abc-secret",
-            "def-secret",
-            "user:pass",
-            "do-not-copy",
-            "quoted secret words",
-        ] {
-            assert!(!record.contains(secret));
-        }
-        assert!(redact_remote_message(&"界".repeat(5000)).len() <= 1024);
+        let remote_message = value["remote_message"].as_str().unwrap();
+        assert!(remote_message.contains("abc-secret"));
+        assert!(remote_message.contains("def-secret"));
+        assert!(remote_message.contains("quoted secret words"));
+        assert!(remote_message.contains("user:pass"));
+        assert!(!record.contains("do-not-copy"));
+        assert!(bounded_prefix(&"界".repeat(5000), 1024).len() <= 1024);
     }
 
     #[test]

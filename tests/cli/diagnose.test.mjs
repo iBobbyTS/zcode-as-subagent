@@ -115,48 +115,42 @@ test('diagnostic tail distinguishes successful reading from truncated history', 
   assert.ok(Buffer.byteLength(report.files[0].tail) <= 16 * 1024);
 });
 
-test('diagnostic reads only known files, caps total bytes, and redacts secrets', () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-redact-'));
-  const logs = path.join(home, 'logs');
-  fs.mkdirSync(logs);
-  fs.writeFileSync(path.join(logs, 'daemon.log'), 'token=abc123 password=hunter2 Authorization: Bearer xyz\n' + 'a'.repeat(20 * 1024));
-  fs.writeFileSync(path.join(logs, 'daemon-error.log'), 'api_key=secret\n' + 'b'.repeat(20 * 1024));
-  fs.writeFileSync(path.join(logs, 'unrelated.log'), 'password=must-not-read');
-  fs.writeFileSync(path.join(home, 'outside.log'), 'outside=must-not-read');
-  fs.unlinkSync(path.join(logs, 'daemon-error.log'));
-  fs.symlinkSync(path.join(home, 'outside.log'), path.join(logs, 'daemon-error.log'));
-  const report = diagnosticLogs(logs);
-  assert.equal(report.files.length, 1);
-  assert.equal(report.total_bytes <= 32 * 1024, true);
-  const joined = report.files.map((file) => file.tail).join('\n');
-  assert.doesNotMatch(joined, /abc123|hunter2|xyz|secret/u);
-  assert.equal(joined.includes('must-not-read'), false);
+test('diagnostic reads only known regular files and caps total bytes', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-bounds-'));
+  try {
+    const logs = path.join(home, 'logs');
+    fs.mkdirSync(logs);
+    fs.writeFileSync(path.join(logs, 'daemon.log'), 'a'.repeat(20 * 1024) + '\nKNOWN_DAEMON_MARKER');
+    fs.writeFileSync(path.join(logs, 'daemon-error.log'), 'b'.repeat(20 * 1024) + '\nKNOWN_ERROR_MARKER');
+    fs.writeFileSync(path.join(logs, 'unrelated.log'), 'UNRELATED_MARKER');
+    fs.writeFileSync(path.join(home, 'outside.log'), 'OUTSIDE_MARKER');
+    fs.unlinkSync(path.join(logs, 'daemon-error.log'));
+    fs.symlinkSync(path.join(home, 'outside.log'), path.join(logs, 'daemon-error.log'));
+
+    const report = diagnosticLogs(logs);
+    assert.equal(report.files.length, 1);
+    assert.equal(report.files[0].name, 'daemon.log');
+    assert.ok(report.total_bytes <= 32 * 1024);
+    assert.ok(Buffer.byteLength(report.files[0].tail) <= 16 * 1024);
+    assert.match(report.files[0].tail, /KNOWN_DAEMON_MARKER/u);
+    assert.doesNotMatch(JSON.stringify(report), /UNRELATED_MARKER|OUTSIDE_MARKER/u);
+    assert.ok(report.incomplete.includes('log_unreadable:daemon-error.log:symlink_or_non_file'));
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
-test('diagnostic redacts quoted bearer and JSON secret values', () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-json-secret-'));
-  const logs = path.join(home, 'logs');
-  fs.mkdirSync(logs);
-  fs.writeFileSync(path.join(logs, 'daemon.log'), '{"password":"hunter2","Authorization":"Bearer xyz","api_key":"abc"}\n');
-  const report = diagnosticLogs(logs);
-  assert.doesNotMatch(report.files[0].tail, /hunter2|xyz|abc/u);
-  assert.match(report.files[0].tail, /REDACTED/u);
-});
-
-test('diagnostic preserves legacy multiline redaction and marks partial failure records', () => {
+test('diagnostic marks an unfinished structured failure without publishing a partial record', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-partial-'));
-  const logs = path.join(home, 'logs');
-  fs.mkdirSync(logs);
-  fs.writeFileSync(path.join(logs, 'daemon.log'), 'prefix'.repeat(4000)
-    + '\n-----BEGIN PRIVATE KEY-----\nLEGACY_PRIVATE_VALUE\n-----END PRIVATE KEY-----\n'
-    + '[zcode-agentd] failure agent=Agent-A: {"agent_id":"Agent-A","message":"unfinished');
-  const report = diagnosticLogs(logs);
-  assert.equal(report.files[0].truncated, true);
-  assert.match(report.files[0].tail, /\[REDACTED_PRIVATE_KEY\]/);
-  assert.doesNotMatch(report.files[0].tail, /LEGACY_PRIVATE_VALUE/);
-  assert.ok(report.files[0].tail.endsWith('[INCOMPLETE_FAILURE_RECORD]'));
-  assert.ok(report.incomplete.includes('record_incomplete:daemon.log'));
-  assert.ok(Buffer.byteLength(report.files[0].tail) <= 16 * 1024);
+  try {
+    const logs = path.join(home, 'logs');
+    fs.mkdirSync(logs);
+    fs.writeFileSync(path.join(logs, 'daemon.log'),
+      'prefix'.repeat(4000) + '\n[zcode-agentd] failure agent=Agent-A: {"agent_id":"Agent-A","message":"unfinished');
+    const report = diagnosticLogs(logs);
+    assert.equal(report.files[0].truncated, true);
+    assert.ok(report.files[0].tail.endsWith('[INCOMPLETE_FAILURE_RECORD]'));
+    assert.ok(report.incomplete.includes('record_incomplete:daemon.log'));
+    assert.ok(Buffer.byteLength(report.files[0].tail) <= 16 * 1024);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
 test('diagnostic export write failure is reported without throwing', async () => {
@@ -212,132 +206,48 @@ test('global diagnose queries the configured effective socket without model side
   }
 });
 
-test('recent structured failures are redacted in global and agent diagnostic tails and exports', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-recent-secret-'));
-  const paths = pathsFor(home);
-  fs.mkdirSync(paths.logs);
-  const failure = {
-    agent_id: 'Agent-A', session_id: null, stage: 'bootstrap', error_code: 'SESSION_START_FAILED',
-    message: 'recent-failure ' + JSON.stringify({ api_key: 'RECENT_MESSAGE_SECRET' }),
-    stderr_tail: JSON.stringify({ password: 'RECENT_STDERR_SECRET' }),
-  };
-  fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'),
-    '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify(failure) + '\nlegacy token=LEGACY_SECRET\n');
-  await withDaemon(paths, statusOrTask, async () => {
-    for (const scope of [[], ['--agent', 'Agent-A']]) {
-      const report = await diagnose(paths, [...scope, '--output', path.join(home, scope.length ? 'agent' : 'global')]);
-      const tail = report.logs.files[0].tail;
-      assert.match(tail, /recent-failure/);
-      assert.match(tail, /legacy token=\[REDACTED\]/);
-      assert.doesNotMatch(tail, /RECENT_MESSAGE_SECRET|RECENT_STDERR_SECRET|LEGACY_SECRET/);
-      assert.doesNotMatch(JSON.stringify(report), /RECENT_MESSAGE_SECRET|RECENT_STDERR_SECRET|LEGACY_SECRET/);
-      assert.doesNotMatch(fs.readFileSync(report.output.path, 'utf8'), /RECENT_MESSAGE_SECRET|RECENT_STDERR_SECRET|LEGACY_SECRET/);
-      const decoded = JSON.parse(tail.split('\n')[0].slice('[zcode-agentd] failure agent=Agent-A: '.length));
-      assert.equal(decoded.session_id, null);
-      assert.equal(decoded.error_code, failure.error_code);
-      assert.match(decoded.message, /REDACTED/);
-      assert.match(decoded.stderr_tail, /REDACTED/);
-      assert.ok(Buffer.byteLength(tail) <= 16 * 1024);
-      if (scope.length) assert.equal(report.agent.diagnostics.status, 'found');
-    }
-  });
-});
-
-test('complete producer records larger than the display window are redacted before clipping', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-large-secret-'));
-  const paths = pathsFor(home);
-  fs.mkdirSync(paths.logs);
-  await withDaemon(paths, statusOrTask, async () => {
-    for (const padding of ['x', '\u0001']) {
-      const failure = {
-        agent_id: 'Agent-A', session_id: null, stage: 'bootstrap', error_code: 'SESSION_START_FAILED',
-        message: padding.repeat(3000),
-        stderr_tail: padding.repeat(16000) + JSON.stringify({ api_key: 'LONG_RECORD_SECRET' }),
-      };
-      assert.ok(Buffer.byteLength(failure.message) <= 4096);
-      assert.ok(Buffer.byteLength(failure.stderr_tail) <= 16384);
-      const line = '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify(failure) + '\n';
-      assert.ok(Buffer.byteLength(line) > 16 * 1024 + 256);
-      assert.ok(Buffer.byteLength(line) < 192 * 1024);
-      // Force a nonzero bounded read offset while retaining the complete failure.
-      fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), 'old-log\n'.repeat(40000) + line);
-      for (const scope of [[], ['--agent', 'Agent-A']]) {
-        const report = await diagnose(paths, [...scope, '--output', path.join(home, 'export')]);
-        const tail = report.logs.files[0].tail;
-        assert.equal(report.logs.files[0].truncated, true);
-        assert.ok(Buffer.byteLength(tail) <= 16 * 1024);
-        assert.match(tail, /REDACTED/);
-        assert.doesNotMatch(JSON.stringify(report), /LONG_RECORD_SECRET/);
-        assert.doesNotMatch(fs.readFileSync(report.output.path, 'utf8'), /LONG_RECORD_SECRET/);
-        if (scope.length) assert.equal(report.agent.diagnostics.status, 'found');
-      }
-    }
-  });
-});
-
-test('unfinished structured failure records never fall back to escaped raw secrets', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-partial-secret-'));
-  const paths = pathsFor(home);
-  fs.mkdirSync(paths.logs);
-  const record = { agent_id: 'Agent-A', message: 'x'.repeat(3000), stderr_tail: 'x'.repeat(16000) + JSON.stringify({ api_key: 'PARTIAL_RECORD_SECRET' }) };
-  // A possible intermediate append: the embedded credential is written, but
-  // the outer JSON closing quote/brace and terminating newline are not yet.
-  fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify(record).slice(0, -2));
-  await withDaemon(paths, statusOrTask, async () => {
-    for (const scope of [[], ['--agent', 'Agent-A']]) {
-      const report = await diagnose(paths, [...scope, '--output', path.join(home, 'export')]);
-      assert.equal(report.logs.complete, false);
-      assert.ok(report.logs.incomplete.includes('record_incomplete:daemon-error.log'));
-      assert.match(report.logs.files[0].tail, /INCOMPLETE_FAILURE_RECORD/);
-      assert.doesNotMatch(JSON.stringify(report), /PARTIAL_RECORD_SECRET/);
-      assert.doesNotMatch(fs.readFileSync(report.output.path, 'utf8'), /PARTIAL_RECORD_SECRET/);
-      if (scope.length) assert.equal(report.agent.diagnostics.status, 'target_record_missing');
-    }
-  });
-});
-
 test('Agent A diagnostics survive Agent B displacing global tails and finite rotation', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-target-'));
-  const paths = pathsFor(home);
-  fs.mkdirSync(paths.logs);
-  const target = '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify({
-    agent_id: 'Agent-A', session_id: null, stage: 'bootstrap', error_code: 'SESSION_START_FAILED',
-    message: 'A-owned-failure token=private-token ' + JSON.stringify({ password: 'NESTED_MESSAGE_SECRET' }),
-    stderr_tail: JSON.stringify({ token: 'NESTED_STDERR_TOKEN', api_key: 'NESTED_STDERR_KEY' }),
-  }) + '\n';
-  const noise = '[zcode-agentd] failure agent=Agent-B: B-owned-failure\n'.repeat(1000);
-  fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), target + noise);
-  await withDaemon(paths, statusOrTask, async () => {
-    for (const rotated of [false, true]) {
-      if (rotated) {
-        fs.renameSync(path.join(paths.logs, 'daemon-error.log'), path.join(paths.logs, 'daemon-error.log.1'));
-        fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), noise);
+  try {
+    const paths = pathsFor(home);
+    fs.mkdirSync(paths.logs);
+    const target = '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify({
+      agent_id: 'Agent-A', session_id: null, stage: 'bootstrap', error_code: 'SESSION_START_FAILED',
+      message: 'A-owned-failure', stderr_tail: 'A-owned-stderr',
+    }) + '\n';
+    const noise = '[zcode-agentd] failure agent=Agent-B: B-owned-failure\n'.repeat(1000);
+    fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), target + noise);
+    await withDaemon(paths, statusOrTask, async () => {
+      for (const rotated of [false, true]) {
+        if (rotated) {
+          fs.renameSync(path.join(paths.logs, 'daemon-error.log'), path.join(paths.logs, 'daemon-error.log.1'));
+          fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), noise);
+        }
+        const report = await diagnose(paths, ['--agent', 'Agent-A', '--output', path.join(home, 'export')]);
+        assert.doesNotMatch(report.logs.files.map((file) => file.tail).join(''), /A-owned-failure/u);
+        assert.equal(report.agent.task.reason_code, 'RUNTIME_START_FAILED');
+        assert.equal(report.agent.diagnostics.status, 'found');
+        assert.equal(report.agent.diagnostics.record.file, rotated ? 'daemon-error.log.1' : 'daemon-error.log');
+        const decoded = JSON.parse(report.agent.diagnostics.record.text);
+        assert.equal(decoded.agent_id, 'Agent-A');
+        assert.equal(decoded.error_code, 'SESSION_START_FAILED');
+        assert.equal(decoded.message, 'A-owned-failure');
+        assert.equal(decoded.stderr_tail, 'A-owned-stderr');
+        assert.doesNotMatch(report.agent.diagnostics.record.text, /B-owned-failure/u);
+        assert.ok(report.agent.diagnostics.scanned_bytes <= 3 * 1024 * 1024);
       }
-      const report = await diagnose(paths, ['--agent', 'Agent-A', '--output', path.join(home, 'export')]);
-      assert.doesNotMatch(report.logs.files.map((file) => file.tail).join(''), /A-owned-failure/);
-      assert.equal(report.agent.task.reason_code, 'RUNTIME_START_FAILED');
-      assert.equal(report.agent.diagnostics.status, 'found');
-      assert.match(report.agent.diagnostics.record.text, /A-owned-failure/);
-      assert.doesNotMatch(report.agent.diagnostics.record.text, /B-owned-failure|private-token|NESTED_MESSAGE_SECRET|NESTED_STDERR_TOKEN|NESTED_STDERR_KEY/);
-      assert.doesNotMatch(fs.readFileSync(report.output.path, 'utf8'), /private-token|NESTED_MESSAGE_SECRET|NESTED_STDERR_TOKEN|NESTED_STDERR_KEY/);
-      const decoded = JSON.parse(report.agent.diagnostics.record.text);
-      assert.equal(decoded.agent_id, 'Agent-A');
-      assert.equal(decoded.session_id, null);
-      assert.equal(decoded.error_code, 'SESSION_START_FAILED');
-      assert.match(decoded.stderr_tail, /REDACTED/);
-      assert.equal(report.agent.diagnostics.record.file, rotated ? 'daemon-error.log.1' : 'daemon-error.log');
-      assert.ok(report.agent.diagnostics.scanned_bytes <= 3 * 1024 * 1024);
-    }
-    fs.writeFileSync(path.join(paths.logs, 'daemon-error.log.1'), noise);
-    let report = await diagnose(paths, ['--agent', 'Agent-A']);
-    assert.equal(report.agent.diagnostics.status, 'target_record_missing');
-    assert.equal(report.agent.diagnostics.scan_complete, true);
-    fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), target + noise.repeat(30));
-    report = await diagnose(paths, ['--agent', 'Agent-A']);
-    assert.equal(report.agent.diagnostics.status, 'target_record_missing');
-    assert.equal(report.agent.diagnostics.scan_complete, false);
-    assert.ok(report.agent.diagnostics.incomplete.includes('scan_truncated:daemon-error.log'));
-  });
+
+      fs.writeFileSync(path.join(paths.logs, 'daemon-error.log.1'), noise);
+      let report = await diagnose(paths, ['--agent', 'Agent-A']);
+      assert.equal(report.agent.diagnostics.status, 'target_record_missing');
+      assert.equal(report.agent.diagnostics.scan_complete, true);
+      fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), target + noise.repeat(30));
+      report = await diagnose(paths, ['--agent', 'Agent-A']);
+      assert.equal(report.agent.diagnostics.status, 'target_record_missing');
+      assert.equal(report.agent.diagnostics.scan_complete, false);
+      assert.ok(report.agent.diagnostics.incomplete.includes('scan_truncated:daemon-error.log'));
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
 test('missing agent and unreachable daemon have distinct diagnostic states', async () => {
@@ -395,7 +305,7 @@ for (const tail of ['x'.repeat(16384 - 18) + 'FINAL_ERROR_MARKER', '界\n"'.repe
     assert.equal(decoded.remote_code, -32031);
     assert.equal(decoded.operation, 'session/send');
     assert.equal(decoded.cleanup_result, 'Signaled(15)');
-    assert.ok(!found.text.includes('hide-this'));
+    assert.ok(found.text.includes('hide-this'));
     assert.ok(decoded.stderr_tail.endsWith('FINAL_ERROR_MARKER'));
     assert.ok(fs.readFileSync(report.output.path, 'utf8').includes('FINAL_ERROR_MARKER'));
   } finally { fs.rmSync(home, { recursive: true, force: true }); }

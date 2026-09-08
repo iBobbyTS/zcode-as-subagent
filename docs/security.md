@@ -7,10 +7,19 @@ private Unix RPC, and returns only approved fields. Do not expose the private
 socket to untrusted local users; keep its directory and the SQLite database
 outside target repositories with owner-only permissions.
 
-The generic facade never publishes prompts or private workspace contents.
-paths, raw pending payloads, private correlation/runtime/process identities,
-environment, credentials, or reasoning. Event payloads are reduced to stable
-activity categories and counters. Permission responses are
+The generic facade does not add separate projections for prompts, raw pending
+payloads, private correlation/runtime/process identities, or the environment.
+It may publish the bounded public reasoning tail and other allowlisted message
+projections defined by the observation protocol. Those message values can
+themselves contain workspace content, paths, commands, or other text supplied
+by an Agent; the facade does not inspect or rewrite that content.
+
+Message content is not redacted by this middle layer. Both Agent endpoints are
+responsible for redacting content before they send it. The daemon and facade
+only enforce bounded projections and protocol-level exclusions such as
+`encrypted_content`; diagnostic reports likewise preserve message values within
+their existing byte budgets. Event payloads outside those public projections
+are reduced to stable activity categories and counters. Permission responses are
 accepted only for typed daemon-published pending requests, and local policy may
 override an external allow to deny.
 
