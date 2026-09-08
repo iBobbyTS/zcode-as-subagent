@@ -1763,7 +1763,7 @@ mod contract_default_tests {
             ),
             (
                 "zcode_subagent_send",
-                serde_json::json!({"disposition":"queued"}),
+                serde_json::json!({"message_id":"message-1","disposition":"queued"}),
             ),
             (
                 "zcode_subagent_respond",
