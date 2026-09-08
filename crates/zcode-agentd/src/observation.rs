@@ -21,6 +21,7 @@ const MAX_TOOL_TYPES: usize = 64;
 const MAX_RECENT_CALLS: usize = 5;
 const MAX_REASONING_CHARS: usize = 200;
 const MAX_REASONING_REDACTION_BYTES: usize = 64 * 1024;
+const MAX_PEM_TERMINATOR_OVERLAP_BYTES: usize = 128;
 const MAX_ID_BYTES: usize = 512;
 const MAX_ARGUMENT_BYTES: usize = 4 * 1024;
 // The serialized argument JSON is embedded as one JSON string. Quotes and
@@ -116,7 +117,7 @@ struct ToolGroup {
 #[derive(Clone, Copy)]
 enum ReasoningQuarantine {
     QuotedAssignment { quote: u8 },
-    UnquotedToken,
+    UnquotedToken { saw_value: bool },
     Url,
     PrivateKey,
 }
@@ -203,59 +204,69 @@ impl ObservationState {
     }
 
     fn observe_reasoning(&mut self, delta: &str, redact_text: fn(&str) -> String) {
-        self.reasoning_raw.push_str(delta);
-
-        if let Some(quarantine) = self.reasoning_quarantine {
-            let terminator = match quarantine {
-                ReasoningQuarantine::QuotedAssignment { quote } => self
-                    .reasoning_raw
-                    .as_bytes()
-                    .iter()
-                    .position(|byte| *byte == quote)
-                    .map(|offset| offset + 1),
-                ReasoningQuarantine::UnquotedToken => {
-                    unquoted_token_terminator(&self.reasoning_raw)
-                }
-                ReasoningQuarantine::Url => url_quarantine_terminator(&self.reasoning_raw),
-                ReasoningQuarantine::PrivateKey => private_key_end()
-                    .find(&self.reasoning_raw)
-                    .map(|found| found.end()),
-            };
-            let Some(terminator) = terminator else {
-                // The raw continuation cannot be classified safely without
-                // its missing terminator. It never becomes public; retain
-                // only the quarantine kind for the next delta.
+        let mut remaining = delta;
+        loop {
+            if let Some(quarantine) = self.reasoning_quarantine {
+                let terminator = match quarantine {
+                    ReasoningQuarantine::QuotedAssignment { quote } => remaining
+                        .as_bytes()
+                        .iter()
+                        .position(|byte| *byte == quote)
+                        .map(|offset| offset + 1),
+                    ReasoningQuarantine::UnquotedToken { saw_value } => {
+                        let (terminator, saw_value) =
+                            unquoted_token_terminator(remaining, saw_value);
+                        if terminator.is_none() {
+                            self.reasoning_quarantine =
+                                Some(ReasoningQuarantine::UnquotedToken { saw_value });
+                        }
+                        terminator
+                    }
+                    ReasoningQuarantine::Url => url_quarantine_terminator(remaining),
+                    ReasoningQuarantine::PrivateKey => {
+                        private_key_terminator(&self.reasoning_raw, remaining)
+                    }
+                };
+                let Some(terminator) = terminator else {
+                    if matches!(quarantine, ReasoningQuarantine::PrivateKey) {
+                        self.replace_reasoning_raw(&reasoning_byte_tail(
+                            remaining,
+                            MAX_PEM_TERMINATOR_OVERLAP_BYTES,
+                        ));
+                    } else {
+                        self.replace_reasoning_raw("");
+                    }
+                    return;
+                };
                 self.replace_reasoning_raw("");
+                self.reasoning_quarantine = None;
+                remaining = &remaining[terminator..];
+                continue;
+            }
+            if self.reasoning_raw.len() == MAX_REASONING_REDACTION_BYTES {
+                self.rollover_reasoning_raw();
+                continue;
+            }
+            if remaining.is_empty() {
+                self.process_reasoning_raw(redact_text);
                 return;
-            };
-            let suffix = self.reasoning_raw.split_off(terminator);
-            self.replace_reasoning_raw("");
-            self.reasoning_raw.push_str(&suffix);
-            self.reasoning_quarantine = None;
+            }
+            let available = MAX_REASONING_REDACTION_BYTES - self.reasoning_raw.len();
+            let consumed = bounded_prefix_len(remaining, available);
+            if consumed == 0 {
+                self.rollover_reasoning_raw();
+                continue;
+            }
+            self.ensure_reasoning_raw_capacity();
+            self.reasoning_raw.push_str(&remaining[..consumed]);
+            remaining = &remaining[consumed..];
+            self.process_reasoning_raw(redact_text);
         }
+    }
 
+    fn process_reasoning_raw(&mut self, redact_text: fn(&str) -> String) {
         let redacted = redact_text(&self.reasoning_raw);
         self.update_reasoning_text(&redacted);
-
-        if self.reasoning_raw.len() <= MAX_REASONING_REDACTION_BYTES {
-            if self.reasoning_raw.capacity() > MAX_REASONING_REDACTION_BYTES {
-                let raw = std::mem::take(&mut self.reasoning_raw);
-                self.replace_reasoning_raw(&raw);
-            }
-            return;
-        }
-
-        self.reasoning_truncated = true;
-        self.reasoning_complete = false;
-        self.dropped_events = self.dropped_events.saturating_add(1);
-
-        // The complete current window was redacted above, so its public tail
-        // is safe. Retain no original bytes across an eviction. Only a value
-        // still open at this event boundary needs quarantine for the next
-        // delta; a fully terminated value starts the next delta cleanly.
-        self.reasoning_public_base = Some(self.reasoning_text.clone());
-        self.reasoning_quarantine = trailing_quarantine(&self.reasoning_raw);
-        self.replace_reasoning_raw("");
     }
 
     fn update_reasoning_text(&mut self, redacted: &str) {
@@ -273,6 +284,29 @@ impl ObservationState {
         let mut bounded = String::with_capacity(MAX_REASONING_REDACTION_BYTES);
         bounded.push_str(value);
         self.reasoning_raw = bounded;
+    }
+
+    fn ensure_reasoning_raw_capacity(&mut self) {
+        if self.reasoning_raw.capacity() != MAX_REASONING_REDACTION_BYTES {
+            let raw = std::mem::take(&mut self.reasoning_raw);
+            self.replace_reasoning_raw(&raw);
+        }
+    }
+
+    fn rollover_reasoning_raw(&mut self) {
+        debug_assert!(self.reasoning_raw.len() <= MAX_REASONING_REDACTION_BYTES);
+        self.reasoning_truncated = true;
+        self.reasoning_complete = false;
+        self.dropped_events = self.dropped_events.saturating_add(1);
+        self.reasoning_public_base = Some(self.reasoning_text.clone());
+        self.reasoning_quarantine = trailing_quarantine(&self.reasoning_raw);
+        match self.reasoning_quarantine {
+            Some(ReasoningQuarantine::PrivateKey) => self.replace_reasoning_raw(
+                &reasoning_byte_tail(&self.reasoning_raw, MAX_PEM_TERMINATOR_OVERLAP_BYTES),
+            ),
+            Some(_) => self.replace_reasoning_raw(""),
+            None => self.replace_reasoning_raw(&trailing_sensitive_prefix(&self.reasoning_raw)),
+        }
     }
 
     fn observe_tool(&mut self, params: &Value, payload: &Value, redact_text: fn(&str) -> String) {
@@ -395,12 +429,35 @@ fn unquoted_token_separator(byte: u8) -> bool {
     byte.is_ascii_whitespace() || matches!(byte, b',' | b';')
 }
 
-fn unquoted_token_terminator(value: &str) -> Option<usize> {
-    value
-        .as_bytes()
-        .iter()
-        .position(|byte| unquoted_token_separator(*byte))
-        .map(|offset| offset + 1)
+fn bounded_prefix_len(value: &str, max_bytes: usize) -> usize {
+    let mut end = value.len().min(max_bytes);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+fn unquoted_token_terminator(value: &str, mut saw_value: bool) -> (Option<usize>, bool) {
+    let bytes = value.as_bytes();
+    let start = if saw_value {
+        0
+    } else {
+        let Some(start) = bytes
+            .iter()
+            .position(|byte| !unquoted_token_separator(*byte))
+        else {
+            return (None, false);
+        };
+        saw_value = true;
+        start
+    };
+    (
+        bytes[start..]
+            .iter()
+            .position(|byte| unquoted_token_separator(*byte))
+            .map(|offset| start + offset + 1),
+        saw_value,
+    )
 }
 
 fn url_quarantine_terminator(value: &str) -> Option<usize> {
@@ -409,6 +466,19 @@ fn url_quarantine_terminator(value: &str) -> Option<usize> {
         .iter()
         .position(|byte| byte.is_ascii_whitespace())
         .map(|offset| offset + 1)
+}
+
+fn private_key_terminator(overlap: &str, delta: &str) -> Option<usize> {
+    let prefix_len = bounded_prefix_len(delta, MAX_PEM_TERMINATOR_OVERLAP_BYTES);
+    let mut joined = String::with_capacity(overlap.len() + prefix_len);
+    joined.push_str(overlap);
+    joined.push_str(&delta[..prefix_len]);
+    if let Some(found) = private_key_end().find(&joined) {
+        if found.end() > overlap.len() {
+            return Some(found.end() - overlap.len());
+        }
+    }
+    private_key_end().find(delta).map(|found| found.end())
 }
 
 fn trailing_quarantine(value: &str) -> Option<ReasoningQuarantine> {
@@ -420,8 +490,8 @@ fn trailing_quarantine(value: &str) -> Option<ReasoningQuarantine> {
         Some(ReasoningQuarantine::QuotedAssignment { quote: b'\'' })
     } else if url_is_open(value) {
         Some(ReasoningQuarantine::Url)
-    } else if unquoted_token_is_open(value) {
-        Some(ReasoningQuarantine::UnquotedToken)
+    } else if let Some(saw_value) = unquoted_token_is_open(value) {
+        Some(ReasoningQuarantine::UnquotedToken { saw_value })
     } else {
         None
     }
@@ -465,16 +535,67 @@ fn reasoning_tail(value: &str) -> String {
         .collect()
 }
 
-fn unquoted_token_is_open(value: &str) -> bool {
+fn unquoted_token_is_open(value: &str) -> Option<bool> {
+    static PREFIX: OnceLock<regex::Regex> = OnceLock::new();
     static TOKEN: OnceLock<regex::Regex> = OnceLock::new();
-    TOKEN
+    if PREFIX
         .get_or_init(|| {
             regex::Regex::new(
-                r#"(?i)(?:["']?(?:token|secret|password|api[_-]?key|private[_-]?key)["']?\s*[:=]\s*|authorization["']?\s*[:=]\s*["']?(?:bearer\s+)?|bearer\s+)[^\s,;]*$"#,
+                r#"(?i)(?:["']?(?:token|secret|password|api[_-]?key|private[_-]?key)["']?\s*[:=]\s*|authorization["']?\s*[:=]\s*["']?(?:bearer\s+)?|bearer\s+)$"#,
             )
             .unwrap()
         })
         .is_match(value)
+    {
+        return Some(false);
+    }
+    TOKEN
+        .get_or_init(|| {
+            regex::Regex::new(
+                r#"(?i)(?:["']?(?:token|secret|password|api[_-]?key|private[_-]?key)["']?\s*[:=]\s*|authorization["']?\s*[:=]\s*["']?(?:bearer\s+)?|bearer\s+)(?P<value>[^\s,;]*)$"#,
+            )
+            .unwrap()
+        })
+        .captures(value)
+        .and_then(|captures| captures.name("value"))
+        .map(|value| !value.as_str().is_empty())
+}
+
+fn trailing_sensitive_prefix(value: &str) -> String {
+    const CANDIDATES: &[&str] = &[
+        "token",
+        "secret",
+        "password",
+        "api_key",
+        "api-key",
+        "private_key",
+        "private-key",
+        "authorization",
+        "bearer",
+        "http://",
+        "https://",
+    ];
+    let lower = value.to_ascii_lowercase();
+    let (_, suffix) = CANDIDATES
+        .iter()
+        .filter_map(|candidate| {
+            let max = candidate.len();
+            (1..=max)
+                .rev()
+                .find(|length| lower.ends_with(&candidate[..*length]))
+                .map(|length| (length, &value[value.len() - length..]))
+        })
+        .max_by_key(|(length, _)| *length)
+        .unwrap_or((0, ""));
+    suffix.to_owned()
+}
+
+fn reasoning_byte_tail(value: &str, max_bytes: usize) -> String {
+    let mut start = value.len().saturating_sub(max_bytes);
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+    value[start..].to_owned()
 }
 
 fn private_key_markers() -> &'static (regex::Regex, regex::Regex) {
@@ -1132,6 +1253,144 @@ mod tests {
             .reasoning
             .text
             .ends_with("safe-after-recovered-suffix"));
+    }
+
+    #[test]
+    fn overflow_keeps_a_partial_api_key_prefix_for_the_next_delta() {
+        let mut state = ObservationState::default();
+        let chunks = [
+            format!("{}api_", "x".repeat(MAX_REASONING_REDACTION_BYTES)),
+            "key=PARTIAL_PREFIX_SECRET".to_owned(),
+            " safe-after-partial-prefix".to_owned(),
+        ];
+
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            state.observe_message(
+                "session/event",
+                &event(
+                    &index.to_string(),
+                    "reasoning_delta",
+                    serde_json::json!({"delta":chunk}),
+                ),
+                production_redact,
+            );
+            let snapshot = state.snapshot();
+            assert!(
+                !snapshot.reasoning.text.contains("PARTIAL_PREFIX_SECRET"),
+                "snapshot {index} leaked a value after api_ overlap: {}",
+                snapshot.reasoning.text
+            );
+            assert!(state.reasoning_raw.len() <= MAX_REASONING_REDACTION_BYTES);
+            assert!(state.reasoning_raw.capacity() <= MAX_REASONING_REDACTION_BYTES);
+        }
+        assert!(state
+            .snapshot()
+            .reasoning
+            .text
+            .ends_with("safe-after-partial-prefix"));
+    }
+
+    #[test]
+    fn unquoted_token_waits_for_a_value_after_leading_whitespace() {
+        let mut state = ObservationState::default();
+        let chunks = [
+            format!(
+                "{} api_key=",
+                "x".repeat(MAX_REASONING_REDACTION_BYTES - " api_key=".len())
+            ),
+            "   LEADING_WHITESPACE_SECRET".to_owned(),
+            " safe-after-leading-whitespace".to_owned(),
+        ];
+
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            state.observe_message(
+                "session/event",
+                &event(
+                    &index.to_string(),
+                    "reasoning_delta",
+                    serde_json::json!({"delta":chunk}),
+                ),
+                production_redact,
+            );
+            let snapshot = state.snapshot();
+            assert!(
+                !snapshot
+                    .reasoning
+                    .text
+                    .contains("LEADING_WHITESPACE_SECRET"),
+                "snapshot {index} leaked a whitespace-prefixed value: {}",
+                snapshot.reasoning.text
+            );
+            assert!(state.reasoning_raw.len() <= MAX_REASONING_REDACTION_BYTES);
+            assert!(state.reasoning_raw.capacity() <= MAX_REASONING_REDACTION_BYTES);
+        }
+        assert!(state
+            .snapshot()
+            .reasoning
+            .text
+            .ends_with("safe-after-leading-whitespace"));
+    }
+
+    #[test]
+    fn private_key_end_marker_can_span_two_deltas_after_an_eviction() {
+        let mut state = ObservationState::default();
+        let body =
+            "SPLIT_PEM_SECRET".repeat(MAX_REASONING_REDACTION_BYTES / "SPLIT_PEM_SECRET".len() + 1);
+        let chunks = [
+            format!("-----BEGIN PRIVATE KEY-----\n{body}"),
+            "\n-----END PRIVATE".to_owned(),
+            " KEY----- safe-after-split-pem-end".to_owned(),
+        ];
+
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            state.observe_message(
+                "session/event",
+                &event(
+                    &index.to_string(),
+                    "reasoning_delta",
+                    serde_json::json!({"delta":chunk}),
+                ),
+                production_redact,
+            );
+            let snapshot = state.snapshot();
+            assert!(
+                !snapshot.reasoning.text.contains("SPLIT_PEM_SECRET"),
+                "snapshot {index} leaked PEM content: {}",
+                snapshot.reasoning.text
+            );
+            assert!(state.reasoning_raw.len() <= MAX_REASONING_REDACTION_BYTES);
+            assert!(state.reasoning_raw.capacity() <= MAX_REASONING_REDACTION_BYTES);
+        }
+        assert!(state
+            .snapshot()
+            .reasoning
+            .text
+            .ends_with("safe-after-split-pem-end"));
+    }
+
+    #[test]
+    fn oversized_append_never_places_more_than_the_bound_in_observation_state() {
+        let mut state = ObservationState::default();
+        state.observe_message(
+            "session/event",
+            &event(
+                "1",
+                "reasoning_delta",
+                serde_json::json!({"delta":"seed".repeat(16 * 1024)}),
+            ),
+            production_redact,
+        );
+        state.observe_message(
+            "session/event",
+            &event(
+                "2",
+                "reasoning_delta",
+                serde_json::json!({"delta":"oversized".repeat(MAX_REASONING_REDACTION_BYTES)}),
+            ),
+            production_redact,
+        );
+        assert!(state.reasoning_raw.len() <= MAX_REASONING_REDACTION_BYTES);
+        assert!(state.reasoning_raw.capacity() <= MAX_REASONING_REDACTION_BYTES);
     }
 
     #[test]
