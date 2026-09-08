@@ -73,11 +73,13 @@ function stagePlugin(source, staging, paths) {
 }
 
 function updateMarketplace(file, staging) {
-  const root = path.dirname(file);
+  const root = path.basename(path.dirname(file)) === 'plugins' && path.basename(path.dirname(path.dirname(file))) === '.agents'
+    ? path.dirname(path.dirname(path.dirname(file))) : path.dirname(file);
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   let doc = { name: 'personal', interface: { displayName: 'Personal' }, plugins: [] };
   if (fs.existsSync(file)) doc = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (!Array.isArray(doc.plugins)) doc.plugins = [];
+  if (!Array.isArray(doc.plugins)) throw new CliError('PLUGIN_MARKETPLACE_CONFLICT', 'marketplace file is not a source marketplace manifest');
   const rel = `./${path.relative(root, staging)}`;
   const entry = { name: PLUGIN_NAME, source: { source: 'local', path: rel }, policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' }, category: 'Productivity' };
   const index = doc.plugins.findIndex((p) => p.name === PLUGIN_NAME);
@@ -97,8 +99,21 @@ function updateMarketplace(file, staging) {
 export function installPlugin(paths = productPaths(), options = {}) {
   const source = options.source || pluginSourceRoot();
   const home = options.home || paths.home;
-  const staging = options.stagingPath || path.join(home, 'plugins', PLUGIN_NAME);
-  const marketplace = options.marketplacePath || path.join(home, '.agents', 'plugins', 'marketplace.json');
+  let staging = options.stagingPath || path.join(home, 'plugins', PLUGIN_NAME);
+  let marketplace = options.marketplacePath || path.join(home, '.agents', 'plugins', 'marketplace.json');
+  // The default ~/.agents file can be an installed-registry projection, not a source.
+  // Never overwrite it; use a private local marketplace root in that case.
+  if (!options.marketplacePath && fs.existsSync(marketplace)) {
+    try { if (!Array.isArray(JSON.parse(fs.readFileSync(marketplace, 'utf8')).plugins)) {
+      const root = path.join(home, '.zcode-as-subagent-marketplace');
+      staging = path.join(root, 'plugins', PLUGIN_NAME);
+      marketplace = path.join(root, '.agents', 'plugins', 'marketplace.json');
+    } } catch {
+      const root = path.join(home, '.zcode-as-subagent-marketplace');
+      staging = path.join(root, 'plugins', PLUGIN_NAME);
+      marketplace = path.join(root, '.agents', 'plugins', 'marketplace.json');
+    }
+  }
   const codexHome = options.codexHome || process.env.CODEX_HOME || path.join(home, '.codex');
   const env = { CODEX_HOME: codexHome };
   const probe = runCodex(['plugin', 'add', '--help'], { codexCli: options.codexCli, env });
@@ -119,7 +134,9 @@ export function installPlugin(paths = productPaths(), options = {}) {
   // Explicitly configured marketplaces must be registered; the personal default is implicit.
   let add;
   try {
-    if (options.registerMarketplace) runCodex(['plugin', 'marketplace', 'add', path.dirname(marketplace), '--json'], { codexCli: options.codexCli, env });
+    const marketplaceRoot = path.basename(path.dirname(marketplace)) === 'plugins' && path.basename(path.dirname(path.dirname(marketplace))) === '.agents'
+      ? path.dirname(path.dirname(path.dirname(marketplace))) : path.dirname(marketplace);
+    if (options.registerMarketplace !== false) runCodex(['plugin', 'marketplace', 'add', marketplaceRoot, '--json'], { codexCli: options.codexCli, env });
     add = runCodex(['plugin', 'add', PLUGIN_NAME, '--marketplace', market.marketplace_name, '--json'], { codexCli: options.codexCli, env });
   } catch (error) {
     if (priorMarketplace === null) fs.rmSync(marketplace, { force: true }); else fs.writeFileSync(marketplace, priorMarketplace, { mode: 0o600 });
