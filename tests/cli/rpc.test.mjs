@@ -20,11 +20,11 @@ test('CLI sends daemon RPC and preserves success result', async () => {
       body += chunk;
       if (!body.includes('\n')) return;
       const request = JSON.parse(body);
-      assert.equal(request.version, 12);
+      assert.equal(request.version, 13);
       assert.equal(request.method, 'task_poll');
       assert.equal(request.params.agent_id, 'agent-1');
       socket.end(JSON.stringify({
-        version: 12,
+        version: 13,
         request_id: request.request_id,
         outcome: 'success',
         result: {
@@ -59,7 +59,7 @@ test('CLI sends daemon RPC and preserves success result', async () => {
 
 test('CLI preserves daemon error code, message, and active agent id', async () => {
   const socketPath = path.join(os.tmpdir(), `zcode-cli-rpc-error-${process.pid}-${Date.now()}.sock`);
-  const server = net.createServer((socket) => { socket.once('data', (chunk) => { const request = JSON.parse(chunk); socket.end(JSON.stringify({ version: 12, request_id: request.request_id, outcome: 'error', error: { code: 'not_found', message: 'task was not found', active_agent_id: 'agent-2' } }) + '\n'); }); });
+  const server = net.createServer((socket) => { socket.once('data', (chunk) => { const request = JSON.parse(chunk); socket.end(JSON.stringify({ version: 13, request_id: request.request_id, outcome: 'error', error: { code: 'not_found', message: 'task was not found', active_agent_id: 'agent-2' } }) + '\n'); }); });
   await new Promise((resolve) => server.listen(socketPath, resolve));
   try { await assert.rejects(() => callDaemon(socketPath, 'result', { agent_id: 'agent-2' }), (error) => error instanceof CliError && error.code === 'not_found' && error.agentId === 'agent-2'); }
   finally { await new Promise((resolve) => server.close(resolve)); }
@@ -68,7 +68,7 @@ test('CLI preserves daemon error code, message, and active agent id', async () =
 test('CLI rejects daemon responses with wrong RPC version or request id', async () => {
   for (const response of [
     { version: 11, request_id: 'ignored', outcome: 'success', result: {} },
-    { version: 12, request_id: 'other-request', outcome: 'success', result: {} },
+    { version: 13, request_id: 'other-request', outcome: 'success', result: {} },
   ]) {
     const socketPath = path.join(os.tmpdir(), `zcode-cli-rpc-protocol-${process.pid}-${Date.now()}-${response.version}.sock`);
     const server = net.createServer((socket) => { socket.once('data', () => socket.end(JSON.stringify(response) + '\n')); });
@@ -84,7 +84,7 @@ test('CLI rejects list without repository or workspace scope before connecting',
 
 test('CLI maps workspace list scope to daemon repository scope', async () => {
   const socketPath = path.join(os.tmpdir(), `zcode-cli-rpc-list-${process.pid}-${Date.now()}.sock`);
-  const server = net.createServer((socket) => { socket.once('data', (chunk) => { const request = JSON.parse(chunk); assert.equal(request.params.repository, '/workspace'); socket.end(JSON.stringify({ version: 12, request_id: request.request_id, outcome: 'success', result: { tasks: [] } }) + '\n'); }); });
+  const server = net.createServer((socket) => { socket.once('data', (chunk) => { const request = JSON.parse(chunk); assert.equal(request.params.repository, '/workspace'); socket.end(JSON.stringify({ version: 13, request_id: request.request_id, outcome: 'success', result: { tasks: [] } }) + '\n'); }); });
   await new Promise((resolve) => server.listen(socketPath, resolve));
   try { await callDaemon(socketPath, 'list', { workspace: '/workspace' }); }
   finally { await new Promise((resolve) => server.close(resolve)); }
@@ -102,7 +102,7 @@ test('CLI applies documented list and result defaults before connecting', async 
       const result = command === 'list'
         ? { kind: 'task_listed', tasks: [], next_cursor: null }
         : { kind: 'task_result', task: { agent_id: 'agent-1', phase: 'RUNNING', outcome: null, reason_code: null, stop_requested: false, close_requested: false, closed: false, reaped: false }, result: null };
-      socket.end(JSON.stringify({ version: 12, request_id: request.request_id, outcome: 'success', result }) + '\n');
+      socket.end(JSON.stringify({ version: 13, request_id: request.request_id, outcome: 'success', result }) + '\n');
     }); });
     await new Promise((resolve) => server.listen(socketPath, resolve));
     try { await callDaemon(socketPath, command, input); }
@@ -122,7 +122,7 @@ test('CLI observe uses the shared read-only daemon snapshot without adding field
     const request = JSON.parse(chunk);
     assert.equal(request.method, 'task_observe');
     assert.deepEqual(request.params, { agent_id: 'agent-1' });
-    socket.end(`${JSON.stringify({ version: 12, request_id: request.request_id, outcome: 'success', result: { kind: 'task_observed', observation } })}\n`);
+    socket.end(`${JSON.stringify({ version: 13, request_id: request.request_id, outcome: 'success', result: { kind: 'task_observed', observation } })}\n`);
   }); });
   await new Promise((resolve) => server.listen(socketPath, resolve));
   try {

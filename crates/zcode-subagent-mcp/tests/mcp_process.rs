@@ -1,7 +1,9 @@
 use serde_json::{json, Value};
 use std::{
-    io::Write,
+    io::{BufRead, BufReader, Write},
+    os::unix::net::UnixListener,
     process::{Command, Stdio},
+    thread,
 };
 
 fn discover() -> Vec<Value> {
@@ -91,8 +93,82 @@ fn stdio_catalog_is_exactly_the_generic_ten_tools() {
     );
     assert_eq!(
         by_name("zcode_subagent_result")["inputSchema"]["properties"]["limit"]["default"],
-        80 * 1024
+        256 * 1024
     );
+}
+
+#[test]
+fn stdio_round_trips_a_maximum_result_page_without_truncation() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket_path = directory.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let expected = "\u{1}".repeat(256 * 1024);
+    let daemon_text = expected.clone();
+    let daemon = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request: Value = {
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+        assert_eq!(request["version"], 13);
+        assert_eq!(request["method"], "task_result");
+        let response = json!({
+            "version": 13,
+            "request_id": request["request_id"],
+            "outcome": "success",
+            "result": {
+                "kind": "task_result",
+                "task": {
+                    "agent_id": "agent-maximum", "session_id": null, "turn_id": null,
+                    "phase": "TERMINAL", "outcome": "COMPLETED", "reason_code": null,
+                    "stop_requested": false, "close_requested": false, "closed": false,
+                    "reaped": true
+                },
+                "result": {
+                    "outcome": "COMPLETED", "final_text": daemon_text, "partial": false,
+                    "result_sha256": "f".repeat(64), "offset": 0,
+                    "total_bytes": 256 * 1024, "next_offset": null, "complete": true
+                }
+            }
+        });
+        writeln!(stream, "{response}").unwrap();
+    });
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zcode-as-subagent-mcp"))
+        .env("ZCODE_AGENTD_SOCKET", &socket_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}})).unwrap();
+        writeln!(stdin, "{}", json!({"jsonrpc":"2.0","method":"notifications/initialized"})).unwrap();
+        writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"zcode_subagent_result","arguments":{"agent_id":"agent-maximum","limit":256 * 1024}}})).unwrap();
+    }
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let response = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|frame| frame["id"] == 2)
+        .unwrap();
+    assert_eq!(
+        response["result"]["structuredContent"]["result"]["final_text"],
+        expected
+    );
+    let text_copy: Value = serde_json::from_str(
+        response["result"]["content"][0]["text"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(text_copy["result"]["final_text"], expected);
 }
 
 #[test]

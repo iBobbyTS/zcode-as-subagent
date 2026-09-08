@@ -24,15 +24,16 @@ use zcode_agent_store::{
     TaskPageFilter, TaskPhase, TaskQueryScope, TaskRecord, TaskSubmissionDisposition,
 };
 
-pub const RPC_VERSION: u16 = 12;
-pub const MAX_FRAME_BYTES: usize = 512 * 1024;
+pub const RPC_VERSION: u16 = 13;
+pub const MAX_REQUEST_FRAME_BYTES: usize = 512 * 1024;
+pub const MAX_RESPONSE_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_LIST_TASKS: usize = 100;
 pub const MAX_PENDING_REQUESTS: usize = 100;
 /// A result page is capped below the transport frame cap so that even the
 /// worst-case JSON escaping (one input byte becoming a six-byte `\\u00XX`
 /// escape), the response envelope, and the trailing newline fit in one frame.
-pub const MAX_RESULT_CHUNK_BYTES: usize = 80 * 1024;
+pub const MAX_RESULT_CHUNK_BYTES: usize = 256 * 1024;
 pub const MAX_WAIT: Duration = Duration::from_secs(5);
 pub const RPC_TRANSPORT_SUPPORTED: bool = cfg!(unix);
 
@@ -374,7 +375,8 @@ pub struct ModelIdentityFactView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCapabilitiesView {
-    pub max_rpc_frame_bytes: usize,
+    pub max_rpc_request_frame_bytes: usize,
+    pub max_rpc_response_frame_bytes: usize,
     pub max_wait_ms: u64,
     pub maturity: BTreeMap<String, CapabilityMaturityView>,
     pub observation: ObservationCapabilityView,
@@ -657,7 +659,7 @@ impl RpcService {
     }
 
     pub fn handle_bytes(&self, frame: &[u8]) -> RpcResponse {
-        if frame.len() > MAX_FRAME_BYTES {
+        if frame.len().saturating_add(1) > MAX_REQUEST_FRAME_BYTES {
             return RpcResponse::error(
                 None,
                 RpcError::new(RpcErrorCode::Oversized, "request frame exceeds the RPC cap"),
@@ -868,7 +870,9 @@ impl RpcService {
                 if limit == 0 || limit > MAX_RESULT_CHUNK_BYTES {
                     return Err(RpcError::new(
                         RpcErrorCode::Validation,
-                        "result limit is outside the allowed range",
+                        format!(
+                            "result limit must be between 1 and {MAX_RESULT_CHUNK_BYTES} bytes; received {limit}"
+                        ),
                     ));
                 }
                 let result = self
@@ -1093,7 +1097,8 @@ fn opaque_generation() -> Result<String, RpcServiceConfigError> {
 fn agent_capabilities(runtime_source_verified: bool) -> AgentCapabilitiesView {
     let maturity = BTreeMap::new();
     AgentCapabilitiesView {
-        max_rpc_frame_bytes: MAX_FRAME_BYTES,
+        max_rpc_request_frame_bytes: MAX_REQUEST_FRAME_BYTES,
+        max_rpc_response_frame_bytes: MAX_RESPONSE_FRAME_BYTES,
         max_wait_ms: MAX_WAIT.as_millis() as u64,
         maturity,
         observation: ObservationCapabilityView {
@@ -1374,7 +1379,8 @@ fn pending_request_view(request: StoredPendingRequest) -> PendingRequestView {
 #[cfg(test)]
 mod result_paging_tests {
     use super::{
-        result_page_bounds, RpcResponse, RpcSuccess, TaskResultView, TaskView, MAX_FRAME_BYTES,
+        result_page_bounds, RpcResponse, RpcSuccess, TaskResultView, TaskView,
+        MAX_RESPONSE_FRAME_BYTES,
         MAX_RESULT_CHUNK_BYTES,
     };
     use zcode_agent_store::TaskOutcome;
@@ -1427,7 +1433,7 @@ mod result_paging_tests {
                 }),
             },
         );
-        assert!(serde_json::to_vec(&response).unwrap().len() + 1 <= MAX_FRAME_BYTES);
+        assert!(serde_json::to_vec(&response).unwrap().len() + 1 <= MAX_RESPONSE_FRAME_BYTES);
     }
 
     #[test]
