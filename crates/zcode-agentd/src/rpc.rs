@@ -316,7 +316,8 @@ pub struct SystemStatusView {
     pub service_generation: String,
     pub components: BTreeMap<String, ComponentStateView>,
     pub capabilities: AgentCapabilitiesView,
-    pub identity: DaemonIdentityView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<DaemonIdentityView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -939,7 +940,7 @@ impl RpcService {
             service_generation: self.service_generation.clone(),
             components,
             capabilities: agent_capabilities(self.scheduler.runtime_source_verified()),
-            identity: DaemonIdentityView {
+            identity: Some(DaemonIdentityView {
                 daemon: self.daemon_identity.clone(),
                 runtime: configured_runtime_identity(self.scheduler.configured_runtime_source()),
                 // Status has no Agent/session scope, and the current runtime
@@ -948,7 +949,7 @@ impl RpcService {
                     configured: None,
                     observed_response: None,
                 },
-            },
+            }),
         }
     }
 
@@ -1725,5 +1726,46 @@ mod identity_tests {
         };
         assert!(models.configured.is_some());
         assert!(models.observed_response.is_none());
+    }
+
+    #[test]
+    fn same_version_legacy_status_frame_without_identity_still_decodes() {
+        let response = RpcResponse::success(
+            "legacy-status".into(),
+            RpcSuccess::SystemStatus {
+                status: SystemStatusView {
+                    api_surface: "generic_agent".into(),
+                    protocol_version: RPC_VERSION,
+                    service_generation: "legacy-generation".into(),
+                    components: BTreeMap::from([("daemon".into(), ComponentStateView::Ready)]),
+                    capabilities: agent_capabilities(false),
+                    identity: Some(DaemonIdentityView {
+                        daemon: running_component_identity_from(
+                            "daemon", "0.1.0", None, None, None, UNIX_EPOCH,
+                        ),
+                        runtime: configured_runtime_identity(None),
+                        models: ModelIdentityView {
+                            configured: None,
+                            observed_response: None,
+                        },
+                    }),
+                },
+            },
+        );
+        let mut legacy = serde_json::to_value(response).unwrap();
+        legacy["result"]["status"]
+            .as_object_mut()
+            .unwrap()
+            .remove("identity");
+        let decoded: RpcResponse = serde_json::from_value(legacy).unwrap();
+        let RpcOutcome::Success { result } = decoded.outcome else {
+            panic!("expected success")
+        };
+        let RpcSuccess::SystemStatus { status } = *result else {
+            panic!("expected status")
+        };
+        assert_eq!(status.service_generation, "legacy-generation");
+        assert_eq!(status.components["daemon"], ComponentStateView::Ready);
+        assert_eq!(status.identity, None);
     }
 }

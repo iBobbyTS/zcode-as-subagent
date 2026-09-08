@@ -22,6 +22,7 @@ fn discover() -> Vec<Value> {
         json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"zcode_subagent_result","arguments":{"agent_id":"missing-agent"}}}),
         json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"zcode_subagent_result","arguments":{}}}),
         json!({"jsonrpc":"2.0","id":5,"method":"unknown/protocol-method","params":{}}),
+        json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"zcode_subagent_spawn","arguments":{"repository":"/tmp/repository","prompt":"test"}}}),
     ];
     {
         let stdin = child.stdin.as_mut().unwrap();
@@ -133,4 +134,18 @@ fn stdio_business_failure_is_structured_and_protocol_failure_is_json_rpc_error()
     let protocol = frames.iter().find(|frame| frame["id"] == 5).unwrap();
     assert!(protocol.get("result").is_none(), "{protocol}");
     assert!(protocol["error"]["code"].is_number(), "{protocol}");
+
+    let spawn = frames.iter().find(|frame| frame["id"] == 6).unwrap();
+    assert_eq!(spawn["result"]["isError"], true);
+    assert_eq!(
+        spawn["result"]["structuredContent"]["error"]["code"],
+        "daemon_unavailable"
+    );
+    assert_eq!(
+        spawn["result"]["structuredContent"]["error"]["operation"],
+        "spawn"
+    );
+    assert!(spawn["result"]["structuredContent"]["error"]
+        .get("agent_id")
+        .is_none());
 }
