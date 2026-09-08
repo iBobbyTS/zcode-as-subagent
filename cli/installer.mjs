@@ -54,7 +54,8 @@ function stagePlugin(source, staging, paths) {
     if (!fs.existsSync(existing) || JSON.parse(fs.readFileSync(existing, 'utf8')).name !== PLUGIN_NAME) {
       throw new CliError('PLUGIN_STAGING_CONFLICT', `staging path is not managed by ${PLUGIN_NAME}`);
     }
-    if (treeDigest(source) !== treeDigest(staging)) throw new CliError('PLUGIN_STAGING_CONFLICT', 'staging content differs from managed plugin source');
+    // Managed staging is refreshable: skill/docs may have changed since the last install.
+    // Keep the ownership check above, then replace its contents from the current source.
     const priorMcp = JSON.parse(fs.readFileSync(path.join(staging, '.mcp.json'), 'utf8'));
     const priorServer = priorMcp.mcpServers?.zcode_as_subagent;
     if (!priorServer || priorServer.command !== nativeBinary('zcode-as-subagent-mcp') || priorServer.env?.ZCODE_AGENTD_SOCKET !== paths.socket) {
