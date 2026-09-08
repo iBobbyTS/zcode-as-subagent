@@ -55,6 +55,11 @@ function stagePlugin(source, staging, paths) {
       throw new CliError('PLUGIN_STAGING_CONFLICT', `staging path is not managed by ${PLUGIN_NAME}`);
     }
     if (treeDigest(source) !== treeDigest(staging)) throw new CliError('PLUGIN_STAGING_CONFLICT', 'staging content differs from managed plugin source');
+    const priorMcp = JSON.parse(fs.readFileSync(path.join(staging, '.mcp.json'), 'utf8'));
+    const priorServer = priorMcp.mcpServers?.zcode_as_subagent;
+    if (!priorServer || priorServer.command !== nativeBinary('zcode-as-subagent-mcp') || priorServer.env?.ZCODE_AGENTD_SOCKET !== paths.socket) {
+      throw new CliError('PLUGIN_STAGING_CONFLICT', 'staging MCP binding differs from the managed product endpoint');
+    }
   }
   fs.mkdirSync(path.dirname(staging), { recursive: true, mode: 0o700 });
   fs.cpSync(source, staging, { recursive: true, force: true });
@@ -112,9 +117,11 @@ export function installPlugin(paths = productPaths(), options = {}) {
     throw error;
   }
   // Explicitly configured marketplaces must be registered; the personal default is implicit.
-  if (options.registerMarketplace) runCodex(['plugin', 'marketplace', 'add', path.dirname(marketplace), '--json'], { codexCli: options.codexCli, env });
   let add;
-  try { add = runCodex(['plugin', 'add', PLUGIN_NAME, '--marketplace', market.marketplace_name, '--json'], { codexCli: options.codexCli, env }); } catch (error) {
+  try {
+    if (options.registerMarketplace) runCodex(['plugin', 'marketplace', 'add', path.dirname(marketplace), '--json'], { codexCli: options.codexCli, env });
+    add = runCodex(['plugin', 'add', PLUGIN_NAME, '--marketplace', market.marketplace_name, '--json'], { codexCli: options.codexCli, env });
+  } catch (error) {
     if (priorMarketplace === null) fs.rmSync(marketplace, { force: true }); else fs.writeFileSync(marketplace, priorMarketplace, { mode: 0o600 });
     if (!priorStaging) fs.rmSync(staging, { recursive: true, force: true });
     throw error;

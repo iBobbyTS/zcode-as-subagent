@@ -146,6 +146,19 @@ test('install-plugin fails closed on marketplace source conflict and missing sou
   assert.doesNotThrow(() => installPlugin(paths, { source: missing, home, codexHome, marketplacePath: marketplace, codexCli: cli, uninstall: true }));
 });
 
+test('install-plugin rolls back staging and marketplace when marketplace registration fails', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-as-subagent-plugin-register-'));
+  const paths = productPaths(home);
+  const codexHome = path.join(home, 'codex');
+  const cli = path.join(home, 'codex-fake');
+  fs.writeFileSync(cli, '#!/bin/sh\ncase "$*" in *"marketplace add"*) exit 7;; esac\nexit 0\n', { mode: 0o700 });
+  const staging = path.join(home, 'plugins', 'zcode-as-subagent');
+  const marketplace = path.join(home, '.agents', 'plugins', 'marketplace.json');
+  assert.throws(() => installPlugin(paths, { home, codexHome, stagingPath: staging, marketplacePath: marketplace, codexCli: cli, registerMarketplace: true }), (error) => error.code === 'CODEX_CLI_FAILED');
+  assert.equal(fs.existsSync(staging), false);
+  assert.equal(fs.existsSync(marketplace), false);
+});
+
 for (const failStep of ['write-product-config', 'install-launch-agent']) {
   test(`init rolls back every artifact on injected ${failStep} failure`, () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), `zcode-as-subagent-rollback-${failStep}-`));
