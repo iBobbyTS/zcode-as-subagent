@@ -35,7 +35,7 @@ function methodFor(command, input) {
   switch (command) {
     case 'status': return { method: 'system_status' };
     case 'create': case 'spawn': return { method: 'submit_general', params: { input: { manifest: manifest(input) } } };
-    case 'get': case 'poll': return { method: 'task_poll', params: { agent_id: input.agent_id, after_revision: input.after_revision || 0, timeout_ms: input.timeout_ms ?? 0 } };
+    case 'get': case 'poll': return { method: 'task_poll', params: { agent_id: input.agent_id, after_revision: input.after_revision || 0, timeout_ms: input.timeout_ms ?? 0, ...(input.message_id ? { message_id: input.message_id } : {}) } };
     case 'list': {
       const repository = input.repository ?? input.workspace;
       if (!repository) throw new CliError('INVALID_ARGUMENT', 'list requires repository or workspace scope', 2);

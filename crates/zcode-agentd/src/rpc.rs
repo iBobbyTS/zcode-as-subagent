@@ -154,6 +154,8 @@ pub struct TaskPollQuery {
     #[serde(default)]
     pub after_revision: u64,
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +256,7 @@ pub enum RpcSuccess {
         result: Option<TaskResultView>,
         instruction: Option<String>,
         timed_out: bool,
+        message_receipt: Option<MessageReceiptView>,
     },
     TaskResult {
         task: TaskView,
@@ -277,6 +280,16 @@ pub enum RpcSuccess {
     TaskObserved {
         observation: TaskObservationView,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageReceiptView {
+    pub message_id: String,
+    pub state: String,
+    pub target_turn_id: Option<String>,
+    pub failure_code: Option<String>,
+    pub created_at_ms: i64,
+    pub delivered_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1013,6 +1026,14 @@ impl RpcService {
         let deadline = Instant::now() + Duration::from_millis(query.timeout_ms);
         loop {
             let task = self.require_task(&query.agent_id)?;
+            let message_receipt = if let Some(id) = &query.message_id {
+                self.store.message(id).map_err(map_store)?.and_then(|m| {
+                    (m.agent_id == query.agent_id).then(|| MessageReceiptView {
+                        message_id: m.message_id, state: format!("{:?}", m.state).to_lowercase(), target_turn_id: m.target_turn_id,
+                        failure_code: m.failure_code, created_at_ms: m.created_at, delivered_at_ms: m.delivered_at,
+                    })
+                })
+            } else { None };
             let pending_requests = self
                 .store
                 .pending_requests_bounded(&task.agent_id, MAX_PENDING_REQUESTS)
@@ -1036,7 +1057,7 @@ impl RpcService {
                 .max(task.last_event_seq);
             let terminal = task.phase == TaskPhase::Terminal;
             let now = Instant::now();
-            if revision > query.after_revision
+            if query.message_id.is_some() || revision > query.after_revision
                 || !pending_requests.is_empty()
                 || terminal
                 || now >= deadline
@@ -1062,6 +1083,7 @@ impl RpcService {
                     result: None,
                     instruction: (!terminal).then(|| "Use poll for progress".to_owned()),
                     timed_out,
+                    message_receipt,
                 });
             }
             thread::sleep((deadline - now).min(Duration::from_millis(10)));
