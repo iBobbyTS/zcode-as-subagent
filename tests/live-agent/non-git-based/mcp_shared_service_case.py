@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Small direct MCP listener smoke test (daemon must already be running)."""
 import argparse, json, socket, time
+from pathlib import Path
 
 def call(sock, method, params=None, ident=1):
     msg = {"jsonrpc":"2.0", "id":ident, "method":method}
@@ -16,7 +17,7 @@ def call(sock, method, params=None, ident=1):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--socket", required=True, help="daemon RPC socket; MCP uses .mcp")
-    args = p.parse_args(); path = args.socket + ".mcp"
+    args = p.parse_args(); path = str(Path(args.socket).with_suffix(".mcp"))
     a = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); a.connect(path)
     b = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); b.connect(path)
     init = {"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"direct-live","version":"1"}}
