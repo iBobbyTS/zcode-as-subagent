@@ -122,7 +122,7 @@ pub struct PublicToolErrorBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<String>,
+    pub agent_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<String>,
 }
@@ -166,10 +166,30 @@ impl ToolError {
 
     pub(crate) fn with_agent_id(mut self, agent_id: Option<String>) -> Self {
         if self.body.agent_id.is_none() {
-            self.body.agent_id = agent_id;
+            self.body.agent_id = agent_id.and_then(|value| public_task_id(&value).ok());
         }
         self
     }
+}
+
+const MIN_PUBLIC_TASK_ID: u64 = 10_000_000;
+const MAX_PUBLIC_TASK_ID: u64 = 99_999_999;
+
+fn public_task_id(value: &str) -> Result<u64, ToolError> {
+    let id = value
+        .parse::<u64>()
+        .map_err(|_| validation_error("agent_id is invalid"))?;
+    if !(MIN_PUBLIC_TASK_ID..=MAX_PUBLIC_TASK_ID).contains(&id) {
+        return Err(validation_error("agent_id is outside the allowed range"));
+    }
+    Ok(id)
+}
+
+fn internal_task_id(value: u64) -> Result<String, ToolError> {
+    if !(MIN_PUBLIC_TASK_ID..=MAX_PUBLIC_TASK_ID).contains(&value) {
+        return Err(validation_error("agent_id is outside the allowed range"));
+    }
+    Ok(value.to_string())
 }
 
 impl IntoCallToolResult for ToolError {
@@ -308,12 +328,12 @@ mod tests {
     #[test]
     fn workspace_busy_preserves_code_message_and_active_agent() {
         let mut error = RpcError::new(RpcErrorCode::Conflict, "WORKSPACE_BUSY");
-        error.active_agent_id = Some("agent-42".into());
+        error.active_agent_id = Some("10000042".into());
         let rendered = public_error(error);
         assert!(rendered.legacy_text.starts_with("conflict: WORKSPACE_BUSY"));
-        assert!(rendered.legacy_text.contains("active_agent_id=agent-42"));
+        assert!(rendered.legacy_text.contains("active_agent_id=10000042"));
         assert_eq!(rendered.body.code, "conflict");
-        assert_eq!(rendered.body.agent_id.as_deref(), Some("agent-42"));
+        assert_eq!(rendered.body.agent_id, Some(10000042));
     }
 
     #[test]
@@ -321,7 +341,7 @@ mod tests {
         let result = public_transport_error(std::io::Error::from(std::io::ErrorKind::TimedOut))
             .with_operation("poll")
             .with_request_id("request-7")
-            .with_agent_id(Some("agent-7".into()))
+            .with_agent_id(Some("10000007".into()))
             .into_call_tool_result()
             .unwrap();
         let rmcp::model::CallToolResponse::Complete(result) = result else {
@@ -337,7 +357,7 @@ mod tests {
         assert_eq!(error["component"], "daemon_transport");
         assert_eq!(error["operation"], "poll");
         assert_eq!(error["request_id"], "request-7");
-        assert_eq!(error["agent_id"], "agent-7");
+        assert_eq!(error["agent_id"], serde_json::json!(10000007));
     }
 
     #[test]
@@ -376,13 +396,14 @@ mod tests {
 }
 
 mod server {
+    use super::internal_task_id;
     use crate::rpc::{
         AgentCapabilitiesView, CapabilityMaturityView, ComponentStateView, GeneralSubmitInput,
         MessageInput, RespondInput, ResponseDecision, ResponseOutcomeView, RpcClient, RpcMethod,
-        RpcService,
-        RpcOutcome, RpcRequest, RpcSuccess, SubmissionDispositionView, SystemStatusView,
-        TaskActivityStateView, TaskActivityView, TaskListQuery, TaskObservationView,
-        TaskPhaseFilter, TaskPollQuery, TaskResultView, TaskView, TelemetryStatusView, RPC_VERSION,
+        RpcOutcome, RpcRequest, RpcService, RpcSuccess, SubmissionDispositionView,
+        SystemStatusView, TaskActivityStateView, TaskActivityView, TaskListQuery,
+        TaskObservationView, TaskPhaseFilter, TaskPollQuery, TaskResultView, TaskView,
+        TelemetryStatusView, RPC_VERSION,
     };
     use rmcp::{
         handler::server::{router::tool::ToolRouter, tool::schema_for_type, wrapper::Parameters},
@@ -541,9 +562,7 @@ mod server {
     #[derive(Debug, Clone, Serialize, JsonSchema)]
     #[schemars(deny_unknown_fields)]
     pub struct PublicObservationCapability {
-        pub protocol: String,
         pub public_reasoning_default: bool,
-        pub runtime_source_verified: bool,
         pub defaults: PublicObservationDefaults,
     }
 
@@ -568,9 +587,7 @@ mod server {
                 max_wait_ms: value.max_wait_ms,
                 maturity,
                 observation: PublicObservationCapability {
-                    protocol: value.observation.protocol,
                     public_reasoning_default: value.observation.public_reasoning_default,
-                    runtime_source_verified: value.observation.runtime_source_verified,
                     defaults: PublicObservationDefaults {
                         top_tools: value.observation.defaults.top_tools,
                         recent_calls_per_tool: value.observation.defaults.recent_calls_per_tool,
@@ -581,31 +598,8 @@ mod server {
         }
     }
 
-    #[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
-    pub enum PublicObservationSchema {
-        #[serde(rename = "zas-observation/1.1")]
-        Version1_1,
-    }
-
-    #[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
-    #[serde(rename_all = "snake_case")]
-    pub enum PublicObservationCountScope {
-        AgentLifetime,
-    }
-
-    #[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
-    pub enum PublicReasoningSourceStatus {
-        #[serde(rename = "VERIFIED_RUNTIME_PUBLIC")]
-        VerifiedRuntimePublic,
-    }
-
     #[derive(Debug, Clone, Serialize)]
     pub struct AgentObserveOutput {
-        pub schema: PublicObservationSchema,
-        pub agent_id: String,
-        pub service_generation: String,
-        pub snapshot_seq: u64,
-        pub count_scope: PublicObservationCountScope,
         pub tools: Vec<PublicObservedTool>,
         pub reasoning: PublicObservedReasoning,
         pub coverage: PublicObservationCoverage,
@@ -659,22 +653,7 @@ mod server {
     pub struct PublicObservedReasoning {
         #[schemars(length(max = 200))]
         pub text: String,
-        #[schemars(range(max = 200))]
-        pub char_count: usize,
         pub truncated: bool,
-        pub source: PublicReasoningSource,
-    }
-
-    #[derive(Debug, Clone, Serialize, JsonSchema)]
-    #[schemars(deny_unknown_fields)]
-    pub struct PublicReasoningSource {
-        pub status: PublicReasoningSourceStatus,
-        #[schemars(length(min = 1))]
-        pub runtime_version: String,
-        #[schemars(length(min = 1))]
-        pub event_type: String,
-        #[schemars(regex(pattern = "^/"))]
-        pub delta_pointer: String,
     }
 
     #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -699,11 +678,6 @@ mod server {
                 return Err(protocol_error());
             }
             Ok(Self {
-                schema: PublicObservationSchema::Version1_1,
-                agent_id: value.agent_id,
-                service_generation: value.service_generation,
-                snapshot_seq: value.snapshot_seq,
-                count_scope: PublicObservationCountScope::AgentLifetime,
                 tools: value
                     .tools
                     .into_iter()
@@ -725,14 +699,7 @@ mod server {
                     .collect(),
                 reasoning: PublicObservedReasoning {
                     text: value.reasoning.text,
-                    char_count: value.reasoning.char_count,
                     truncated: value.reasoning.truncated,
-                    source: PublicReasoningSource {
-                        status: PublicReasoningSourceStatus::VerifiedRuntimePublic,
-                        runtime_version: value.reasoning.source.runtime_version,
-                        event_type: value.reasoning.source.event_type,
-                        delta_pointer: value.reasoning.source.delta_pointer,
-                    },
                 },
                 coverage: PublicObservationCoverage {
                     tool_history_complete: value.coverage.tool_history_complete,
@@ -746,9 +713,6 @@ mod server {
     #[derive(Debug, Clone, Serialize, JsonSchema)]
     #[schemars(deny_unknown_fields)]
     pub struct SystemStatusOutput {
-        pub api_surface: String,
-        pub protocol_version: u16,
-        pub service_generation: String,
         pub components: BTreeMap<String, PublicComponentState>,
         pub capabilities: PublicAgentCapabilities,
         pub identity: PublicDeploymentIdentity,
@@ -756,38 +720,16 @@ mod server {
 
     impl SystemStatusOutput {
         fn from_view(value: SystemStatusView, facade: PublicComponentIdentity) -> Self {
-            let (daemon, runtime, models) = match value.identity {
+            let (daemon, models) = match value.identity {
                 Some(identity) => (
                     Some(identity.daemon.into()),
-                    PublicRuntimeIdentity {
-                        configured_path: identity.runtime.configured_path,
-                        configured_path_source: identity.runtime.configured_path_source,
-                        observed_version: identity.runtime.observed_version,
-                        observed_version_source: identity.runtime.observed_version_source,
-                    },
                     PublicModelIdentity {
                         configured: identity.models.configured.map(Into::into),
-                        observed_response: identity.models.observed_response.map(Into::into),
                     },
                 ),
-                None => (
-                    None,
-                    PublicRuntimeIdentity {
-                        configured_path: None,
-                        configured_path_source: "unknown".into(),
-                        observed_version: None,
-                        observed_version_source: "unknown".into(),
-                    },
-                    PublicModelIdentity {
-                        configured: None,
-                        observed_response: None,
-                    },
-                ),
+                None => (None, PublicModelIdentity { configured: None }),
             };
             Self {
-                api_surface: value.api_surface,
-                protocol_version: value.protocol_version,
-                service_generation: value.service_generation,
                 components: value
                     .components
                     .into_iter()
@@ -797,7 +739,6 @@ mod server {
                 identity: PublicDeploymentIdentity {
                     daemon,
                     facade,
-                    runtime,
                     models,
                 },
             }
@@ -810,34 +751,20 @@ mod server {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub daemon: Option<PublicComponentIdentity>,
         pub facade: PublicComponentIdentity,
-        pub runtime: PublicRuntimeIdentity,
         pub models: PublicModelIdentity,
     }
 
     #[derive(Debug, Clone, Serialize, JsonSchema)]
     #[schemars(deny_unknown_fields)]
     pub struct PublicComponentIdentity {
-        pub component: String,
-        pub version: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub source_revision: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub source_dirty: Option<bool>,
         pub artifact: PublicArtifactIdentity,
     }
 
     impl From<crate::rpc::ComponentIdentityView> for PublicComponentIdentity {
         fn from(value: crate::rpc::ComponentIdentityView) -> Self {
             Self {
-                component: value.component,
-                version: value.version,
-                source_revision: value.source_revision,
-                source_dirty: value.source_dirty,
                 artifact: PublicArtifactIdentity {
                     path: value.artifact.path,
-                    sha256: value.artifact.sha256,
-                    source: value.artifact.source,
-                    captured_at_ms: value.artifact.captured_at_ms,
                 },
             }
         }
@@ -848,21 +775,6 @@ mod server {
     pub struct PublicArtifactIdentity {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub path: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub sha256: Option<String>,
-        pub source: String,
-        pub captured_at_ms: u64,
-    }
-
-    #[derive(Debug, Clone, Serialize, JsonSchema)]
-    #[schemars(deny_unknown_fields)]
-    pub struct PublicRuntimeIdentity {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub configured_path: Option<String>,
-        pub configured_path_source: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub observed_version: Option<String>,
-        pub observed_version_source: String,
     }
 
     #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -870,8 +782,6 @@ mod server {
     pub struct PublicModelIdentity {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub configured: Option<PublicModelIdentityFact>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub observed_response: Option<PublicModelIdentityFact>,
     }
 
     #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -912,7 +822,8 @@ mod server {
     #[derive(Debug, Clone, Serialize, JsonSchema)]
     #[schemars(deny_unknown_fields)]
     pub struct AgentSpawnOutput {
-        pub agent_id: String,
+        #[schemars(range(min = 10000000, max = 99999999))]
+        pub agent_id: u64,
         pub submission_disposition: SubmissionDisposition,
         pub phase: String,
     }
@@ -921,14 +832,15 @@ mod server {
     #[serde(deny_unknown_fields)]
     #[schemars(deny_unknown_fields)]
     pub struct AgentInput {
-        #[schemars(length(min = 1))]
-        pub agent_id: String,
+        #[schemars(range(min = 10000000, max = 99999999))]
+        pub agent_id: u64,
     }
 
     #[derive(Debug, Clone, Serialize, JsonSchema)]
     #[schemars(deny_unknown_fields)]
     pub struct PublicTask {
-        pub agent_id: String,
+        #[schemars(range(min = 10000000, max = 99999999))]
+        pub agent_id: u64,
         pub phase: String,
         pub outcome: Option<PublicOutcome>,
         pub reason_code: Option<String>,
@@ -943,13 +855,14 @@ mod server {
     pub struct PublicInputIdentity {
         pub workspace_path: Option<String>,
         pub permission_mode: Option<String>,
-        pub caller_prompt_sha256: Option<String>,
     }
 
-    impl From<TaskView> for PublicTask {
-        fn from(value: TaskView) -> Self {
-            Self {
-                agent_id: value.agent_id,
+    impl TryFrom<TaskView> for PublicTask {
+        type Error = ToolError;
+
+        fn try_from(value: TaskView) -> Result<Self, Self::Error> {
+            Ok(Self {
+                agent_id: super::public_task_id(&value.agent_id)?,
                 phase: value.phase,
                 outcome: value.outcome.map(Into::into),
                 reason_code: value.reason_code,
@@ -960,9 +873,8 @@ mod server {
                 input_identity: Some(PublicInputIdentity {
                     workspace_path: value.input_identity.workspace_path,
                     permission_mode: value.input_identity.permission_mode,
-                    caller_prompt_sha256: value.input_identity.caller_prompt_sha256,
                 }),
-            }
+            })
         }
     }
 
@@ -1096,7 +1008,8 @@ mod server {
     #[derive(Debug, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct AgentPollInput {
-        pub agent_id: String,
+        #[schemars(range(min = 10000000, max = 99999999))]
+        pub agent_id: u64,
         #[serde(default)]
         pub after_revision: u64,
         #[serde(default)]
@@ -1145,9 +1058,7 @@ mod server {
     #[schemars(deny_unknown_fields)]
     pub struct PublicActivityWindow {
         pub reasoning_delta_events: u64,
-        pub reasoning_delta_bytes: u64,
         pub text_delta_events: u64,
-        pub text_delta_bytes: u64,
         pub tool_calls_started: u64,
         pub tool_calls_completed: u64,
         pub tool_calls_failed: u64,
@@ -1209,9 +1120,7 @@ mod server {
                     .collect(),
                 window_60s: PublicActivityWindow {
                     reasoning_delta_events: value.window_60s.reasoning_delta_events,
-                    reasoning_delta_bytes: value.window_60s.reasoning_delta_bytes,
                     text_delta_events: value.window_60s.text_delta_events,
-                    text_delta_bytes: value.window_60s.text_delta_bytes,
                     tool_calls_started: value.window_60s.tool_calls_started,
                     tool_calls_completed: value.window_60s.tool_calls_completed,
                     tool_calls_failed: value.window_60s.tool_calls_failed,
@@ -1257,7 +1166,8 @@ mod server {
     #[derive(Debug, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct AgentSendInput {
-        pub agent_id: String,
+        #[schemars(range(min = 10000000, max = 99999999))]
+        pub agent_id: u64,
         #[serde(default, deserialize_with = "optional_non_null")]
         pub message_id: Option<String>,
         pub content: String,
@@ -1282,7 +1192,8 @@ mod server {
     #[derive(Debug, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct AgentRespondInput {
-        pub agent_id: String,
+        #[schemars(range(min = 10000000, max = 99999999))]
+        pub agent_id: u64,
         pub request_id: String,
         pub decision: PublicDecision,
         #[serde(default, deserialize_with = "optional_non_null")]
@@ -1308,7 +1219,8 @@ mod server {
     #[derive(Debug, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct AgentResultInput {
-        pub agent_id: String,
+        #[schemars(range(min = 10000000, max = 99999999))]
+        pub agent_id: u64,
         #[serde(default)]
         pub offset: usize,
         #[serde(default = "default_result_limit")]
@@ -1359,7 +1271,11 @@ mod server {
                 timeout: Duration::from_secs(5),
                 service: Some(service),
                 next_request: Arc::new(AtomicU64::new(1)),
-                facade_identity: crate::rpc::running_component_identity("daemon", env!("CARGO_PKG_VERSION")).into(),
+                facade_identity: crate::rpc::running_component_identity(
+                    "daemon",
+                    env!("CARGO_PKG_VERSION"),
+                )
+                .into(),
                 tool_router: Self::tool_router(),
             }
         }
@@ -1394,14 +1310,17 @@ mod server {
             let response = if let Some(service) = &self.service {
                 service.handle_bytes(&encoded)
             } else {
-                RpcClient::new(self.socket.as_ref().expect("socket configured"), self.timeout)
-                    .call(&request)
-                    .map_err(|error| {
+                RpcClient::new(
+                    self.socket.as_ref().expect("socket configured"),
+                    self.timeout,
+                )
+                .call(&request)
+                .map_err(|error| {
                     public_transport_error(error)
                         .with_operation(operation)
                         .with_request_id(request.request_id.clone())
                         .with_agent_id(agent_id.clone())
-                    })?
+                })?
             };
             if response.version != RPC_VERSION {
                 return Err(ToolError::new(
@@ -1435,7 +1354,7 @@ mod server {
                 limit,
             })? {
                 RpcSuccess::TaskResult { task, result, .. } => {
-                    Ok((task.into(), result.map(TryInto::try_into).transpose()?))
+                    Ok((task.try_into()?, result.map(TryInto::try_into).transpose()?))
                 }
                 _ => Err(protocol_error()
                     .with_operation("result")
@@ -1594,7 +1513,7 @@ mod server {
                 _ => return Err(protocol_error().with_operation("spawn")),
             };
             Ok(Json(AgentSpawnOutput {
-                agent_id: task.agent_id,
+                agent_id: super::public_task_id(&task.agent_id).map_err(|e| e.with_operation("spawn"))?,
                 submission_disposition: match disposition {
                     SubmissionDispositionView::Created => SubmissionDisposition::Created,
                     SubmissionDispositionView::Existing => SubmissionDisposition::Existing,
@@ -1618,15 +1537,15 @@ mod server {
             &self,
             Parameters(input): Parameters<AgentPollInput>,
         ) -> Result<Json<AgentPollOutput>, ToolError> {
-            validate_text(&input.agent_id, "agent_id", MAX_ID_BYTES)
+            let agent_id = internal_task_id(input.agent_id)
                 .map_err(|error| error.with_operation("poll"))?;
             if input.timeout_ms > 5000 {
                 return Err(validation_error("timeout_ms must be between 0 and 5000")
                     .with_operation("poll")
-                    .with_agent_id(Some(input.agent_id)));
+                    .with_agent_id(Some(agent_id)));
             }
             match self.rpc(RpcMethod::TaskPoll(TaskPollQuery {
-                agent_id: input.agent_id,
+                agent_id,
                 after_revision: input.after_revision,
                 timeout_ms: input.timeout_ms,
                 message_id: input.message_id,
@@ -1645,7 +1564,7 @@ mod server {
                     timed_out,
                     message_receipt,
                 } => Ok(Json(AgentPollOutput {
-                    task: task.into(),
+                    task: task.try_into()?,
                     revision,
                     next_revision,
                     pending_requests: pending_requests.into_iter().map(Into::into).collect(),
@@ -1684,9 +1603,8 @@ mod server {
             &self,
             Parameters(input): Parameters<AgentInput>,
         ) -> Result<Json<AgentObserveOutput>, ToolError> {
-            validate_text(&input.agent_id, "agent_id", MAX_ID_BYTES)
+            let agent_id = internal_task_id(input.agent_id)
                 .map_err(|error| error.with_operation("observe"))?;
-            let agent_id = input.agent_id;
             match self.rpc(RpcMethod::TaskObserve {
                 agent_id: agent_id.clone(),
             })? {
@@ -1736,7 +1654,10 @@ mod server {
                 limit: input.limit,
             }))? {
                 RpcSuccess::TaskListed { tasks, next_cursor } => Ok(Json(AgentListOutput {
-                    tasks: tasks.into_iter().map(Into::into).collect(),
+                    tasks: tasks
+                        .into_iter()
+                        .map(TryInto::try_into)
+                        .collect::<Result<Vec<_>, _>>()?,
                     next_cursor,
                 })),
                 _ => Err(protocol_error().with_operation("list")),
@@ -1758,16 +1679,18 @@ mod server {
             &self,
             Parameters(input): Parameters<AgentSendInput>,
         ) -> Result<Json<AgentSendOutput>, ToolError> {
+            let agent_id = internal_task_id(input.agent_id)
+                .map_err(|error| error.with_operation("send"))?;
             validate_text(&input.content, "content", MAX_MESSAGE_BYTES).map_err(|error| {
                 error
                     .with_operation("send")
-                    .with_agent_id(Some(input.agent_id.clone()))
+                    .with_agent_id(Some(agent_id.clone()))
             })?;
             let message_id = input
                 .message_id
                 .unwrap_or_else(|| self.generated_message_id());
             match self.rpc(RpcMethod::TaskMessage(MessageInput {
-                agent_id: input.agent_id.clone(),
+                agent_id: agent_id.clone(),
                 message_id,
                 mode: "queue".into(),
                 content: input.content,
@@ -1795,7 +1718,7 @@ mod server {
                 })),
                 _ => Err(protocol_error()
                     .with_operation("send")
-                    .with_agent_id(Some(input.agent_id))),
+                    .with_agent_id(Some(agent_id))),
             }
         }
 
@@ -1814,19 +1737,21 @@ mod server {
             &self,
             Parameters(input): Parameters<AgentRespondInput>,
         ) -> Result<Json<AgentRespondOutput>, ToolError> {
+            let agent_id = internal_task_id(input.agent_id)
+                .map_err(|error| error.with_operation("respond"))?;
             if input.reason.as_ref().is_some_and(|value| {
                 value.is_empty() || value.len() > MAX_REASON_BYTES || value.contains('\0')
             }) {
                 return Err(validation_error("reason is invalid")
                     .with_operation("respond")
-                    .with_agent_id(Some(input.agent_id)));
+                    .with_agent_id(Some(agent_id)));
             }
             let decision = match input.decision {
                 PublicDecision::Allow => ResponseDecision::Allow,
                 PublicDecision::Deny => ResponseDecision::Deny,
             };
             match self.rpc(RpcMethod::TaskRespond(RespondInput {
-                agent_id: input.agent_id.clone(),
+                agent_id: agent_id.clone(),
                 request_id: input.request_id,
                 decision,
                 content: input.reason,
@@ -1834,7 +1759,7 @@ mod server {
                 RpcSuccess::Respond { outcome, .. } => Ok(Json(project_response(outcome))),
                 _ => Err(protocol_error()
                     .with_operation("respond")
-                    .with_agent_id(Some(input.agent_id))),
+                    .with_agent_id(Some(agent_id))),
             }
         }
 
@@ -1853,13 +1778,15 @@ mod server {
             &self,
             Parameters(input): Parameters<AgentInput>,
         ) -> Result<Json<AgentStateOutput>, ToolError> {
+            let agent_id = internal_task_id(input.agent_id)
+                .map_err(|error| error.with_operation("cancel"))?;
             match self.rpc(RpcMethod::TaskCancel {
-                agent_id: input.agent_id.clone(),
+                agent_id: agent_id.clone(),
             })? {
-                RpcSuccess::Stopped { task } => Ok(Json(AgentStateOutput { task: task.into() })),
+                RpcSuccess::Stopped { task } => Ok(Json(AgentStateOutput { task: task.try_into()? })),
                 _ => Err(protocol_error()
                     .with_operation("cancel")
-                    .with_agent_id(Some(input.agent_id))),
+                    .with_agent_id(Some(agent_id))),
             }
         }
 
@@ -1878,7 +1805,9 @@ mod server {
             &self,
             Parameters(input): Parameters<AgentResultInput>,
         ) -> Result<Json<AgentResultOutput>, ToolError> {
-            let (task, result) = self.result(input.agent_id.clone(), input.offset, input.limit)?;
+            let agent_id = internal_task_id(input.agent_id)
+                .map_err(|error| error.with_operation("result"))?;
+            let (task, result) = self.result(agent_id, input.offset, input.limit)?;
             Ok(Json(AgentResultOutput { task, result }))
         }
 
@@ -1897,13 +1826,15 @@ mod server {
             &self,
             Parameters(input): Parameters<AgentInput>,
         ) -> Result<Json<AgentStateOutput>, ToolError> {
+            let agent_id = internal_task_id(input.agent_id)
+                .map_err(|error| error.with_operation("close"))?;
             match self.rpc(RpcMethod::TaskClose {
-                agent_id: input.agent_id.clone(),
+                agent_id: agent_id.clone(),
             })? {
-                RpcSuccess::Closed { task } => Ok(Json(AgentStateOutput { task: task.into() })),
+                RpcSuccess::Closed { task } => Ok(Json(AgentStateOutput { task: task.try_into()? })),
                 _ => Err(protocol_error()
                     .with_operation("close")
-                    .with_agent_id(Some(input.agent_id))),
+                    .with_agent_id(Some(agent_id))),
             }
         }
     }
@@ -1954,17 +1885,17 @@ mod server {
             assert!(list.cursor.is_none());
 
             let poll: AgentPollInput =
-                serde_json::from_value(serde_json::json!({"agent_id": "agent"})).unwrap();
+                serde_json::from_value(serde_json::json!({"agent_id": 10000000})).unwrap();
             assert_eq!(poll.after_revision, 0);
             assert_eq!(poll.timeout_ms, 0);
 
             let result: AgentResultInput =
-                serde_json::from_value(serde_json::json!({"agent_id": "agent"})).unwrap();
+                serde_json::from_value(serde_json::json!({"agent_id": 10000000})).unwrap();
             assert_eq!(result.offset, 0);
             assert_eq!(result.limit, default_result_limit());
 
             let send: AgentSendInput = serde_json::from_value(serde_json::json!({
-                "agent_id": "agent",
+                "agent_id": 10000000,
                 "content": "continue"
             }))
             .unwrap();
@@ -2036,33 +1967,21 @@ mod server {
                 identity: None,
             };
             let facade = PublicComponentIdentity {
-                component: "facade".into(),
-                version: "0.1.0".into(),
-                source_revision: Some("facade-revision".into()),
-                source_dirty: Some(false),
                 artifact: PublicArtifactIdentity {
                     path: Some("/running/facade".into()),
-                    sha256: Some("facade-hash".into()),
-                    source: "running_executable".into(),
-                    captured_at_ms: 7,
                 },
             };
             let output = SystemStatusOutput::from_view(status, facade);
-            assert_eq!(output.service_generation, "legacy-generation");
             assert!(matches!(
                 output.components.get("daemon"),
                 Some(super::PublicComponentState::Ready)
             ));
             assert!(output.identity.daemon.is_none());
-            assert_eq!(output.identity.facade.component, "facade");
-            assert_eq!(
-                output.identity.facade.source_revision.as_deref(),
-                Some("facade-revision")
-            );
-            assert_eq!(output.identity.runtime.configured_path, None);
-            assert_eq!(output.identity.runtime.configured_path_source, "unknown");
             assert!(output.identity.models.configured.is_none());
             let serialized = serde_json::to_value(output).unwrap();
+            for removed in ["api_surface", "protocol_version", "service_generation"] {
+                assert!(serialized.get(removed).is_none());
+            }
             assert!(serialized["identity"].get("daemon").is_none());
             assert_eq!(
                 serialized["identity"]["facade"]["artifact"]["path"],
@@ -2096,8 +2015,6 @@ mod server {
             assert_eq!(input["required"], serde_json::json!(["agent_id"]));
             let output = serde_json::to_value(observe.output_schema.as_ref().unwrap()).unwrap();
             let serialized = output.to_string();
-            assert!(serialized.contains("zas-observation/1.1"));
-            assert!(serialized.contains("agent_lifetime"));
             assert!(serialized.contains("\"maxItems\":3"));
             assert!(serialized.contains("\"maxItems\":5"));
             assert!(serialized.contains("\"maxLength\":200"));
@@ -2109,7 +2026,7 @@ mod server {
             let snapshot = ObservationSnapshot::unavailable();
             let view = TaskObservationView {
                 schema: "zas-observation/1.1".into(),
-                agent_id: "agent".into(),
+                agent_id: "10000000".into(),
                 service_generation: "generation".into(),
                 snapshot_seq: snapshot.snapshot_seq,
                 count_scope: "agent_lifetime".into(),
@@ -2128,7 +2045,7 @@ mod server {
             let facade =
                 SubagentMcp::new(PathBuf::from("/tmp/schema.sock"), Duration::from_secs(1));
             let task = serde_json::json!({
-                "agent_id":"agent-1", "phase":"RUNNING", "outcome":null,
+                "agent_id":10000001, "phase":"RUNNING", "outcome":null,
                 "reason_code":null, "cancel_requested":false, "close_requested":false,
                 "closed":false, "resources_reaped":false
             });
@@ -2138,33 +2055,24 @@ mod server {
                 "model_last_delta_age_ms":null, "latest_text_tail":"",
                 "latest_text_updated_at":null, "latest_text_truncated":false,
                 "active_tools":[], "window_60s":{
-                    "reasoning_delta_events":0,"reasoning_delta_bytes":0,"text_delta_events":0,
-                    "text_delta_bytes":0,"tool_calls_started":0,"tool_calls_completed":0,
+                    "reasoning_delta_events":0,"text_delta_events":0,
+                    "tool_calls_started":0,"tool_calls_completed":0,
                     "tool_calls_failed":0,"read_calls":0,"bash_calls":0,"other_tool_calls":0
                 }, "telemetry_status":"healthy"
             });
             let observation = serde_json::json!({
-                "schema":"zas-observation/1.1", "agent_id":"agent-1",
-                "service_generation":"generation", "snapshot_seq":0,
-                "count_scope":"agent_lifetime", "tools":[],
-                "reasoning":{"text":"","char_count":0,"truncated":false,"source":{
-                    "status":"VERIFIED_RUNTIME_PUBLIC","runtime_version":"3.11.2",
-                    "event_type":"model.streaming","delta_pointer":"/params/payload/delta"
-                }},
+                "tools":[], "reasoning":{"text":"","truncated":false},
                 "coverage":{"tool_history_complete":false,"reasoning_complete":false,"dropped_events":0}
             });
             let artifact = serde_json::json!({
-                "path":"/running/component","sha256":"00","source":"running_executable","captured_at_ms":1
+                "path":"/running/component"
             });
             let status = serde_json::json!({
-                "api_surface":"generic_agent","protocol_version":13,"service_generation":"generation",
                 "components":{},"capabilities":{"max_rpc_request_frame_bytes":524288,"max_rpc_response_frame_bytes":2097152,"max_wait_ms":5000,
-                    "maturity":{},"observation":{"protocol":"zas-observation/1.1",
-                        "public_reasoning_default":true,"runtime_source_verified":false,
+                    "maturity":{},"observation":{"public_reasoning_default":true,
                         "defaults":{"top_tools":3,"recent_calls_per_tool":5,"reasoning_chars":200}}},
-                "identity":{"daemon":{"component":"daemon","version":"0.1.0","artifact":artifact.clone()},
-                    "facade":{"component":"facade","version":"0.1.0","artifact":artifact},
-                    "runtime":{"configured_path_source":"unknown","observed_version_source":"unknown"},
+                "identity":{"daemon":{"artifact":artifact.clone()},
+                    "facade":{"artifact":artifact},
                     "models":{}}
             });
             let poll = serde_json::json!({
@@ -2176,7 +2084,7 @@ mod server {
                 ("zcode_subagent_status", status),
                 (
                     "zcode_subagent_spawn",
-                    serde_json::json!({"agent_id":"agent-1","submission_disposition":"created","phase":"RUNNING"}),
+                    serde_json::json!({"agent_id":10000001,"submission_disposition":"created","phase":"RUNNING"}),
                 ),
                 ("zcode_subagent_poll", poll),
                 ("zcode_subagent_observe", observation),
@@ -2204,7 +2112,7 @@ mod server {
             ]);
             let error = serde_json::json!({"error":{
                 "code":"not_found","message":"agent task was not found","component":"daemon",
-                "operation":"result","request_id":"request-1","agent_id":"agent-1"
+                "operation":"result","request_id":"request-1","agent_id":10000001
             }});
             for tool in facade.tool_router.list_all() {
                 let schema = serde_json::to_value(tool.output_schema.as_ref().unwrap()).unwrap();

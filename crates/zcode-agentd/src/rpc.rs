@@ -40,9 +40,9 @@ pub const RPC_TRANSPORT_SUPPORTED: bool = cfg!(unix);
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{RpcClient, RpcServer, ServerOptions};
-#[cfg(unix)]
 pub(crate) use unix::{remove_matching_socket, remove_stale_socket, SocketIdentity};
+#[cfg(unix)]
+pub use unix::{RpcClient, RpcServer, ServerOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RpcRequest {
@@ -1031,11 +1031,17 @@ impl RpcService {
             let message_receipt = if let Some(id) = &query.message_id {
                 self.store.message(id).map_err(map_store)?.and_then(|m| {
                     (m.agent_id == query.agent_id).then(|| MessageReceiptView {
-                        message_id: m.message_id, state: format!("{:?}", m.state).to_lowercase(), target_turn_id: m.target_turn_id,
-                        failure_code: m.failure_code, created_at_ms: m.created_at, delivered_at_ms: m.delivered_at,
+                        message_id: m.message_id,
+                        state: format!("{:?}", m.state).to_lowercase(),
+                        target_turn_id: m.target_turn_id,
+                        failure_code: m.failure_code,
+                        created_at_ms: m.created_at,
+                        delivered_at_ms: m.delivered_at,
                     })
                 })
-            } else { None };
+            } else {
+                None
+            };
             let pending_requests = self
                 .store
                 .pending_requests_bounded(&task.agent_id, MAX_PENDING_REQUESTS)
@@ -1059,7 +1065,8 @@ impl RpcService {
                 .max(task.last_event_seq);
             let terminal = task.phase == TaskPhase::Terminal;
             let now = Instant::now();
-            if query.message_id.is_some() || revision > query.after_revision
+            if query.message_id.is_some()
+                || revision > query.after_revision
                 || !pending_requests.is_empty()
                 || terminal
                 || now >= deadline
@@ -1163,8 +1170,16 @@ fn format_task_cursor(cursor: u64) -> String {
 
 fn task_view(task: TaskRecord) -> TaskView {
     let prepared = serde_json::from_str::<serde_json::Value>(&task.prepared_launch_json).ok();
-    let permission_mode = prepared.as_ref().and_then(|v| v.get("permission_mode").and_then(|x| x.as_str()).map(str::to_owned));
-    let caller_prompt_sha256 = prepared.as_ref().and_then(|v| v.get("prompt_sha256").and_then(|x| x.as_str()).map(str::to_owned));
+    let permission_mode = prepared.as_ref().and_then(|v| {
+        v.get("permission_mode")
+            .and_then(|x| x.as_str())
+            .map(str::to_owned)
+    });
+    let caller_prompt_sha256 = prepared.as_ref().and_then(|v| {
+        v.get("prompt_sha256")
+            .and_then(|x| x.as_str())
+            .map(str::to_owned)
+    });
     let workspace_path = Some(task.workspace_path.clone());
     TaskView {
         agent_id: task.agent_id,
@@ -1185,7 +1200,11 @@ fn task_view(task: TaskRecord) -> TaskView {
         close_requested: task.close_requested,
         closed: task.closed_at.is_some(),
         reaped: task.reaped_at.is_some(),
-        input_identity: InputIdentityView { workspace_path, permission_mode, caller_prompt_sha256 },
+        input_identity: InputIdentityView {
+            workspace_path,
+            permission_mode,
+            caller_prompt_sha256,
+        },
     }
 }
 
@@ -1419,8 +1438,7 @@ fn pending_request_view(request: StoredPendingRequest) -> PendingRequestView {
 mod result_paging_tests {
     use super::{
         result_page_bounds, InputIdentityView, RpcResponse, RpcSuccess, TaskResultView, TaskView,
-        MAX_RESPONSE_FRAME_BYTES,
-        MAX_RESULT_CHUNK_BYTES,
+        MAX_RESPONSE_FRAME_BYTES, MAX_RESULT_CHUNK_BYTES,
     };
     use zcode_agent_store::TaskOutcome;
 

@@ -212,7 +212,12 @@ impl GeneralTaskPreparer {
     ) -> PreparationResult<PreparedGeneralTask> {
         validate_manifest(manifest)?;
         let repository = canonical_general_repository(&manifest.repository)?;
-        let (agent_id, scratch_root) = allocate_submission(&repository, &manifest.agent_id)?;
+        let (agent_id, scratch_root) = if is_public_task_id(&manifest.agent_id) {
+            let (_, scratch) = allocate_submission(&repository, &manifest.agent_id)?;
+            (manifest.agent_id.clone(), scratch)
+        } else {
+            allocate_submission(&repository, &manifest.agent_id)?
+        };
         let permission_mode = manifest.permission_mode;
         let write_manifest = manifest
             .write_manifest
@@ -267,8 +272,8 @@ fn allocate_submission(
         if let Ok(mut source) = fs::File::open("/dev/urandom") {
             let _ = source.read_exact(&mut entropy);
         }
-        let agent_id = format!(
-            "ztask-{}",
+        let scratch_name = format!(
+            "{}-{}", manifest_agent_id,
             hash(&serde_json::to_vec(&(
                 repository,
                 manifest_agent_id,
@@ -277,9 +282,9 @@ fn allocate_submission(
                 entropy
             ))?)
         );
-        let scratch_root = parent.join(&agent_id);
+        let scratch_root = parent.join(&scratch_name);
         match fs::create_dir(&scratch_root) {
-            Ok(()) => return Ok((agent_id, fs::canonicalize(scratch_root)?)),
+            Ok(()) => return Ok((manifest_agent_id.to_owned(), fs::canonicalize(scratch_root)?)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
         }
@@ -287,6 +292,10 @@ fn allocate_submission(
     Err(PreparationError::InvalidManifest(
         "could not allocate a unique task scratch directory".into(),
     ))
+}
+
+fn is_public_task_id(value: &str) -> bool {
+    value.len() == 8 && value.bytes().all(|b| b.is_ascii_digit())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -539,10 +548,25 @@ mod tests {
         let preparer = GeneralTaskPreparer::new(Vec::new()).expect("preparer");
         let first = preparer.prepare(&manifest).expect("first submission");
         let second = preparer.prepare(&manifest).expect("second submission");
-        assert_ne!(first.agent_id, second.agent_id);
+        assert_eq!(first.agent_id, "daemon-prepared");
         assert_ne!(first.workspace.scratch_root, second.workspace.scratch_root);
         assert!(first.prompt_path.exists());
         assert!(second.prompt_path.exists());
+    }
+
+    #[test]
+    fn allocated_public_id_is_preserved_in_prepared_digest_and_runtime_identity() {
+        let repository = tempfile::tempdir().expect("repository");
+        let manifest = GeneralTaskManifest {
+            schema: GENERAL_TASK_SCHEMA.into(), agent_id: "10000000".into(),
+            repository: repository.path().to_path_buf(), permission_mode: PermissionMode::Plan,
+            prompt: "inspect".into(), write_manifest: Vec::new(),
+        };
+        let prepared = GeneralTaskPreparer::new(Vec::new()).unwrap().prepare(&manifest).unwrap();
+        assert_eq!(prepared.agent_id, "10000000");
+        assert!(prepared.validate_digest().is_ok());
+        assert!(prepared.workspace.scratch_root.file_name().unwrap().to_string_lossy().starts_with("10000000-"));
+        assert!(prepared.launcher().is_ok());
     }
 
     #[test]

@@ -49,7 +49,7 @@ test('diagnose preserves daemon self identity and does not promote packaged faca
   };
   await withDaemon(paths, (request) => {
     assert.equal(request.method, 'system_status');
-    return { outcome: 'success', result: { status: { protocol_version: 12, identity: daemonIdentity } } };
+    return { outcome: 'success', result: { status: { protocol_version: 13, identity: daemonIdentity } } };
   }, async () => {
     const report = await diagnose(paths, []);
     assert.deepEqual(report.daemon.status.identity, daemonIdentity);
@@ -71,12 +71,12 @@ test('agent diagnose reads only the public poll projection and exports a bounded
   const server = net.createServer((socket) => socket.once('data', (chunk) => {
     const request = JSON.parse(chunk);
     if (request.method === 'system_status') {
-      socket.end(JSON.stringify({ version: 12, request_id: request.request_id, outcome: 'success', result: { status: { protocol_version: 12 } } }) + '\n');
+      socket.end(JSON.stringify({ version: 13, request_id: request.request_id, outcome: 'success', result: { status: { protocol_version: 13 } } }) + '\n');
       return;
     }
     assert.equal(request.method, 'task_poll');
-    socket.end(JSON.stringify({ version: 12, request_id: request.request_id, outcome: 'success', result: {
-      kind: 'task_poll', task: { agent_id: 'agent-1', phase: 'RUNNING', outcome: null, reason_code: null, stop_requested: false, close_requested: false, closed: false, reaped: false },
+    socket.end(JSON.stringify({ version: 13, request_id: request.request_id, outcome: 'success', result: {
+      kind: 'task_poll', task: { agent_id: 10000001, phase: 'RUNNING', outcome: null, reason_code: null, stop_requested: false, close_requested: false, closed: false, reaped: false },
       revision: 3, next_revision: 3, pending_requests: [], result_available: false,
       activity: { state: 'active', active_tools: [], window_60s: {}, telemetry_status: 'healthy' }, latest_progress: null,
       result: null, instruction: 'Use poll for progress', timed_out: false,
@@ -85,9 +85,9 @@ test('agent diagnose reads only the public poll projection and exports a bounded
   await new Promise((resolve) => server.listen(paths.socket, resolve));
   const destination = path.join(home, 'export');
   try {
-    const report = await diagnose(paths, ['--agent', 'agent-1', '--output', destination]);
+    const report = await diagnose(paths, ['--agent', '10000001', '--output', destination]);
     assert.equal(report.daemon.available, true);
-    assert.equal(report.agent.task.agent_id, 'agent-1');
+    assert.equal(report.agent.task.agent_id, 10000001);
     assert.deepEqual(report.agent.request_ids, []);
     assert.match(report.agent.query_request_id, /^cli-/u);
     assert.equal(report.agent.identifiers_complete, false);
@@ -96,7 +96,7 @@ test('agent diagnose reads only the public poll projection and exports a bounded
     assert.ok(report.logs.incomplete.includes('log_rotated:daemon-error.log'));
     assert.equal(report.output.path, path.join(destination, 'diagnose.json'));
     const exported = JSON.parse(fs.readFileSync(report.output.path, 'utf8'));
-    assert.equal(exported.agent.task.agent_id, 'agent-1');
+    assert.equal(exported.agent.task.agent_id, 10000001);
     assert.equal(exported.agent.result, undefined);
     assert.equal(exported.agent.task.prompt, undefined);
   } finally { await new Promise((resolve) => server.close(resolve)); }
@@ -144,7 +144,7 @@ test('diagnostic marks an unfinished structured failure without publishing a par
     const logs = path.join(home, 'logs');
     fs.mkdirSync(logs);
     fs.writeFileSync(path.join(logs, 'daemon.log'),
-      'prefix'.repeat(4000) + '\n[zcode-agentd] failure agent=Agent-A: {"agent_id":"Agent-A","message":"unfinished');
+      'prefix'.repeat(4000) + '\n[zcode-agentd] failure agent=10000001: {"agent_id":"10000001","message":"unfinished');
     const report = diagnosticLogs(logs);
     assert.equal(report.files[0].truncated, true);
     assert.ok(report.files[0].tail.endsWith('[INCOMPLETE_FAILURE_RECORD]'));
@@ -164,15 +164,15 @@ test('diagnostic export write failure is reported without throwing', async () =>
 async function withDaemon(paths, respond, run) {
   const server = net.createServer((socket) => socket.once('data', (chunk) => {
     const request = JSON.parse(chunk);
-    socket.end(JSON.stringify({ version: 12, request_id: request.request_id, ...respond(request) }) + '\n');
+    socket.end(JSON.stringify({ version: 13, request_id: request.request_id, ...respond(request) }) + '\n');
   }));
   await new Promise((resolve) => server.listen(paths.socket, resolve));
   try { return await run(); }
   finally { await new Promise((resolve) => server.close(resolve)); }
 }
 
-function statusOrTask(request, agentId = 'Agent-A') {
-  if (request.method === 'system_status') return { outcome: 'success', result: { status: { protocol_version: 12, service_generation: 'configured-daemon' } } };
+function statusOrTask(request, agentId = '10000001') {
+  if (request.method === 'system_status') return { outcome: 'success', result: { status: { protocol_version: 13 } } };
   assert.equal(request.method, 'task_poll');
   assert.equal(request.params.agent_id, agentId);
   return { outcome: 'success', result: {
@@ -197,7 +197,7 @@ test('global diagnose queries the configured effective socket without model side
       assert.equal(report.daemon.socket, configured.socket);
       assert.equal(report.daemon.available, true);
       assert.equal(report.daemon.query_status, 'queried');
-      assert.equal(report.daemon.status.service_generation, 'configured-daemon');
+      assert.equal(report.daemon.status.service_generation, undefined);
       assert.equal(fs.existsSync(paths.socket), false);
     });
   } finally {
@@ -211,11 +211,11 @@ test('Agent A diagnostics survive Agent B displacing global tails and finite rot
   try {
     const paths = pathsFor(home);
     fs.mkdirSync(paths.logs);
-    const target = '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify({
-      agent_id: 'Agent-A', session_id: null, stage: 'bootstrap', error_code: 'SESSION_START_FAILED',
+    const target = '[zcode-agentd] failure agent=10000001: ' + JSON.stringify({
+      agent_id: '10000001', session_id: null, stage: 'bootstrap', error_code: 'SESSION_START_FAILED',
       message: 'A-owned-failure', stderr_tail: 'A-owned-stderr',
     }) + '\n';
-    const noise = '[zcode-agentd] failure agent=Agent-B: B-owned-failure\n'.repeat(1000);
+    const noise = '[zcode-agentd] failure agent=10000002: B-owned-failure\n'.repeat(1000);
     fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), target + noise);
     await withDaemon(paths, statusOrTask, async () => {
       for (const rotated of [false, true]) {
@@ -223,13 +223,13 @@ test('Agent A diagnostics survive Agent B displacing global tails and finite rot
           fs.renameSync(path.join(paths.logs, 'daemon-error.log'), path.join(paths.logs, 'daemon-error.log.1'));
           fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), noise);
         }
-        const report = await diagnose(paths, ['--agent', 'Agent-A', '--output', path.join(home, 'export')]);
+        const report = await diagnose(paths, ['--agent', '10000001', '--output', path.join(home, 'export')]);
         assert.doesNotMatch(report.logs.files.map((file) => file.tail).join(''), /A-owned-failure/u);
         assert.equal(report.agent.task.reason_code, 'RUNTIME_START_FAILED');
         assert.equal(report.agent.diagnostics.status, 'found');
         assert.equal(report.agent.diagnostics.record.file, rotated ? 'daemon-error.log.1' : 'daemon-error.log');
         const decoded = JSON.parse(report.agent.diagnostics.record.text);
-        assert.equal(decoded.agent_id, 'Agent-A');
+        assert.equal(decoded.agent_id, '10000001');
         assert.equal(decoded.error_code, 'SESSION_START_FAILED');
         assert.equal(decoded.message, 'A-owned-failure');
         assert.equal(decoded.stderr_tail, 'A-owned-stderr');
@@ -238,11 +238,11 @@ test('Agent A diagnostics survive Agent B displacing global tails and finite rot
       }
 
       fs.writeFileSync(path.join(paths.logs, 'daemon-error.log.1'), noise);
-      let report = await diagnose(paths, ['--agent', 'Agent-A']);
+      let report = await diagnose(paths, ['--agent', '10000001']);
       assert.equal(report.agent.diagnostics.status, 'target_record_missing');
       assert.equal(report.agent.diagnostics.scan_complete, true);
       fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), target + noise.repeat(30));
-      report = await diagnose(paths, ['--agent', 'Agent-A']);
+      report = await diagnose(paths, ['--agent', '10000001']);
       assert.equal(report.agent.diagnostics.status, 'target_record_missing');
       assert.equal(report.agent.diagnostics.scan_complete, false);
       assert.ok(report.agent.diagnostics.incomplete.includes('scan_truncated:daemon-error.log'));
@@ -254,7 +254,7 @@ test('missing agent and unreachable daemon have distinct diagnostic states', asy
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-missing-'));
   const paths = pathsFor(home);
   await withDaemon(paths, (request) => request.method === 'system_status' ? statusOrTask(request) : { outcome: 'error', error: { code: 'not_found', message: 'task not found' } }, async () => {
-    const report = await diagnose(paths, ['--agent', 'unknown']);
+    const report = await diagnose(paths, ['--agent', '10000003']);
     assert.equal(report.daemon.available, true);
     assert.equal(report.agent.query_status, 'missing');
     assert.equal(report.agent.unavailable, false);
@@ -269,18 +269,18 @@ test('diagnostic output caps UTF-8 bytes and distinguishes unfinished target rec
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diag-utf8-'));
   const paths = pathsFor(home);
   fs.mkdirSync(paths.logs);
-  const target = '[zcode-agentd] failure agent=Agent-A: ' + JSON.stringify({ agent_id: 'Agent-A', message: '诊断'.repeat(6000) });
+  const target = '[zcode-agentd] failure agent=10000001: ' + JSON.stringify({ agent_id: '10000001', message: '诊断'.repeat(6000) });
   fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), target + '\n');
   fs.writeFileSync(path.join(paths.logs, 'daemon.log'), '诊断'.repeat(6000));
   await withDaemon(paths, statusOrTask, async () => {
-    let report = await diagnose(paths, ['--agent', 'Agent-A']);
+    let report = await diagnose(paths, ['--agent', '10000001']);
     assert.ok(report.logs.total_bytes <= 32 * 1024);
     assert.ok(report.logs.files.every((file) => Buffer.byteLength(file.tail) <= 16 * 1024));
     assert.equal(report.agent.diagnostics.status, 'found');
     assert.equal(report.agent.diagnostics.record.truncated, true);
     assert.ok(Buffer.byteLength(report.agent.diagnostics.record.text) <= 16 * 1024);
     fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), target);
-    report = await diagnose(paths, ['--agent', 'Agent-A']);
+    report = await diagnose(paths, ['--agent', '10000001']);
     assert.equal(report.agent.diagnostics.status, 'target_record_missing');
     assert.equal(report.agent.diagnostics.scan_complete, false);
     assert.ok(report.agent.diagnostics.incomplete.includes('record_incomplete:daemon-error.log'));
@@ -292,16 +292,16 @@ for (const tail of ['x'.repeat(16384 - 18) + 'FINAL_ERROR_MARKER', '界\n"'.repe
   try {
     const paths = pathsFor(home);
     fs.mkdirSync(paths.logs);
-    const record = { agent_id: 'target', session_id: 's'.repeat(4096), stage: 'runtime_terminal', error_code: 'SESSION_SEND_FAILED', message: 'm'.repeat(4096), stderr_tail: tail, operation: 'session/send', remote_code: -32031, remote_message: 'model unavailable token=hide-this', cleanup_result: 'Signaled(15)' };
+    const record = { agent_id: '10000004', session_id: 's'.repeat(4096), stage: 'runtime_terminal', error_code: 'SESSION_SEND_FAILED', message: 'm'.repeat(4096), stderr_tail: tail, operation: 'session/send', remote_code: -32031, remote_message: 'model unavailable token=hide-this', cleanup_result: 'Signaled(15)' };
     // Produce a legal driver tail, then evict this record from the global tail.
-    fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), `[zcode-agentd] failure agent=target: ${JSON.stringify(record)}\n` + 'other agent\n'.repeat(4000));
-    const report = await diagnose(paths, ['--agent', 'target', '--output', path.join(home, 'out')]);
+    fs.writeFileSync(path.join(paths.logs, 'daemon-error.log'), `[zcode-agentd] failure agent=10000004: ${JSON.stringify(record)}\n` + 'other agent\n'.repeat(4000));
+    const report = await diagnose(paths, ['--agent', '10000004', '--output', path.join(home, 'out')]);
     assert.equal(report.agent.diagnostics.status, 'found');
     const found = report.agent.diagnostics.record;
     assert.equal(found.truncated, true);
     assert.ok(Buffer.byteLength(found.text) <= 16 * 1024);
     const decoded = JSON.parse(found.text);
-    assert.equal(decoded.agent_id, 'target');
+    assert.equal(decoded.agent_id, '10000004');
     assert.equal(decoded.remote_code, -32031);
     assert.equal(decoded.operation, 'session/send');
     assert.equal(decoded.cleanup_result, 'Signaled(15)');

@@ -3233,8 +3233,10 @@ impl Scheduler {
         &self,
         manifest: &GeneralTaskManifest,
     ) -> Result<SubmittedTask, SchedulerError> {
+        let mut manifest = manifest.clone();
+        manifest.agent_id = self.inner.store.reserve_task_id()?;
         let prepared = GeneralTaskPreparer::new(Vec::new())
-            .and_then(|preparer| preparer.prepare_direct_submission(manifest))
+            .and_then(|preparer| preparer.prepare_direct_submission(&manifest))
             .map_err(|error| SchedulerError::InvalidConfig(error.to_string()))?;
         let prepared_json = serde_json::to_string(&prepared)
             .map_err(|error| SchedulerError::InvalidConfig(error.to_string()))?;
@@ -5329,6 +5331,43 @@ mod failure_log_tests {
     }
 
     #[test]
+    fn enqueue_preparation_failure_consumes_id_and_preserves_classification() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(directory.path().join("state.sqlite")).unwrap());
+        let factory = CommandRuntimeFactory::new(|_: &TaskRecord| {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 0"]);
+            Ok(command)
+        });
+        let scheduler = Scheduler::new(
+            "s02-preparation-failure",
+            Arc::clone(&store),
+            Arc::new(factory),
+            SchedulerConfig::default(),
+        )
+        .unwrap();
+        let invalid = GeneralTaskManifest {
+            schema: "zcode-general-task/v1".into(),
+            agent_id: "caller-value-is-ignored".into(),
+            repository: directory.path().join("does-not-exist"),
+            permission_mode: zcode_agent_preparation::PermissionMode::Plan,
+            prompt: "preparation failure".into(),
+            write_manifest: Vec::new(),
+        };
+        let error = scheduler.enqueue_general(&invalid).unwrap_err();
+        assert!(matches!(error, SchedulerError::InvalidConfig(_)));
+
+        let valid = GeneralTaskManifest {
+            repository: directory.path().canonicalize().unwrap(),
+            prompt: "valid submission".into(),
+            ..invalid
+        };
+        let submitted = scheduler.enqueue_general(&valid).unwrap();
+        assert_eq!(submitted.task.agent_id, "10000001");
+        assert!(store.get_task("10000000").unwrap().is_none());
+    }
+
+    #[test]
     fn startup_and_protocol_failures_record_stderr_without_changing_result() {
         let cases = [
             (
@@ -5858,7 +5897,9 @@ impl McpServer {
     fn bind(path: PathBuf, service: Arc<rpc::RpcService>) -> io::Result<Self> {
         use std::os::unix::net::UnixListener;
         rpc::remove_stale_socket(&path)?;
-        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let listener = UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let metadata = std::fs::symlink_metadata(&path)?;
@@ -5871,17 +5912,25 @@ impl McpServer {
         let loop_shutdown = Arc::clone(&shutdown);
         let wake_path = path.clone();
         let thread = thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("MCP runtime");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("MCP runtime");
             runtime.block_on(async move {
-                let listener = match tokio::net::UnixListener::from_std(listener) { Ok(v) => v, Err(_) => return };
+                let listener = match tokio::net::UnixListener::from_std(listener) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
                 while !loop_shutdown.load(Ordering::Acquire) {
                     match listener.accept().await {
                         Ok((stream, _)) => {
                             let service = Arc::clone(&service);
                             tokio::spawn(async move {
                                 let result = rmcp::service::serve_server(
-                                    crate::mcp::SubagentMcp::from_service(service), stream,
-                                ).await;
+                                    crate::mcp::SubagentMcp::from_service(service),
+                                    stream,
+                                )
+                                .await;
                                 if let Ok(running) = result {
                                     let _ = running.waiting().await;
                                 }
@@ -5894,18 +5943,31 @@ impl McpServer {
             });
             let _ = rpc::remove_matching_socket(&wake_path, socket_identity);
         });
-        Ok(Self { path, socket_identity, shutdown, thread: Mutex::new(Some(thread)) })
+        Ok(Self {
+            path,
+            socket_identity,
+            shutdown,
+            thread: Mutex::new(Some(thread)),
+        })
     }
     fn shutdown(&self) {
-        if self.shutdown.swap(true, Ordering::AcqRel) { return; }
+        if self.shutdown.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let _ = std::os::unix::net::UnixStream::connect(&self.path);
-        if let Some(thread) = self.thread.lock().unwrap().take() { let _ = thread.join(); }
+        if let Some(thread) = self.thread.lock().unwrap().take() {
+            let _ = thread.join();
+        }
         let _ = rpc::remove_matching_socket(&self.path, self.socket_identity);
     }
 }
 
 #[cfg(unix)]
-impl Drop for McpServer { fn drop(&mut self) { self.shutdown(); } }
+impl Drop for McpServer {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
 
 #[cfg(unix)]
 struct SingletonLock {
@@ -6012,7 +6074,10 @@ impl Daemon {
         let mcp_path = server.path().with_extension("mcp");
         let mcp_server = match McpServer::bind(mcp_path, Arc::clone(&service)) {
             Ok(server) => server,
-            Err(error) => { server.shutdown(); return Err(error); }
+            Err(error) => {
+                server.shutdown();
+                return Err(error);
+            }
         };
         if let Err(error) = check_startup_shutdown(&shutdown_requested) {
             server.shutdown();

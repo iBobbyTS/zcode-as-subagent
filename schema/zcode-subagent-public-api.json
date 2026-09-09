@@ -42,7 +42,7 @@
       "type": "object",
       "required": ["agent_id"],
       "properties": {
-        "agent_id": { "type": "string", "minLength": 1 },
+        "agent_id": { "type": "integer", "minimum": 10000000, "maximum": 99999999 },
         "after_revision": { "type": "integer", "minimum": 0, "default": 0 },
         "timeout_ms": { "type": "integer", "minimum": 0, "maximum": 5000, "default": 0 }
         ,"message_id": { "type": ["string", "null"] }
@@ -53,7 +53,7 @@
       "type": "object",
       "required": ["agent_id"],
       "properties": {
-        "agent_id": { "type": "string", "minLength": 1 }
+        "agent_id": { "type": "integer", "minimum": 10000000, "maximum": 99999999 }
       },
       "additionalProperties": false
     },
@@ -61,7 +61,7 @@
       "type": "object",
       "required": ["agent_id"],
       "properties": {
-        "agent_id": { "type": "string", "minLength": 1 },
+        "agent_id": { "type": "integer", "minimum": 10000000, "maximum": 99999999 },
         "offset": { "type": "integer", "minimum": 0, "default": 0 },
         "limit": { "type": "integer", "minimum": 1, "maximum": 262144, "default": 262144 }
       },
@@ -94,7 +94,7 @@
             "component": { "type": "string", "minLength": 1 },
             "operation": { "type": "string", "minLength": 1 },
             "request_id": { "type": "string", "minLength": 1 },
-            "agent_id": { "type": "string", "minLength": 1 },
+            "agent_id": { "type": "integer", "minimum": 10000000, "maximum": 99999999 },
             "cleanup": { "type": "string", "minLength": 1 }
           },
           "additionalProperties": false
@@ -106,10 +106,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "zcode_subagent_status": { "input": [], "output": ["api_surface", "protocol_version", "service_generation", "components", "capabilities", "identity"] },
+        "zcode_subagent_status": { "input": [], "output": ["components", "capabilities", "identity"] },
         "zcode_subagent_spawn": { "input": ["repository", "permission_mode", "prompt", "write_manifest"], "output": ["agent_id", "submission_disposition", "phase"], "idempotent": false },
         "zcode_subagent_poll": { "input": ["agent_id", "after_revision", "timeout_ms", "message_id"], "output": ["task", "revision", "next_revision", "pending_requests", "result_available", "activity", "latest_progress", "result", "instruction", "timed_out", "message_receipt"] },
-        "zcode_subagent_observe": { "input": ["agent_id"], "output": ["schema", "agent_id", "service_generation", "snapshot_seq", "count_scope", "tools", "reasoning", "coverage"], "idempotent": true },
+        "zcode_subagent_observe": { "input": ["agent_id"], "output": ["tools", "reasoning", "coverage"], "idempotent": true },
         "zcode_subagent_list": { "input": ["repository", "phase", "outcome", "cursor", "limit"], "output": ["tasks", "next_cursor"] },
         "zcode_subagent_send": { "input": ["agent_id", "message_id", "content"], "output": ["message_id", "disposition"] },
         "zcode_subagent_respond": { "input": ["agent_id", "request_id", "decision", "reason"], "output": ["disposition", "requested_decision", "effective_decision", "policy_overrode", "policy_reason_code"] },

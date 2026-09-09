@@ -197,7 +197,11 @@ function agentDiagnosticLogs(logDirectory, agentId) {
 }
 
 function diagnoseInput(args) {
-  const agent = value(args, '--agent');
+  const rawAgent = value(args, '--agent');
+  const agent = rawAgent === undefined ? undefined : Number(rawAgent);
+  if (rawAgent !== undefined && (!Number.isInteger(agent) || agent < 10_000_000 || agent > 99_999_999 || String(agent) !== rawAgent)) {
+    throw new CliError('INVALID_ARGUMENT', 'agent_id must be an integer between 10000000 and 99999999', 2);
+  }
   const outputDirectory = value(args, '--output');
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -238,7 +242,7 @@ async function diagnose(paths, args) {
     report.daemon.error = { code: error.code || 'DAEMON_ERROR', message: error.message };
   }
   if (agent) {
-    const diagnostics = agentDiagnosticLogs(paths.logs, agent);
+    const diagnostics = agentDiagnosticLogs(paths.logs, String(agent));
     try {
       const snapshot = await callDaemon(socket, 'poll', { agent_id: agent, timeout_ms: 0 });
       report.daemon.available = true;

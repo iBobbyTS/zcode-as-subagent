@@ -8,7 +8,7 @@ use std::{
 };
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -110,6 +110,8 @@ CREATE TABLE lifecycle_ledger (
     reason_code TEXT,
     recorded_at INTEGER NOT NULL
 );
+CREATE TABLE task_id_allocator (id INTEGER PRIMARY KEY CHECK (id = 1), next_id INTEGER NOT NULL);
+INSERT INTO task_id_allocator(id, next_id) VALUES (1, 10000000);
 "#;
 
 #[derive(Debug)]
@@ -470,6 +472,22 @@ impl Store {
     pub fn database_path(&self) -> &Path {
         &self.database_path
     }
+
+    /// Reserve the next public task identity. The increment is committed before
+    /// preparation so a later filesystem failure can never cause reuse.
+    pub fn reserve_task_id(&self) -> StoreResult<String> {
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let next: i64 = transaction.query_row(
+            "SELECT next_id FROM task_id_allocator WHERE id=1", [], |row| row.get(0))?;
+        if !(10_000_000..=99_999_999).contains(&next) {
+            return Err(StoreError::Conflict("task id allocator exhausted".into()));
+        }
+        transaction.execute("UPDATE task_id_allocator SET next_id=?1 WHERE id=1", [next + 1])?;
+        transaction.commit()?;
+        Ok(next.to_string())
+    }
+
 
     pub fn journal_mode(&self) -> StoreResult<String> {
         let connection = self.connection.lock().unwrap();
@@ -1592,6 +1610,7 @@ fn schema_is_current(connection: &Connection) -> StoreResult<bool> {
         "lifecycle_ledger",
         "messages",
         "pending_requests",
+        "task_id_allocator",
         "task_results",
         "tasks",
     ];
@@ -2156,6 +2175,48 @@ mod tests {
     }
 
     #[test]
+    fn task_id_allocator_is_persistent_bounded_and_exhausts_without_wrap() {
+        let (_directory, path, store) = store();
+        assert_eq!(store.reserve_task_id().unwrap(), "10000000");
+        assert_eq!(store.reserve_task_id().unwrap(), "10000001");
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.reserve_task_id().unwrap(), "10000002");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection.execute("UPDATE task_id_allocator SET next_id=99999999 WHERE id=1", []).unwrap();
+        }
+        assert_eq!(reopened.reserve_task_id().unwrap(), "99999999");
+        assert!(reopened.reserve_task_id().is_err());
+        let next: i64 = Connection::open(&path).unwrap().query_row("SELECT next_id FROM task_id_allocator WHERE id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(next, 100000000);
+    }
+
+    #[test]
+    fn task_id_allocator_is_unique_across_connections() {
+        let (_directory, path, _store) = store();
+        let path = std::sync::Arc::new(path);
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let path = std::sync::Arc::clone(&path);
+            workers.push(std::thread::spawn(move || Store::open(&*path).unwrap().reserve_task_id().unwrap()));
+        }
+        let ids: std::collections::HashSet<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+        assert_eq!(ids.len(), 8);
+        assert!(ids.contains("10000000"));
+    }
+
+    #[test]
+    fn allocated_id_is_not_reused_after_preparation_failure() {
+        let (_directory, _path, store) = store();
+        let first = store.reserve_task_id().unwrap();
+        assert_eq!(first, "10000000");
+        let preparation_failed = store.enqueue_task_authoritative(&task("", "/missing", None));
+        assert!(preparation_failed.is_err());
+        assert_eq!(store.reserve_task_id().unwrap(), "10000001");
+    }
+
+    #[test]
     fn lifecycle_has_one_phase_and_terminal_outcome() {
         let (_directory, _path, store) = store();
         store
@@ -2281,9 +2342,13 @@ mod tests {
     #[test]
     fn message_receipt_contains_delivery_timestamps_and_agent_scope() {
         let (_directory, _path, store) = store();
-        store.enqueue_task_authoritative(&task("agent", "/repo", None)).unwrap();
+        store
+            .enqueue_task_authoritative(&task("agent", "/repo", None))
+            .unwrap();
         running(&store, "agent");
-        store.insert_message("m1", "agent", "queue", "hello").unwrap();
+        store
+            .insert_message("m1", "agent", "queue", "hello")
+            .unwrap();
         let queued = store.message("m1").unwrap().unwrap();
         assert_eq!(queued.state, MessageState::Queued);
         assert!(queued.created_at > 0);

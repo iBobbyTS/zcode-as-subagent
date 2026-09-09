@@ -27,10 +27,10 @@ test('packaged public schema is the reduced zcode_subagent catalog', () => {
   assert.equal(schema.properties.observe.additionalProperties, false);
   assert.deepEqual(schema.properties.contracts.properties.zcode_subagent_observe.input, ['agent_id']);
   assert.deepEqual(schema.properties.contracts.properties.zcode_subagent_observe.output, [
-    'schema', 'agent_id', 'service_generation', 'snapshot_seq', 'count_scope', 'tools', 'reasoning', 'coverage',
+    'tools', 'reasoning', 'coverage',
   ]);
   assert.deepEqual(schema.properties.contracts.properties.zcode_subagent_status.output, [
-    'api_surface', 'protocol_version', 'service_generation', 'components', 'capabilities', 'identity',
+    'components', 'capabilities', 'identity',
   ]);
   assert.deepEqual(schema.properties.error_projection.required, ['error']);
   assert.deepEqual(schema.properties.error_projection.properties.error.required, ['code', 'message']);

@@ -39,7 +39,10 @@ fn forwards_bytes_and_exits_when_daemon_closes() {
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(b"ping").unwrap();
-    thread::spawn(move || { thread::sleep(Duration::from_millis(50)); drop(stdin); });
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(50));
+        drop(stdin);
+    });
     let output = child.wait_with_output().unwrap();
     server.join().unwrap();
     assert!(output.status.success());
@@ -144,7 +147,10 @@ fn daemon_eof_is_transport_failure_with_nonzero_exit() {
     // Keep stdin open while the server closes first, deterministically
     // exercising daemon-first termination.
     let stdin = child.stdin.take().unwrap();
-    thread::spawn(move || { thread::sleep(Duration::from_millis(100)); drop(stdin); });
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        drop(stdin);
+    });
     let output = child.wait_with_output().unwrap();
     let status = output.status;
     let stderr = output.stderr;

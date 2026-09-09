@@ -1,7 +1,6 @@
 use super::{
     RpcError, RpcErrorCode, RpcOutcome, RpcRequest, RpcResponse, RpcService,
-    MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES,
-    RPC_VERSION,
+    MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES, RPC_VERSION,
 };
 use socket2::{Domain, SockAddr, Socket, Type};
 use std::{
@@ -169,11 +168,8 @@ impl RpcClient {
         }
         frame.push(b'\n');
         write_all_until(&mut stream, &frame, deadline)?;
-        let response = read_limited_frame_until(
-            &mut stream,
-            MAX_RESPONSE_FRAME_BYTES - 1,
-            deadline,
-        )?;
+        let response =
+            read_limited_frame_until(&mut stream, MAX_RESPONSE_FRAME_BYTES - 1, deadline)?;
         serde_json::from_slice(&response)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
