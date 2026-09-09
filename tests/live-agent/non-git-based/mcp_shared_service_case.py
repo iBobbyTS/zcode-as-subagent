@@ -25,7 +25,7 @@ def main():
     args = p.parse_args(); path = str(Path(args.socket).with_suffix(".mcp"))
     a = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); a.connect(path)
     b = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); b.connect(path)
-    init = {"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"direct-live","version":"1"}}
+    init = {"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"direct-live","version":"1"}}
     assert "result" in call(a, "initialize", init, 1)
     notify(a, "notifications/initialized")
     assert "result" in call(b, "initialize", init, 2)
