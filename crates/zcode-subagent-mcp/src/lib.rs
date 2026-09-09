@@ -26,23 +26,19 @@ pub async fn serve_stdio(socket: impl AsRef<Path>) -> io::Result<()> {
         let _ = daemon_write.shutdown().await;
         result
     });
-    let daemon_to_stdout = tokio::spawn(async move { tokio_io::copy(&mut daemon_read, &mut stdout).await });
+    let daemon_to_stdout = tokio::spawn(async move {
+        let result = tokio_io::copy(&mut daemon_read, &mut stdout).await;
+        let _ = stdout.shutdown().await;
+        result
+    });
     tokio::pin!(stdin_to_daemon);
     tokio::pin!(daemon_to_stdout);
     tokio::select! {
-        // If both directions finish at once, prefer the client's stdin EOF.
-        // A client is allowed to half-close its request stream; this ends the
-        // bridge without treating the client's normal EOF as a transport
-        // failure. A daemon EOF while stdin is still live is handled below.
+        // If both directions finish at once, prefer daemon EOF so a server
+        // transport failure cannot be masked by a concurrently-closed client
+        // stdin. A client EOF while the daemon keeps its session open still
+        // exits successfully through the first branch.
         biased;
-        result = &mut stdin_to_daemon => {
-            result
-                .map_err(|error| io::Error::new(io::ErrorKind::Other, format!("stdio forwarding task failed: {error}")))?
-                .map_err(|error| io::Error::new(error.kind(), format!("daemon MCP stream write failed: {error}")))?;
-            // Client EOF owns this connection's lifetime. Do not wait for a
-            // daemon session that may intentionally remain open for others.
-            Ok(())
-        }
         result = &mut daemon_to_stdout => {
             let result = result
                 .map_err(|error| io::Error::new(io::ErrorKind::Other, format!("daemon MCP stream task failed: {error}")))?;
@@ -62,6 +58,12 @@ pub async fn serve_stdio(socket: impl AsRef<Path>) -> io::Result<()> {
                     Err(io::Error::new(error.kind(), format!("daemon MCP stream failed: {error}")))
                 }
             }
+        }
+        result = &mut stdin_to_daemon => {
+            result
+                .map_err(|error| io::Error::new(io::ErrorKind::Other, format!("stdio forwarding task failed: {error}")))?
+                .map_err(|error| io::Error::new(error.kind(), format!("daemon MCP stream write failed: {error}")))?;
+            Ok(())
         }
     }
 }
