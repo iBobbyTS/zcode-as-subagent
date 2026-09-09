@@ -5879,9 +5879,12 @@ impl McpServer {
                         Ok((stream, _)) => {
                             let service = Arc::clone(&service);
                             tokio::spawn(async move {
-                                let _ = rmcp::service::serve_server(
+                                let result = rmcp::service::serve_server(
                                     crate::mcp::SubagentMcp::from_service(service), stream,
                                 ).await;
+                                if let Ok(running) = result {
+                                    let _ = running.waiting().await;
+                                }
                             });
                         }
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
