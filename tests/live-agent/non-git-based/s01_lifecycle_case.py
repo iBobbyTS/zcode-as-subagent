@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded isolated daemon restart oracle; no task-recovery claim."""
+"""Bounded restart oracle for a durable failed task (not active runtime resume)."""
 import argparse
 import hashlib
 import json
@@ -39,6 +39,14 @@ class Session:
                                         'clientInfo': {'name': 's01-lifecycle', 'version': '1'}})
         self.sock.sendall(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
         return result
+
+    def tool(self, name, arguments):
+        result = self.call('tools/call', {'name': 'zcode_subagent_' + name, 'arguments': arguments})
+        if result.get('isError'):
+            raise RuntimeError(result)
+        if 'structuredContent' in result:
+            return result['structuredContent']
+        return json.loads(result['content'][0]['text'])
 
     def close(self):
         self.reader.close()
@@ -80,7 +88,8 @@ def run(daemon, root):
     facts = {'binary': str(daemon), 'binary_sha256': hashlib.sha256(daemon.read_bytes()).hexdigest(),
              'database': str(db), 'socket': str(sock), 'mcp_socket': str(sock.with_suffix('.mcp')),
              'started_at_epoch': time.time(), 'task_recovery': False,
-             'recovery_scope': 'tool catalog and empty persisted database table counts'}
+             'fixture_runtime': '/usr/bin/false', 'active_runtime_resume_tested': False,
+             'recovery_scope': 'existing terminal task and result queried through MCP after restart'}
     procs, sessions, logs = [], [], []
     env = dict(os.environ)
     env.pop('ZCODE_AGENTD_TEST_STARTUP_GATE', None)
@@ -88,7 +97,8 @@ def run(daemon, root):
         out, err = root / f'daemon-{index}.stdout', root / f'daemon-{index}.stderr'
         handles = [out.open('w'), err.open('w')]
         logs.extend(handles)
-        proc = subprocess.Popen([str(daemon), '--database', str(db), '--socket', str(sock)],
+        proc = subprocess.Popen([str(daemon), '--database', str(db), '--socket', str(sock),
+                                 '--runtime', '/usr/bin/false'],
                                 env=env, stdout=handles[0], stderr=handles[1])
         procs.append(proc)
         facts[f'daemon_{index}'] = {'pid': proc.pid, 'stdout': str(out), 'stderr': str(err)}
@@ -103,6 +113,24 @@ def run(daemon, root):
         return proc, session, tools
     try:
         first, old, first_tools = start('first')
+        repository = root / 'repository'
+        repository.mkdir()
+        facts['spawn'] = old.tool('spawn', {'repository': str(repository), 'permission_mode': 'plan',
+                                           'prompt': 'S01 isolated terminal recovery fixture'})
+        agent_id = facts['spawn']['agent_id']
+        facts['agent_id'] = agent_id
+        deadline = time.monotonic() + 15
+        while True:
+            poll = old.tool('poll', {'agent_id': agent_id, 'timeout_ms': 0})
+            if poll['task']['phase'] == 'TERMINAL':
+                break
+            if time.monotonic() > deadline:
+                raise TimeoutError('fixture task did not become terminal')
+            time.sleep(.1)
+        facts['poll_before'] = poll
+        facts['result_before'] = old.tool('result', {'agent_id': agent_id})
+        if facts['result_before']['result'] is None:
+            raise RuntimeError('terminal fixture has no durable result')
         before = state(db)
         # Also exercise the original two-connection EOF-isolation scenario.
         smoke = subprocess.run([os.sys.executable, str(Path(__file__).with_name('mcp_shared_service_case.py')),
@@ -117,13 +145,21 @@ def run(daemon, root):
             facts['old_connection_failed'] = False
         except (EOFError, BrokenPipeError, ConnectionResetError):
             facts['old_connection_failed'] = True
-        second, _, second_tools = start('second')
+        second, fresh, second_tools = start('second')
+        facts['poll_after'] = fresh.tool('poll', {'agent_id': agent_id, 'timeout_ms': 0})
+        facts['result_after'] = fresh.tool('result', {'agent_id': agent_id})
+        facts['list_after'] = fresh.tool('list', {'repository': str(repository)})
+        facts['task_recovery'] = (
+            facts['poll_after']['task']['agent_id'] == agent_id
+            and facts['poll_after']['task']['phase'] == 'TERMINAL'
+            and facts['result_after']['result'] == facts['result_before']['result']
+            and any(task['agent_id'] == agent_id for task in facts['list_after']['tasks']))
         after = state(db)
         facts.update({'state_before': before, 'state_after': after,
                       'catalog_state_recovery': first_tools == second_tools and before == after})
         facts['second_stop_exit_code'] = stop(second)
         facts['sockets_removed_after_restart_stop'] = not sock.exists() and not sock.with_suffix('.mcp').exists()
-        facts['passed'] = (facts['catalog_state_recovery'] and facts['old_connection_failed']
+        facts['passed'] = (facts['task_recovery'] and facts['catalog_state_recovery'] and facts['old_connection_failed']
                            and facts['sockets_removed_after_stop'] and facts['sockets_removed_after_restart_stop']
                            and facts['first_stop_exit_code'] == facts['second_stop_exit_code'] == 0)
     except Exception as exc:
