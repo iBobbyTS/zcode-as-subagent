@@ -37,9 +37,9 @@ impl Default for ServerOptions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SocketIdentity {
-    device: u64,
-    inode: u64,
+pub(crate) struct SocketIdentity {
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
 }
 
 pub struct RpcServer {
@@ -290,7 +290,7 @@ fn reap_finished_workers(workers: &mut Vec<JoinHandle<()>>) {
     }
 }
 
-fn remove_stale_socket(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_stale_socket(path: &Path) -> io::Result<()> {
     remove_stale_socket_with(path, |path| UnixStream::connect(path).map(drop))
 }
 
@@ -336,7 +336,7 @@ where
     fs::remove_file(path)
 }
 
-fn remove_matching_socket(path: &Path, expected: SocketIdentity) -> io::Result<()> {
+pub(crate) fn remove_matching_socket(path: &Path, expected: SocketIdentity) -> io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
