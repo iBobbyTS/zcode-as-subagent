@@ -14,6 +14,11 @@ def call(sock, method, params=None, ident=1):
         data += chunk
     return json.loads(data)
 
+def notify(sock, method, params=None):
+    msg = {"jsonrpc":"2.0", "method":method}
+    if params is not None: msg["params"] = params
+    sock.sendall((json.dumps(msg)+"\n").encode())
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--socket", required=True, help="daemon RPC socket; MCP uses .mcp")
@@ -22,7 +27,9 @@ def main():
     b = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); b.connect(path)
     init = {"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"direct-live","version":"1"}}
     assert "result" in call(a, "initialize", init, 1)
+    notify(a, "notifications/initialized")
     assert "result" in call(b, "initialize", init, 2)
+    notify(b, "notifications/initialized")
     a.close(); time.sleep(.05)
     assert "result" in call(b, "tools/list", {}, 3)
     b.close()
