@@ -1416,7 +1416,7 @@ fn pending_request_view(request: StoredPendingRequest) -> PendingRequestView {
 #[cfg(test)]
 mod result_paging_tests {
     use super::{
-        result_page_bounds, RpcResponse, RpcSuccess, TaskResultView, TaskView,
+        result_page_bounds, InputIdentityView, RpcResponse, RpcSuccess, TaskResultView, TaskView,
         MAX_RESPONSE_FRAME_BYTES,
         MAX_RESULT_CHUNK_BYTES,
     };
@@ -1434,6 +1434,11 @@ mod result_paging_tests {
             close_requested: false,
             closed: false,
             reaped: true,
+            input_identity: InputIdentityView {
+                workspace_path: None,
+                permission_mode: None,
+                caller_prompt_sha256: None,
+            },
         }
     }
 
