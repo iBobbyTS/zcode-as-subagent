@@ -26,7 +26,7 @@ rmcp = { version = "=3.1.4", features = ["client", "server", "transport-io"] }
 rmcp-macros = "=3.1.4"
 schemars = "1"
 uuid = { version = "1", features = ["v4"] }
-tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread", "net"] }
 
 [dev-dependencies]
 jsonschema = { version = "0.51", default-features = false }

@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt, fs, io,
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::fs::OpenOptionsExt,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -5841,8 +5841,62 @@ pub struct Daemon {
     shutdown_started: AtomicBool,
     claim_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     server: Mutex<Option<rpc::RpcServer>>,
+    mcp_server: Mutex<Option<McpServer>>,
     _singleton_lock: SingletonLock,
 }
+
+#[cfg(unix)]
+struct McpServer {
+    path: PathBuf,
+    shutdown: Arc<AtomicBool>,
+    thread: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+#[cfg(unix)]
+impl McpServer {
+    fn bind(path: PathBuf, service: Arc<rpc::RpcService>) -> io::Result<Self> {
+        use std::os::unix::net::UnixListener;
+        let _ = std::fs::remove_file(&path);
+        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+        let listener = UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        listener.set_nonblocking(true)?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let loop_shutdown = Arc::clone(&shutdown);
+        let wake_path = path.clone();
+        let thread = thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("MCP runtime");
+            runtime.block_on(async move {
+                let listener = match tokio::net::UnixListener::from_std(listener) { Ok(v) => v, Err(_) => return };
+                while !loop_shutdown.load(Ordering::Acquire) {
+                    match listener.accept().await {
+                        Ok((stream, _)) => {
+                            let service = Arc::clone(&service);
+                            tokio::spawn(async move {
+                                let _ = rmcp::service::serve_server(
+                                    crate::mcp::SubagentMcp::from_service(service), stream,
+                                ).await;
+                            });
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
+            let _ = std::fs::remove_file(wake_path);
+        });
+        Ok(Self { path, shutdown, thread: Mutex::new(Some(thread)) })
+    }
+    fn shutdown(&self) {
+        if self.shutdown.swap(true, Ordering::AcqRel) { return; }
+        let _ = std::os::unix::net::UnixStream::connect(&self.path);
+        if let Some(thread) = self.thread.lock().unwrap().take() { let _ = thread.join(); }
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(unix)]
+impl Drop for McpServer { fn drop(&mut self) { self.shutdown(); } }
 
 #[cfg(unix)]
 struct SingletonLock {
@@ -5945,7 +5999,12 @@ impl Daemon {
             rpc::RpcService::new(scheduler.clone(), scheduler.store())
                 .map_err(|_| io::Error::other("RPC service initialization failed"))?,
         );
-        let server = rpc::RpcServer::bind(socket, service, server_options)?;
+        let server = rpc::RpcServer::bind(socket, Arc::clone(&service), server_options)?;
+        let mcp_path = server.path().with_extension("mcp");
+        let mcp_server = match McpServer::bind(mcp_path, Arc::clone(&service)) {
+            Ok(server) => server,
+            Err(error) => { server.shutdown(); return Err(error); }
+        };
         if let Err(error) = check_startup_shutdown(&shutdown_requested) {
             server.shutdown();
             return Err(error);
@@ -5969,6 +6028,7 @@ impl Daemon {
             shutdown_started: AtomicBool::new(false),
             claim_thread: Mutex::new(Some(claim_thread)),
             server: Mutex::new(Some(server)),
+            mcp_server: Mutex::new(Some(mcp_server)),
             _singleton_lock: singleton_lock,
         })
     }
@@ -5979,6 +6039,9 @@ impl Daemon {
             return;
         }
         if let Some(server) = self.server.lock().unwrap().take() {
+            server.shutdown();
+        }
+        if let Some(server) = self.mcp_server.lock().unwrap().take() {
             server.shutdown();
         }
         if let Some(claim_thread) = self.claim_thread.lock().unwrap().take() {
