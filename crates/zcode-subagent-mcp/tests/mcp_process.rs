@@ -28,6 +28,7 @@ fn forwards_bytes_and_exits_when_daemon_closes() {
         stream.read_exact(&mut input).unwrap();
         assert_eq!(&input, b"ping");
         stream.write_all(b"pong").unwrap();
+        thread::sleep(Duration::from_millis(500));
     });
     let mut child = Command::new(env!("CARGO_BIN_EXE_zcode-as-subagent-mcp"))
         .env("ZCODE_AGENTD_SOCKET", &path)
@@ -36,7 +37,9 @@ fn forwards_bytes_and_exits_when_daemon_closes() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(b"ping").unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"ping").unwrap();
+    thread::spawn(move || { thread::sleep(Duration::from_millis(50)); drop(stdin); });
     let output = child.wait_with_output().unwrap();
     server.join().unwrap();
     assert!(output.status.success());
@@ -73,6 +76,7 @@ fn stdin_eof_half_closes_without_hanging() {
             .unwrap();
         let mut buf = [0_u8; 1];
         assert_eq!(stream.read(&mut buf).unwrap(), 0);
+        thread::sleep(Duration::from_millis(100));
     });
     let output = Command::new(env!("CARGO_BIN_EXE_zcode-as-subagent-mcp"))
         .env("ZCODE_AGENTD_SOCKET", &path)
@@ -130,17 +134,23 @@ fn daemon_eof_is_transport_failure_with_nonzero_exit() {
         let (stream, _) = listener.accept().unwrap();
         drop(stream);
     });
-    let child = Command::new(env!("CARGO_BIN_EXE_zcode-as-subagent-mcp"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zcode-as-subagent-mcp"))
         .env("ZCODE_AGENTD_SOCKET", &path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    // Keep stdin open while the server closes first, deterministically
+    // exercising daemon-first termination.
+    let stdin = child.stdin.take().unwrap();
+    thread::spawn(move || { thread::sleep(Duration::from_millis(100)); drop(stdin); });
     let output = child.wait_with_output().unwrap();
+    let status = output.status;
+    let stderr = output.stderr;
     server.join().unwrap();
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!status.success());
+    let stderr = String::from_utf8_lossy(&stderr);
     assert!(
         stderr.contains("daemon MCP stream closed unexpectedly (EOF)"),
         "{stderr}"
