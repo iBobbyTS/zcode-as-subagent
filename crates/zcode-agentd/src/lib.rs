@@ -31,6 +31,7 @@ use zcode_protocol::{
     SESSION_SUBSCRIBE,
 };
 
+pub mod mcp;
 pub mod observation;
 pub mod rpc;
 use zcode_agent_preparation::{
