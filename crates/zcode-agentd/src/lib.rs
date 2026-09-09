@@ -5848,6 +5848,7 @@ pub struct Daemon {
 #[cfg(unix)]
 struct McpServer {
     path: PathBuf,
+    socket_identity: rpc::SocketIdentity,
     shutdown: Arc<AtomicBool>,
     thread: Mutex<Option<thread::JoinHandle<()>>>,
 }
@@ -5856,10 +5857,15 @@ struct McpServer {
 impl McpServer {
     fn bind(path: PathBuf, service: Arc<rpc::RpcService>) -> io::Result<Self> {
         use std::os::unix::net::UnixListener;
-        let _ = std::fs::remove_file(&path);
+        rpc::remove_stale_socket(&path)?;
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
         let listener = UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let socket_identity = rpc::SocketIdentity {
+            device: std::os::unix::fs::MetadataExt::dev(&metadata),
+            inode: std::os::unix::fs::MetadataExt::ino(&metadata),
+        };
         listener.set_nonblocking(true)?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let loop_shutdown = Arc::clone(&shutdown);
@@ -5883,15 +5889,15 @@ impl McpServer {
                     }
                 }
             });
-            let _ = std::fs::remove_file(wake_path);
+            let _ = rpc::remove_matching_socket(&wake_path, socket_identity);
         });
-        Ok(Self { path, shutdown, thread: Mutex::new(Some(thread)) })
+        Ok(Self { path, socket_identity, shutdown, thread: Mutex::new(Some(thread)) })
     }
     fn shutdown(&self) {
         if self.shutdown.swap(true, Ordering::AcqRel) { return; }
         let _ = std::os::unix::net::UnixStream::connect(&self.path);
         if let Some(thread) = self.thread.lock().unwrap().take() { let _ = thread.join(); }
-        let _ = std::fs::remove_file(&self.path);
+        let _ = rpc::remove_matching_socket(&self.path, self.socket_identity);
     }
 }
 

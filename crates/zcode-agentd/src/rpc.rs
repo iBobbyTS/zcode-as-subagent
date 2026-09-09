@@ -41,6 +41,8 @@ pub const RPC_TRANSPORT_SUPPORTED: bool = cfg!(unix);
 mod unix;
 #[cfg(unix)]
 pub use unix::{RpcClient, RpcServer, ServerOptions};
+#[cfg(unix)]
+pub(crate) use unix::{remove_matching_socket, remove_stale_socket, SocketIdentity};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RpcRequest {
