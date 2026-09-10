@@ -34,7 +34,8 @@ pub const MAX_PENDING_REQUESTS: usize = 100;
 /// worst-case JSON escaping (one input byte becoming a six-byte `\\u00XX`
 /// escape), the response envelope, and the trailing newline fit in one frame.
 pub const MAX_RESULT_CHUNK_BYTES: usize = 256 * 1024;
-pub const MAX_WAIT: Duration = Duration::from_secs(5);
+pub const MAX_WAIT: Duration = Duration::from_secs(299);
+pub const DEFAULT_WAIT_TIME: u64 = 290;
 pub const RPC_TRANSPORT_SUPPORTED: bool = cfg!(unix);
 
 #[cfg(unix)]
@@ -66,7 +67,7 @@ pub enum RpcMethod {
         input: GeneralSubmitInput,
     },
     TaskList(TaskListQuery),
-    TaskPoll(TaskPollQuery),
+    TaskWait(TaskWaitQuery),
     TaskMessage(MessageInput),
     TaskRespond(RespondInput),
     TaskCancel {
@@ -94,7 +95,7 @@ impl RpcMethod {
             "system_status"
                 | "submit_general"
                 | "task_list"
-                | "task_poll"
+                | "task_wait"
                 | "task_message"
                 | "task_respond"
                 | "task_cancel"
@@ -151,13 +152,18 @@ pub struct GeneralSubmitInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TaskPollQuery {
+pub struct TaskWaitQuery {
     pub agent_id: String,
     #[serde(default)]
     pub after_revision: u64,
-    pub timeout_ms: u64,
+    #[serde(default = "default_wait_time")]
+    pub wait_time: u64,
     #[serde(default)]
     pub message_id: Option<String>,
+}
+
+fn default_wait_time() -> u64 {
+    DEFAULT_WAIT_TIME
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,7 +252,7 @@ pub enum RpcSuccess {
         tasks: Vec<TaskView>,
         next_cursor: Option<String>,
     },
-    TaskPoll {
+    TaskWait {
         task: TaskView,
         revision: u64,
         next_revision: u64,
@@ -661,6 +667,11 @@ pub enum RpcServiceConfigError {
 }
 
 impl RpcService {
+    #[cfg(test)]
+    pub(crate) fn store_for_wait_test(&self) -> Arc<Store> {
+        self.store.clone()
+    }
+
     pub fn new(scheduler: Scheduler, store: Arc<Store>) -> Result<Self, RpcServiceConfigError> {
         let service_generation = opaque_generation()?;
         Self::new_with_service_generation(scheduler, store, service_generation)
@@ -683,6 +694,14 @@ impl RpcService {
     }
 
     pub fn handle_bytes(&self, frame: &[u8]) -> RpcResponse {
+        self.handle_bytes_interruptible(frame, &|| false)
+    }
+
+    pub(crate) fn handle_bytes_interruptible(
+        &self,
+        frame: &[u8],
+        interrupted: &dyn Fn() -> bool,
+    ) -> RpcResponse {
         if frame.len().saturating_add(1) > MAX_REQUEST_FRAME_BYTES {
             return RpcResponse::error(
                 None,
@@ -748,13 +767,21 @@ impl RpcService {
             );
         }
         let request_id = request.request_id;
-        match self.dispatch(request.method) {
+        match self.dispatch_interruptible(request.method, interrupted) {
             Ok(result) => RpcResponse::success(request_id, result),
             Err(error) => RpcResponse::error(Some(request_id), error),
         }
     }
 
     pub fn dispatch(&self, method: RpcMethod) -> Result<RpcSuccess, RpcError> {
+        self.dispatch_interruptible(method, &|| false)
+    }
+
+    fn dispatch_interruptible(
+        &self,
+        method: RpcMethod,
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<RpcSuccess, RpcError> {
         match method {
             RpcMethod::SystemStatus => Ok(RpcSuccess::SystemStatus {
                 status: self.system_status(),
@@ -824,7 +851,16 @@ impl RpcService {
                     next_cursor: page.next_cursor.map(format_task_cursor),
                 })
             }
-            RpcMethod::TaskPoll(query) => self.task_poll(query),
+            RpcMethod::TaskWait(query) => {
+                if query.wait_time > MAX_WAIT.as_secs() {
+                    return Err(RpcError::new(
+                        RpcErrorCode::Validation,
+                        "wait_time must be between 0 and 299 seconds",
+                    ));
+                }
+                let deadline = Instant::now() + Duration::from_secs(query.wait_time);
+                self.task_wait(query, deadline, interrupted)
+            }
             RpcMethod::TaskMessage(input) => {
                 let task = self.require_task(&input.agent_id)?;
                 validate_id(&input.message_id, "message_id")?;
@@ -1018,15 +1054,16 @@ impl RpcService {
         })
     }
 
-    fn task_poll(&self, query: TaskPollQuery) -> Result<RpcSuccess, RpcError> {
-        if Duration::from_millis(query.timeout_ms) > MAX_WAIT {
-            return Err(RpcError::new(
-                RpcErrorCode::Validation,
-                "poll timeout is outside the allowed range",
-            ));
-        }
-        let deadline = Instant::now() + Duration::from_millis(query.timeout_ms);
+    fn task_wait(
+        &self,
+        query: TaskWaitQuery,
+        deadline: Instant,
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<RpcSuccess, RpcError> {
         loop {
+            if interrupted() {
+                return Err(RpcError::new(RpcErrorCode::Unavailable, "wait interrupted"));
+            }
             let task = self.require_task(&query.agent_id)?;
             let message_receipt = if let Some(id) = &query.message_id {
                 self.store.message(id).map_err(map_store)?.and_then(|m| {
@@ -1049,14 +1086,9 @@ impl RpcService {
                 .into_iter()
                 .map(pending_request_view)
                 .collect::<Vec<_>>();
-            let command_pending_approval = pending_requests.iter().any(|request| {
-                request.kind == "permission" && request.state == PendingRequestStateView::Pending
-            });
-            let result_available = self
-                .store
-                .task_result(&task.agent_id)
-                .map_err(map_store)?
-                .is_some();
+            let command_pending_approval = pending_requests.iter().any(pending_bash_request);
+            let stored_result = self.store.task_result(&task.agent_id).map_err(map_store)?;
+            let result_available = stored_result.is_some();
             let activity = self.scheduler.passive_activity_snapshot(&task.agent_id);
             let revision = activity
                 .as_ref()
@@ -1065,17 +1097,9 @@ impl RpcService {
                 .max(task.last_event_seq);
             let terminal = task.phase == TaskPhase::Terminal;
             let now = Instant::now();
-            if query.message_id.is_some()
-                || revision > query.after_revision
-                || !pending_requests.is_empty()
-                || terminal
-                || now >= deadline
-            {
-                let timed_out = revision <= query.after_revision
-                    && pending_requests.is_empty()
-                    && !terminal
-                    && now >= deadline;
-                return Ok(RpcSuccess::TaskPoll {
+            if command_pending_approval || terminal || now >= deadline {
+                let timed_out = !command_pending_approval && !terminal && now >= deadline;
+                let mut response = RpcSuccess::TaskWait {
                     activity: task_activity_view(task.phase, activity),
                     task: task_view(task.clone()),
                     revision,
@@ -1087,16 +1111,479 @@ impl RpcService {
                         .scheduler
                         .passive_activity_snapshot(&task.agent_id)
                         .and_then(|a| a.latest_progress),
-                    // Result text is read through the bounded result endpoint;
-                    // poll must remain queryable for arbitrarily large results.
-                    result: None,
-                    instruction: (!terminal).then(|| "Use poll for progress".to_owned()),
+                    result: stored_result.filter(|_| terminal).map(Into::into),
+                    instruction: (!terminal).then(|| "Use wait for completion".to_owned()),
                     timed_out,
                     message_receipt,
-                });
+                };
+                bound_wait_result(&mut response)?;
+                return Ok(response);
             }
             thread::sleep((deadline - now).min(Duration::from_millis(10)));
         }
+    }
+}
+
+fn pending_bash_request(request: &PendingRequestView) -> bool {
+    request.kind == "permission"
+        && request.state == PendingRequestStateView::Pending
+        && request.respondable
+        && request
+            .tool_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("bash"))
+}
+
+// Measure the complete envelope with the largest valid request ID. Large result
+// text falls back to the existing first-page contract; oversized metadata still
+// uses the transport's existing Oversized response.
+fn bound_wait_result(response: &mut RpcSuccess) -> Result<(), RpcError> {
+    let envelope = RpcResponse::success("\u{1}".repeat(MAX_REQUEST_ID_BYTES), response.clone());
+    let fits = serde_json::to_vec(&envelope)
+        .map_err(|_| RpcError::new(RpcErrorCode::Oversized, "response encoding failed"))?
+        .len()
+        .saturating_add(1)
+        <= MAX_RESPONSE_FRAME_BYTES;
+    if !fits {
+        if let RpcSuccess::TaskWait {
+            result: Some(result),
+            ..
+        } = response
+        {
+            let (end, next_offset) =
+                result_page_bounds(&result.final_text, 0, MAX_RESULT_CHUNK_BYTES)?;
+            result.final_text.truncate(end);
+            result.next_offset = next_offset;
+            result.complete = next_offset.is_none();
+        }
+        let envelope = RpcResponse::success("\u{1}".repeat(MAX_REQUEST_ID_BYTES), response.clone());
+        if serde_json::to_vec(&envelope)
+            .map_or(true, |bytes| bytes.len() + 1 > MAX_RESPONSE_FRAME_BYTES)
+        {
+            return Err(RpcError::new(
+                RpcErrorCode::Oversized,
+                "response frame exceeds cap",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod wait_tests {
+    use super::*;
+    use crate::{CommandRuntimeFactory, SchedulerConfig};
+    use std::process::Command;
+    use zcode_agent_store::TaskResult;
+
+    pub(crate) fn fixture() -> (tempfile::TempDir, Arc<RpcService>, String) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/live-agent/workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("s01-wait-")
+            .tempdir_in(root)
+            .unwrap();
+        let store = Arc::new(Store::open(directory.path().join("state.sqlite")).unwrap());
+        let factory = CommandRuntimeFactory::new(|_: &TaskRecord| -> std::io::Result<Command> {
+            panic!("wait fixture must never start a runtime")
+        });
+        let scheduler = Scheduler::new(
+            "wait-test",
+            store.clone(),
+            Arc::new(factory),
+            SchedulerConfig::default(),
+        )
+        .unwrap();
+        let submitted = scheduler
+            .enqueue_general(&GeneralTaskManifest {
+                schema: "zcode-general-task/v1".into(),
+                agent_id: "".into(),
+                repository: directory.path().canonicalize().unwrap(),
+                permission_mode: zcode_agent_preparation::PermissionMode::Plan,
+                prompt: "wait fixture".into(),
+                write_manifest: vec![],
+            })
+            .unwrap();
+        let id = submitted.task.agent_id;
+        let claim = store.claim_next("wait-test", 10, 10).unwrap().unwrap();
+        store
+            .mark_session_running(&id, claim.owner_epoch, "runtime", None, None, None)
+            .unwrap();
+        (
+            directory,
+            Arc::new(RpcService::new(scheduler, store).unwrap()),
+            id,
+        )
+    }
+
+    pub(crate) fn query(id: &str, wait_time: u64) -> TaskWaitQuery {
+        TaskWaitQuery {
+            agent_id: id.into(),
+            after_revision: 0,
+            wait_time,
+            message_id: None,
+        }
+    }
+
+    #[test]
+    fn wait_defaults_limits_and_old_method_rejection() {
+        let (_, service, id) = fixture();
+        let parsed: TaskWaitQuery =
+            serde_json::from_value(serde_json::json!({"agent_id":id})).unwrap();
+        assert_eq!(parsed.wait_time, 290);
+        assert_eq!(agent_capabilities(false).max_wait_ms, 299000);
+        for value in [-1, 300] {
+            let response = service.handle_bytes(
+                &serde_json::to_vec(&serde_json::json!({
+                    "version":RPC_VERSION,"request_id":"limits","method":"task_wait",
+                    "params":{"agent_id":id,"wait_time":value}
+                }))
+                .unwrap(),
+            );
+            assert!(matches!(
+                response.outcome,
+                RpcOutcome::Error {
+                    error: RpcError {
+                        code: RpcErrorCode::Validation,
+                        ..
+                    }
+                }
+            ));
+        }
+        assert!(!RpcMethod::is_known("task_poll"));
+        let before = service.store.get_task(&id).unwrap();
+        let start = Instant::now();
+        assert!(matches!(
+            service
+                .dispatch(RpcMethod::TaskWait(query(&id, 0)))
+                .unwrap(),
+            RpcSuccess::TaskWait {
+                timed_out: true,
+                ..
+            }
+        ));
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert_eq!(before, service.store.get_task(&id).unwrap());
+        // A terminal task accepts the maximum without actually sleeping.
+        service
+            .store
+            .store_task_result(
+                &id,
+                &TaskResult {
+                    outcome: TaskOutcome::Completed,
+                    final_text: "done".into(),
+                    partial: false,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            service
+                .dispatch(RpcMethod::TaskWait(query(&id, 299)))
+                .unwrap(),
+            RpcSuccess::TaskWait {
+                timed_out: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn wait_ignores_revision_message_and_ordinary_activity() {
+        let (_, service, id) = fixture();
+        service
+            .store
+            .insert_message("message-1", &id, "queue", "continue")
+            .unwrap();
+        let tracker = Arc::new(crate::PassiveActivityTracker::new(true));
+        service
+            .scheduler
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .activities
+            .insert(id.clone(), tracker.clone());
+        let mut input = query(&id, 1);
+        input.message_id = Some("message-1".into());
+        let before = service.store.get_task(&id).unwrap();
+        let start = Instant::now();
+        let iterations = std::cell::Cell::new(0usize);
+        let response = service
+            .task_wait(input, start + Duration::from_millis(80), &|| {
+                // Deterministic mid-wait snapshot changes, without timing a worker.
+                iterations.set(iterations.get() + 1);
+                if iterations.get() == 2 {
+                    let mut state = tracker.state.lock().unwrap();
+                    state.revision = 900;
+                    state.latest_text_tail = "ordinary text".into();
+                    state.latest_progress = Some("ordinary progress".into());
+                    state.last_model_delta_at = Some(Instant::now());
+                    state.active_tools.insert(
+                        "tool".into(),
+                        (crate::PassiveToolKind::Bash, Instant::now()),
+                    );
+                }
+                false
+            })
+            .unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(80));
+        let RpcSuccess::TaskWait {
+            timed_out: true,
+            revision: 900,
+            activity,
+            message_receipt: Some(_),
+            ..
+        } = response
+        else {
+            panic!("ordinary activity ended wait")
+        };
+        assert_eq!(activity.latest_text_tail, "ordinary text");
+        assert_eq!(activity.active_tools.len(), 1);
+        assert_eq!(before, service.store.get_task(&id).unwrap());
+    }
+
+    #[test]
+    fn wait_bash_only_and_pending_state_filter() {
+        for (kind, tool, state, wakes) in [
+            ("permission", "bAsH", PendingRequestStateView::Pending, true),
+            (
+                "permission",
+                "Read",
+                PendingRequestStateView::Pending,
+                false,
+            ),
+            (
+                "permission",
+                "Other",
+                PendingRequestStateView::Pending,
+                false,
+            ),
+            (
+                "permission",
+                "Bash",
+                PendingRequestStateView::Sending,
+                false,
+            ),
+            (
+                "permission",
+                "Bash",
+                PendingRequestStateView::Responded,
+                false,
+            ),
+            (
+                "unsupported_input",
+                "Bash",
+                PendingRequestStateView::Pending,
+                false,
+            ),
+        ] {
+            let request = PendingRequestView {
+                request_id: "r".into(),
+                kind: kind.into(),
+                state,
+                respondable: true,
+                tool_name: Some(tool.into()),
+                operation: "command".into(),
+                summary: "fixture".into(),
+                policy_preview: "unknown".into(),
+            };
+            assert_eq!(pending_bash_request(&request), wakes);
+        }
+        let (_, service, id) = fixture();
+        service
+            .store
+            .insert_pending_request(
+                "request",
+                &id,
+                "correlation",
+                "permission",
+                r#"{"toolName":"bAsH"}"#,
+            )
+            .unwrap();
+        assert!(matches!(
+            service
+                .dispatch(RpcMethod::TaskWait(query(&id, 299)))
+                .unwrap(),
+            RpcSuccess::TaskWait {
+                command_pending_approval: true,
+                timed_out: false,
+                ..
+            }
+        ));
+        service
+            .store
+            .claim_pending_response_if_accepting(&id, "request", "allow", None)
+            .unwrap();
+        assert!(matches!(
+            service
+                .task_wait(
+                    query(&id, 1),
+                    Instant::now() + Duration::from_millis(30),
+                    &|| false
+                )
+                .unwrap(),
+            RpcSuccess::TaskWait {
+                command_pending_approval: false,
+                timed_out: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn wait_terminal_results_preserve_outcomes_and_page_large_text() {
+        for (outcome, text, complete) in [
+            (
+                TaskOutcome::Completed,
+                "x".repeat(MAX_RESULT_CHUNK_BYTES + 10),
+                true,
+            ),
+            (TaskOutcome::Failed, "failure".into(), true),
+            (TaskOutcome::Cancelled, "cancelled".into(), true),
+            (
+                TaskOutcome::Completed,
+                "\0".repeat(MAX_RESPONSE_FRAME_BYTES),
+                false,
+            ),
+        ] {
+            let (_, service, id) = fixture();
+            service
+                .store
+                .store_task_result(
+                    &id,
+                    &TaskResult {
+                        outcome,
+                        final_text: text.clone(),
+                        partial: outcome != TaskOutcome::Completed,
+                    },
+                )
+                .unwrap();
+            let response = service
+                .dispatch(RpcMethod::TaskWait(query(&id, 299)))
+                .unwrap();
+            let RpcSuccess::TaskWait {
+                result: Some(result),
+                timed_out: false,
+                ..
+            } = &response
+            else {
+                panic!("terminal result missing")
+            };
+            assert_eq!(result.outcome, outcome);
+            assert_eq!(result.total_bytes, text.len());
+            assert_eq!(result.complete, complete);
+            assert_eq!(
+                result.next_offset,
+                (!complete).then_some(MAX_RESULT_CHUNK_BYTES)
+            );
+            assert_eq!(result.final_text, text[..result.final_text.len()]);
+            assert!(
+                serde_json::to_vec(&RpcResponse::success("q".repeat(128), response))
+                    .unwrap()
+                    .len()
+                    + 1
+                    <= MAX_RESPONSE_FRAME_BYTES
+            );
+            assert_eq!(
+                service
+                    .store
+                    .task_result(&id)
+                    .unwrap()
+                    .unwrap()
+                    .result
+                    .final_text,
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn wait_interruption_does_not_mutate_task() {
+        let (_, service, id) = fixture();
+        let before = service.store.get_task(&id).unwrap();
+        let response = service.handle_bytes_interruptible(
+            &serde_json::to_vec(&RpcRequest {
+                version: RPC_VERSION,
+                request_id: "interrupt".into(),
+                method: RpcMethod::TaskWait(query(&id, 299)),
+            })
+            .unwrap(),
+            &|| true,
+        );
+        assert!(matches!(response.outcome, RpcOutcome::Error { .. }));
+        assert_eq!(before, service.store.get_task(&id).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_socket_disconnect_and_shutdown_release_workers_without_task_mutation() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixStream;
+        let (directory, service, id) = fixture();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        // macOS sockaddr_un caps path length; a cwd-relative path still keeps
+        // the fixture inside the repository's prescribed workspace directory.
+        let absolute_socket = directory.path().join("rpc.sock");
+        let socket = absolute_socket
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_path_buf();
+        let server = RpcServer::bind(
+            &socket,
+            service.clone(),
+            ServerOptions {
+                max_connections: 1,
+                ..ServerOptions::default()
+            },
+        )
+        .unwrap();
+        let before = service.store.get_task(&id).unwrap();
+        let request = RpcRequest {
+            version: RPC_VERSION,
+            request_id: "wait".into(),
+            method: RpcMethod::TaskWait(query(&id, 299)),
+        };
+        let mut frame = serde_json::to_vec(&request).unwrap();
+        frame.push(b'\n');
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream.write_all(&frame).unwrap();
+        // Let the bounded connection worker enter the request, then disconnect.
+        thread::sleep(Duration::from_millis(30));
+        drop(stream);
+        let client = RpcClient::new(&socket, Duration::from_secs(1));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let response = client
+                .call(&RpcRequest {
+                    version: RPC_VERSION,
+                    request_id: "status".into(),
+                    method: RpcMethod::SystemStatus,
+                })
+                .unwrap();
+            if matches!(response.outcome, RpcOutcome::Success { .. }) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "disconnected wait retained connection slot"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(20));
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        stream.write_all(&frame).unwrap();
+        thread::sleep(Duration::from_millis(30));
+        let start = Instant::now();
+        server.shutdown();
+        assert!(start.elapsed() < Duration::from_secs(1));
+        let mut returned = String::new();
+        stream.read_to_string(&mut returned).unwrap();
+        assert!(returned.contains("wait interrupted"));
+        assert_eq!(before, service.store.get_task(&id).unwrap());
     }
 }
 

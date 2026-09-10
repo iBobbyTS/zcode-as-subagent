@@ -8,7 +8,7 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     os::unix::{
         fs::{FileTypeExt, MetadataExt, PermissionsExt},
-        io::{FromRawFd, IntoRawFd},
+        io::{AsRawFd, FromRawFd, IntoRawFd},
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
@@ -88,8 +88,14 @@ impl RpcServer {
                         active.fetch_add(1, Ordering::AcqRel);
                         let service = Arc::clone(&service);
                         let worker_active = Arc::clone(&active);
+                        let worker_shutdown = Arc::clone(&accept_shutdown);
                         workers.push(thread::spawn(move || {
-                            handle_connection(stream, &service, options.connection_timeout);
+                            handle_connection(
+                                stream,
+                                &service,
+                                options.connection_timeout,
+                                &worker_shutdown,
+                            );
                             worker_active.fetch_sub(1, Ordering::AcqRel);
                         }));
                     }
@@ -154,6 +160,14 @@ impl RpcClient {
     }
 
     pub fn call(&self, request: &RpcRequest) -> io::Result<RpcResponse> {
+        self.call_interruptible(request, &|| false)
+    }
+
+    pub(crate) fn call_interruptible(
+        &self,
+        request: &RpcRequest,
+        interrupted: &dyn Fn() -> bool,
+    ) -> io::Result<RpcResponse> {
         let deadline = Instant::now() + self.timeout;
         let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
         socket.connect_timeout(&SockAddr::unix(&self.path)?, remaining(deadline)?)?;
@@ -168,8 +182,12 @@ impl RpcClient {
         }
         frame.push(b'\n');
         write_all_until(&mut stream, &frame, deadline)?;
-        let response =
-            read_limited_frame_until(&mut stream, MAX_RESPONSE_FRAME_BYTES - 1, deadline)?;
+        let response = read_limited_frame_until(
+            &mut stream,
+            MAX_RESPONSE_FRAME_BYTES - 1,
+            deadline,
+            interrupted,
+        )?;
         serde_json::from_slice(&response)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
@@ -199,11 +217,18 @@ fn read_limited_frame_until(
     stream: &mut UnixStream,
     limit: usize,
     deadline: Instant,
+    interrupted: &dyn Fn() -> bool,
 ) -> io::Result<Vec<u8>> {
     stream.set_nonblocking(true)?;
     let mut frame = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {
+        if interrupted() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "RPC wait interrupted",
+            ));
+        }
         let read_remaining = remaining(deadline)?;
         let read = match stream.read(&mut buffer) {
             Ok(0) => {
@@ -347,7 +372,12 @@ pub(crate) fn remove_matching_socket(path: &Path, expected: SocketIdentity) -> i
     fs::remove_file(path)
 }
 
-fn handle_connection(mut stream: UnixStream, service: &RpcService, timeout: Duration) {
+fn handle_connection(
+    mut stream: UnixStream,
+    service: &RpcService,
+    timeout: Duration,
+    shutdown: &AtomicBool,
+) {
     if stream.set_nonblocking(false).is_err() {
         return;
     }
@@ -356,7 +386,9 @@ fn handle_connection(mut stream: UnixStream, service: &RpcService, timeout: Dura
     let response = {
         let mut reader = BufReader::new(&mut stream);
         match read_limited_frame(&mut reader, MAX_REQUEST_FRAME_BYTES - 1) {
-            Ok(frame) => service.handle_bytes(&frame),
+            Ok(frame) => service.handle_bytes_interruptible(&frame, &|| {
+                shutdown.load(Ordering::Acquire) || peer_disconnected(reader.get_ref())
+            }),
             Err(error) if error.kind() == io::ErrorKind::InvalidData => RpcResponse::error(
                 None,
                 RpcError::new(RpcErrorCode::Oversized, "request frame exceeds cap"),
@@ -365,6 +397,26 @@ fn handle_connection(mut stream: UnixStream, service: &RpcService, timeout: Dura
         }
     };
     let _ = write_response(&mut stream, response);
+}
+
+fn peer_disconnected(stream: &UnixStream) -> bool {
+    let mut byte = 0u8;
+    // Non-consuming and non-blocking: a wait may observe closure without
+    // changing socket flags or consuming a request byte.
+    let read = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            (&mut byte as *mut u8).cast(),
+            1,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    read == 0
+        || (read < 0
+            && !matches!(
+                io::Error::last_os_error().kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ))
 }
 
 fn write_busy(mut stream: UnixStream, timeout: Duration) {

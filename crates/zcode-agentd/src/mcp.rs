@@ -402,7 +402,7 @@ mod server {
         MessageInput, RespondInput, ResponseDecision, ResponseOutcomeView, RpcClient, RpcMethod,
         RpcOutcome, RpcRequest, RpcService, RpcSuccess, SubmissionDispositionView,
         SystemStatusView, TaskActivityStateView, TaskActivityView, TaskListQuery,
-        TaskObservationView, TaskPhaseFilter, TaskPollQuery, TaskResultView, TaskView,
+        TaskObservationView, TaskPhaseFilter, TaskResultView, TaskView, TaskWaitQuery,
         TelemetryStatusView, RPC_VERSION,
     };
     use rmcp::{
@@ -417,7 +417,7 @@ mod server {
         collections::BTreeMap,
         path::PathBuf,
         sync::{
-            atomic::{AtomicU64, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
             Arc,
         },
         time::Duration,
@@ -1285,6 +1285,36 @@ mod server {
         }
 
         fn rpc(&self, method: RpcMethod) -> Result<RpcSuccess, ToolError> {
+            self.rpc_interruptible(method, &|| false)
+        }
+
+        async fn rpc_wait(&self, query: TaskWaitQuery) -> Result<RpcSuccess, ToolError> {
+            struct InterruptOnDrop(Arc<AtomicBool>);
+            impl Drop for InterruptOnDrop {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Release);
+                }
+            }
+            let interrupted = Arc::new(AtomicBool::new(false));
+            let _guard = InterruptOnDrop(Arc::clone(&interrupted));
+            let mut facade = self.clone();
+            facade.timeout = facade
+                .timeout
+                .max(Duration::from_secs(query.wait_time.saturating_add(5)));
+            tokio::task::spawn_blocking(move || {
+                facade.rpc_interruptible(RpcMethod::TaskWait(query), &|| {
+                    interrupted.load(Ordering::Acquire)
+                })
+            })
+            .await
+            .map_err(|_| protocol_error().with_operation("wait"))?
+        }
+
+        fn rpc_interruptible(
+            &self,
+            method: RpcMethod,
+            interrupted: &dyn Fn() -> bool,
+        ) -> Result<RpcSuccess, ToolError> {
             let (operation, agent_id) = rpc_context(&method);
             let request = RpcRequest {
                 version: RPC_VERSION,
@@ -1308,13 +1338,13 @@ mod server {
                     .with_agent_id(agent_id));
             }
             let response = if let Some(service) = &self.service {
-                service.handle_bytes(&encoded)
+                service.handle_bytes_interruptible(&encoded, interrupted)
             } else {
                 RpcClient::new(
                     self.socket.as_ref().expect("socket configured"),
                     self.timeout,
                 )
-                .call(&request)
+                .call_interruptible(&request, interrupted)
                 .map_err(|error| {
                     public_transport_error(error)
                         .with_operation(operation)
@@ -1368,7 +1398,7 @@ mod server {
             RpcMethod::SystemStatus => ("status", None),
             RpcMethod::SubmitGeneral { .. } => ("spawn", None),
             RpcMethod::TaskList(_) => ("list", None),
-            RpcMethod::TaskPoll(input) => ("poll", Some(input.agent_id.clone())),
+            RpcMethod::TaskWait(input) => ("wait", Some(input.agent_id.clone())),
             RpcMethod::TaskMessage(input) => ("send", Some(input.agent_id.clone())),
             RpcMethod::TaskRespond(input) => ("respond", Some(input.agent_id.clone())),
             RpcMethod::TaskCancel { agent_id } => ("cancel", Some(agent_id.clone())),
@@ -1513,7 +1543,8 @@ mod server {
                 _ => return Err(protocol_error().with_operation("spawn")),
             };
             Ok(Json(AgentSpawnOutput {
-                agent_id: super::public_task_id(&task.agent_id).map_err(|e| e.with_operation("spawn"))?,
+                agent_id: super::public_task_id(&task.agent_id)
+                    .map_err(|e| e.with_operation("spawn"))?,
                 submission_disposition: match disposition {
                     SubmissionDispositionView::Created => SubmissionDisposition::Created,
                     SubmissionDispositionView::Existing => SubmissionDisposition::Existing,
@@ -1537,20 +1568,24 @@ mod server {
             &self,
             Parameters(input): Parameters<AgentPollInput>,
         ) -> Result<Json<AgentPollOutput>, ToolError> {
-            let agent_id = internal_task_id(input.agent_id)
-                .map_err(|error| error.with_operation("poll"))?;
+            let agent_id =
+                internal_task_id(input.agent_id).map_err(|error| error.with_operation("poll"))?;
             if input.timeout_ms > 5000 {
                 return Err(validation_error("timeout_ms must be between 0 and 5000")
                     .with_operation("poll")
                     .with_agent_id(Some(agent_id)));
             }
-            match self.rpc(RpcMethod::TaskPoll(TaskPollQuery {
-                agent_id,
-                after_revision: input.after_revision,
-                timeout_ms: input.timeout_ms,
-                message_id: input.message_id,
-            }))? {
-                RpcSuccess::TaskPoll {
+            match self
+                .rpc_wait(TaskWaitQuery {
+                    agent_id,
+                    after_revision: input.after_revision,
+                    // S02 replaces the public milliseconds field with wait_time.
+                    wait_time: input.timeout_ms.div_ceil(1000),
+                    message_id: input.message_id,
+                })
+                .await?
+            {
+                RpcSuccess::TaskWait {
                     task,
                     revision,
                     next_revision,
@@ -1679,8 +1714,8 @@ mod server {
             &self,
             Parameters(input): Parameters<AgentSendInput>,
         ) -> Result<Json<AgentSendOutput>, ToolError> {
-            let agent_id = internal_task_id(input.agent_id)
-                .map_err(|error| error.with_operation("send"))?;
+            let agent_id =
+                internal_task_id(input.agent_id).map_err(|error| error.with_operation("send"))?;
             validate_text(&input.content, "content", MAX_MESSAGE_BYTES).map_err(|error| {
                 error
                     .with_operation("send")
@@ -1778,12 +1813,14 @@ mod server {
             &self,
             Parameters(input): Parameters<AgentInput>,
         ) -> Result<Json<AgentStateOutput>, ToolError> {
-            let agent_id = internal_task_id(input.agent_id)
-                .map_err(|error| error.with_operation("cancel"))?;
+            let agent_id =
+                internal_task_id(input.agent_id).map_err(|error| error.with_operation("cancel"))?;
             match self.rpc(RpcMethod::TaskCancel {
                 agent_id: agent_id.clone(),
             })? {
-                RpcSuccess::Stopped { task } => Ok(Json(AgentStateOutput { task: task.try_into()? })),
+                RpcSuccess::Stopped { task } => Ok(Json(AgentStateOutput {
+                    task: task.try_into()?,
+                })),
                 _ => Err(protocol_error()
                     .with_operation("cancel")
                     .with_agent_id(Some(agent_id))),
@@ -1805,8 +1842,8 @@ mod server {
             &self,
             Parameters(input): Parameters<AgentResultInput>,
         ) -> Result<Json<AgentResultOutput>, ToolError> {
-            let agent_id = internal_task_id(input.agent_id)
-                .map_err(|error| error.with_operation("result"))?;
+            let agent_id =
+                internal_task_id(input.agent_id).map_err(|error| error.with_operation("result"))?;
             let (task, result) = self.result(agent_id, input.offset, input.limit)?;
             Ok(Json(AgentResultOutput { task, result }))
         }
@@ -1826,12 +1863,14 @@ mod server {
             &self,
             Parameters(input): Parameters<AgentInput>,
         ) -> Result<Json<AgentStateOutput>, ToolError> {
-            let agent_id = internal_task_id(input.agent_id)
-                .map_err(|error| error.with_operation("close"))?;
+            let agent_id =
+                internal_task_id(input.agent_id).map_err(|error| error.with_operation("close"))?;
             match self.rpc(RpcMethod::TaskClose {
                 agent_id: agent_id.clone(),
             })? {
-                RpcSuccess::Closed { task } => Ok(Json(AgentStateOutput { task: task.try_into()? })),
+                RpcSuccess::Closed { task } => Ok(Json(AgentStateOutput {
+                    task: task.try_into()?,
+                })),
                 _ => Err(protocol_error()
                     .with_operation("close")
                     .with_agent_id(Some(agent_id))),
@@ -1900,6 +1939,72 @@ mod server {
             }))
             .unwrap();
             assert!(send.message_id.is_none());
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn wait_keeps_status_and_respond_serviceable_and_wakes_on_completion() {
+            use crate::rpc::{RespondInput, ResponseDecision, RpcSuccess, TaskResultView};
+            use zcode_agent_store::TaskOutcome;
+            let (_directory, service, id) = crate::rpc::wait_tests::fixture();
+            let store = service.store_for_wait_test();
+            let facade = SubagentMcp::from_service(service);
+            let start = std::time::Instant::now();
+            let waiting = facade.rpc_wait(crate::rpc::wait_tests::query(&id, 1));
+            let other_work = async {
+                tokio::task::yield_now().await;
+                assert!(matches!(
+                    facade.rpc(RpcMethod::SystemStatus).unwrap(),
+                    RpcSuccess::SystemStatus { .. }
+                ));
+                // Unknown request keeps the normal error, but must be serviced
+                // while the independent wait is still blocked.
+                let _ = facade.rpc(RpcMethod::TaskRespond(RespondInput {
+                    agent_id: id.clone(),
+                    request_id: "missing".into(),
+                    decision: ResponseDecision::Allow,
+                    content: None,
+                }));
+                assert!(start.elapsed() < Duration::from_millis(500));
+                store
+                    .store_task_result(
+                        &id,
+                        &zcode_agent_store::TaskResult {
+                            outcome: TaskOutcome::Completed,
+                            final_text: "final answer".into(),
+                            partial: false,
+                        },
+                    )
+                    .unwrap();
+            };
+            let (response, _) = tokio::join!(waiting, other_work);
+            assert!(matches!(
+                response.unwrap(),
+                RpcSuccess::TaskWait {
+                    timed_out: false,
+                    result: Some(TaskResultView { complete: true, .. }),
+                    ..
+                }
+            ));
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn dropped_embedded_wait_leaves_durable_task_unchanged() {
+            let (_directory, service, id) = crate::rpc::wait_tests::fixture();
+            let store = service.store_for_wait_test();
+            let before = store.get_task(&id).unwrap();
+            let facade = SubagentMcp::from_service(service);
+            let waiting = tokio::spawn(async move {
+                facade
+                    .rpc_wait(crate::rpc::wait_tests::query(&id, 299))
+                    .await
+            });
+            tokio::task::yield_now().await;
+            waiting.abort();
+            assert!(waiting.await.unwrap_err().is_cancelled());
+            assert_eq!(
+                before.clone(),
+                store.get_task(&before.unwrap().agent_id).unwrap()
+            );
         }
 
         #[test]
