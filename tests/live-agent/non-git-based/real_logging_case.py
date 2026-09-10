@@ -153,7 +153,10 @@ def main() -> int:
         emit("catalog", client.result("tools/list", {}))
         emit("status", client.tool_success("status", {}))
 
-        expected = client.tool_envelope("result", {"agent_id": "logging-missing-agent"})
+        # Public task IDs are JSON integers in the 10000000–99999999 range.
+        # Use a valid, unallocated ID so the request reaches the daemon's
+        # structured not-found projection instead of failing facade decoding.
+        expected = client.tool_envelope("result", {"agent_id": 99999999})
         emit("expected_business_error", expected)
         result = expected.get("result", {})
         if "error" in expected or not result.get("isError"):
