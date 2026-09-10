@@ -1112,7 +1112,13 @@ impl RpcService {
                         .passive_activity_snapshot(&task.agent_id)
                         .and_then(|a| a.latest_progress),
                     result: stored_result.filter(|_| terminal).map(Into::into),
-                    instruction: (!terminal).then(|| "Use wait for completion".to_owned()),
+                    instruction: if result_available {
+                        Some("Result now available".to_owned())
+                    } else if !terminal {
+                        Some("Not finished yet, call wait again; use observe only if latest_text_tail may indicate subagent runs into a meaningless loop".to_owned())
+                    } else {
+                        None
+                    },
                     timed_out,
                     message_receipt,
                 };
@@ -1247,15 +1253,20 @@ pub(crate) mod wait_tests {
         assert!(!RpcMethod::is_known("task_poll"));
         let before = service.store.get_task(&id).unwrap();
         let start = Instant::now();
-        assert!(matches!(
-            service
-                .dispatch(RpcMethod::TaskWait(query(&id, 0)))
-                .unwrap(),
-            RpcSuccess::TaskWait {
-                timed_out: true,
-                ..
-            }
-        ));
+        let RpcSuccess::TaskWait {
+            timed_out: true,
+            instruction,
+            ..
+        } = service
+            .dispatch(RpcMethod::TaskWait(query(&id, 0)))
+            .unwrap()
+        else {
+            panic!("expected unfinished wait response")
+        };
+        assert_eq!(
+            instruction.as_deref(),
+            Some("Not finished yet, call wait again; use observe only if latest_text_tail may indicate subagent runs into a meaningless loop")
+        );
         assert!(start.elapsed() < Duration::from_secs(1));
         assert_eq!(before, service.store.get_task(&id).unwrap());
         // A terminal task accepts the maximum without actually sleeping.
@@ -1270,15 +1281,19 @@ pub(crate) mod wait_tests {
                 },
             )
             .unwrap();
-        assert!(matches!(
-            service
-                .dispatch(RpcMethod::TaskWait(query(&id, 299)))
-                .unwrap(),
-            RpcSuccess::TaskWait {
-                timed_out: false,
-                ..
-            }
-        ));
+        let RpcSuccess::TaskWait {
+            timed_out: false,
+            instruction,
+            result_available,
+            ..
+        } = service
+            .dispatch(RpcMethod::TaskWait(query(&id, 299)))
+            .unwrap()
+        else {
+            panic!("expected terminal wait response")
+        };
+        assert!(result_available);
+        assert_eq!(instruction.as_deref(), Some("Result now available"));
     }
 
     #[test]
@@ -1325,6 +1340,7 @@ pub(crate) mod wait_tests {
             timed_out: true,
             revision: 900,
             activity,
+            instruction,
             message_receipt: Some(_),
             ..
         } = response
@@ -1332,6 +1348,10 @@ pub(crate) mod wait_tests {
             panic!("ordinary activity ended wait")
         };
         assert_eq!(activity.latest_text_tail, "ordinary text");
+        assert_eq!(
+            instruction.as_deref(),
+            Some("Not finished yet, call wait again; use observe only if latest_text_tail may indicate subagent runs into a meaningless loop")
+        );
         assert_eq!(activity.active_tools.len(), 1);
         assert_eq!(before, service.store.get_task(&id).unwrap());
     }
