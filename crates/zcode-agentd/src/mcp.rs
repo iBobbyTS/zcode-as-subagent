@@ -1248,6 +1248,8 @@ mod server {
         next_request: Arc<AtomicU64>,
         facade_identity: PublicComponentIdentity,
         tool_router: ToolRouter<Self>,
+        #[cfg(test)]
+        wait_handler_interrupted: Option<Arc<AtomicBool>>,
     }
 
     impl SubagentMcp {
@@ -1263,6 +1265,8 @@ mod server {
                 )
                 .into(),
                 tool_router: Self::tool_router(),
+                #[cfg(test)]
+                wait_handler_interrupted: None,
             }
         }
 
@@ -1278,6 +1282,8 @@ mod server {
                 )
                 .into(),
                 tool_router: Self::tool_router(),
+                #[cfg(test)]
+                wait_handler_interrupted: None,
             }
         }
 
@@ -1294,14 +1300,26 @@ mod server {
             query: TaskWaitQuery,
             request_cancelled: impl Fn() -> bool + Send + 'static,
         ) -> Result<RpcSuccess, ToolError> {
-            struct InterruptOnDrop(Arc<AtomicBool>);
+            struct InterruptOnDrop {
+                interrupted: Arc<AtomicBool>,
+                #[cfg(test)]
+                handler_interrupted: Option<Arc<AtomicBool>>,
+            }
             impl Drop for InterruptOnDrop {
                 fn drop(&mut self) {
-                    self.0.store(true, Ordering::Release);
+                    self.interrupted.store(true, Ordering::Release);
+                    #[cfg(test)]
+                    if let Some(latch) = &self.handler_interrupted {
+                        latch.store(true, Ordering::Release);
+                    }
                 }
             }
             let interrupted = Arc::new(AtomicBool::new(false));
-            let _guard = InterruptOnDrop(Arc::clone(&interrupted));
+            let _guard = InterruptOnDrop {
+                interrupted: Arc::clone(&interrupted),
+                #[cfg(test)]
+                handler_interrupted: self.wait_handler_interrupted.clone(),
+            };
             let mut facade = self.clone();
             facade.timeout = facade
                 .timeout
@@ -1914,14 +1932,17 @@ mod server {
                 SystemStatusView, TaskObservationView,
             },
         };
+        use rmcp::ServiceExt;
         use sha2::{Digest, Sha256};
         use std::{
             collections::{BTreeMap, HashSet},
             path::PathBuf,
-            sync::{atomic::Ordering, Arc},
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                Arc,
+            },
             time::Duration,
         };
-        use rmcp::ServiceExt;
 
         #[test]
         fn omitted_public_fields_use_the_frozen_defaults() {
@@ -2025,7 +2046,9 @@ mod server {
             let (_directory, service, id) = crate::rpc::wait_tests::fixture();
             let store = service.store_for_wait_test();
             let before = store.get_task(&id).unwrap();
-            let facade = SubagentMcp::from_service(service);
+            let handler_interrupted = Arc::new(AtomicBool::new(false));
+            let mut facade = SubagentMcp::from_service(service);
+            facade.wait_handler_interrupted = Some(Arc::clone(&handler_interrupted));
             let requests = Arc::clone(&facade.next_request);
             let (client, transport) = tokio::io::duplex(64 * 1024);
             let serving = tokio::spawn(async move {
@@ -2076,13 +2099,22 @@ mod server {
             writer.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":2,\"reason\":\"caller stopped waiting\"}}\n").await.unwrap();
             // rmcp drops the cancelled request's response after cancelling its
             // context token. The connection remains usable for subsequent calls.
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !handler_interrupted.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("cancelled request handler did not get interrupted");
             assert!(
                 tokio::time::timeout(Duration::from_millis(300), lines.next_line())
                     .await
                     .is_err()
             );
             writer
-                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\",\"params\":{}}\n")
+                .write_all(
+                    b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\",\"params\":{}}\n",
+                )
                 .await
                 .unwrap();
             let status = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
@@ -2095,7 +2127,10 @@ mod server {
                 "cancelled wait did not end promptly: {:?}",
                 cancellation_started.elapsed()
             );
-            assert_eq!(serde_json::from_str::<serde_json::Value>(&status).unwrap()["id"], 3);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&status).unwrap()["id"],
+                3
+            );
             assert_eq!(before, store.get_task(&id).unwrap());
             serving.abort();
             let _ = serving.await;
