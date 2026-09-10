@@ -45,11 +45,8 @@ def one_cli(repository: Path, decision: str) -> dict:
         wait = cli_call("wait", {"agent_id": agent_id, "after_revision": revision, "wait_time": 5})
         revision = int(wait.get("next_revision", revision))
         for request in wait.get("pending_requests", []):
-            if request.get("state") not in ("pending", "sending"):
+            if request.get("state") != "pending" or not request.get("respondable"):
                 continue
-            if not request.get("respondable"):
-                cli_call("cancel", {"agent_id": agent_id})
-                raise RuntimeError(f"{decision}: observed non-respondable pending request: {request.get('kind')}")
             args = {"agent_id": agent_id, "request_id": request["request_id"], "decision": decision,
                     "reason": f"respond case {decision}"}
             first = cli_call("respond", args)
@@ -65,14 +62,14 @@ def one_cli(repository: Path, decision: str) -> dict:
     result = cli_call("result", {"agent_id": agent_id})
     closed = cli_call("close", {"agent_id": agent_id})
     if not responses:
-        raise RuntimeError(f"{decision}: terminal without observed permission request")
+        raise RuntimeError(f"{decision}: terminal without observed respondable pending request")
     return {"decision": decision, "agent_id": agent_id, "responses": responses,
             "task": terminal, "result": result, "closed": closed}
 
 
 def run_mcp(repository: Path) -> None:
     proc = subprocess.run(["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--json",
-        f"Use only zcode_as_subagent MCP in {repository}. Run one edit task: execute Bash `python3 src/permission_probe.py`; wait until a pending permission request is visible and return its agent_id, request_id, and revision as JSON. Do not respond or close."], cwd=ROOT, text=True, capture_output=True, check=False)
+        f"Use only zcode_as_subagent MCP in {repository}. Run one edit task: execute Bash `python3 src/permission_probe.py`; wait until a request with state == pending and respondable == true is visible and return its agent_id, request_id, and revision as JSON. Do not respond or close."], cwd=ROOT, text=True, capture_output=True, check=False)
     print(proc.stdout)
     if proc.returncode:
         raise RuntimeError(proc.stderr)

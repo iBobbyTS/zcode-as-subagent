@@ -19,7 +19,7 @@ zas status
 
 ## 公共输入和生命周期
 
-每次 `spawn` 保存返回的 `agent_id`。`write_manifest` 可省略；省略时 build/edit/yolo 使用受保护的工作区范围，也可传仓库相对路径例如 `write_manifest=["src"]` 缩小范围。成功后循环 `wait`，把返回的 `next_revision` 作为下一次 `after_revision`；遇到 pending permission request 只用 `respond` 回复。进入 `TERMINAL` 后调用 `result`，最后调用 `close`。
+每次 `spawn` 保存返回的 `agent_id`。`write_manifest` 可省略；省略时 build/edit/yolo 使用受保护的工作区范围，也可传仓库相对路径例如 `write_manifest=["src"]` 缩小范围。成功后循环 `wait`，把返回的 `next_revision` 作为下一次 `after_revision`；只对 `state == pending && respondable` 的 request 调用 `respond`，工具种类和名称不影响这个条件。进入 `TERMINAL` 后调用 `result`，最后调用 `close`。
 
 CLI 请求形状如下（`<method>` 替换为表格中的方法，JSON 从 stdin 或 `--json` 传入）：
 
@@ -42,10 +42,10 @@ codex exec --dangerously-bypass-approvals-and-sandbox --json \
 |---|---|---|---|
 | `zcode_subagent_status` | `status`，参数 `{}` | 同名工具，`{}` | 返回协议版本、generation，daemon/store/scheduler 为 `READY` |
 | `zcode_subagent_spawn` | `spawn`，plan 或带 `write_manifest` 的写模式 | 同名工具 | 返回新 `agent_id`、`submission_disposition=created`、非空 phase |
-| `zcode_subagent_wait` | `wait`，`agent_id`、`after_revision`、`wait_time<=299` | 同名工具 | 返回 `next_revision`；可重复等待且不丢 pending request |
+| `zcode_subagent_wait` | `wait`，`agent_id`、`after_revision`、`wait_time<=299` | 同名工具 | 返回 `next_revision`；终态或投影内 `state == pending && respondable` 时提前返回；`pending_requests` 按创建顺序最多 100 条，不能把第 101 条当作唤醒依据 |
 | `zcode_subagent_list` | `list`，必须提供 `repository`、`phase` 或 `outcome` 范围 | 同名工具 | 只返回范围内任务，cursor 可继续且 limit 有界 |
 | `zcode_subagent_send` | `send`，已存在 agent、唯一 `message_id`、非空 content | 同名工具 | 首次 queued/delivered，重复 message_id 为 already_delivered |
-| `zcode_subagent_respond` | `respond`，真实 pending request 的 `request_id` 与 allow/deny | 同名工具 | 首次 responded，重复请求幂等，策略覆盖字段准确 |
+| `zcode_subagent_respond` | `respond`，真实 `state == pending && respondable` request 的 `request_id` 与 allow/deny | 同名工具 | 首次 responded，重复请求幂等，策略覆盖字段准确 |
 | `zcode_subagent_cancel` | `cancel`，运行中的 `agent_id` | 同名工具 | 返回 cancel_requested，随后 wait/result 为 CANCELLED 或既定终态 |
 | `zcode_subagent_result` | `result`，已终态 agent，可带 `offset`/`limit` | 同名工具 | 返回 outcome、分段 `final_text`、partial、边界；未终态应明确失败 |
 | `zcode_subagent_close` | `close`，已完成或取消的 agent | 同名工具 | 返回 closed/resources_reaped；重复调用保持幂等 |
@@ -58,7 +58,7 @@ Case 3 不再使用“spawn 后立即 cancel”的短路径作为主要验证。
 2. `spawn` Case 3，使用 `build` 和 `write_manifest=["src"]`。
 3. 持续 `wait`，直到至少一次返回非空 `latest_text_tail`，并且任务已经进入 `RUNNING`；保存每次的 revision、activity 和时间戳。
 4. 在仍运行时执行 `list` 和 `send`。`send` 使用唯一 `message_id`，随后用相同 message_id 重复一次，验证幂等结果。
-5. 不调用 `respond`，因为没有真实 pending request 时不能伪造 request_id；若 wait 出现 pending request，记录为“未执行 respond，待专门测试”。
+5. 不调用 `respond`，因为没有真实 `state == pending && respondable` request 时不能伪造 request_id；若 wait 出现其他状态或不可响应的 request，记录为“未执行 respond，待专门测试”。
 6. 立即执行 `cancel`，继续 `wait` 到 `TERMINAL/CANCELLED`，再执行 `result` 和 `close`。
 7. 取消后至少观察 10 秒：检查任务对应 runtime 是否仍存在，并查询 `~/.zcode/cli/db/db.sqlite` 的 `model_usage`，确认没有继续新增 token 记录。
 
@@ -66,7 +66,7 @@ Case 3 不再使用“spawn 后立即 cancel”的短路径作为主要验证。
 
 ## 独立 Respond Case（edit）
 
-使用 `tests/live-agent/non-git-based/respond_case.py` 执行专门的权限请求测试。脚本只使用 `permission_mode=edit` 和 `write_manifest=["src"]`，分别启动 allow 与 deny 两条独立任务；每条任务都必须在 `wait` 观察到真实的 pending、首次 `respond`，再用完全相同的 `request_id` 重复响应验证幂等，最后 `result → close`。没有观察到真实 pending 时脚本失败，不允许伪造 request_id。
+使用 `tests/live-agent/non-git-based/respond_case.py` 执行专门的权限请求测试。脚本只使用 `permission_mode=edit` 和 `write_manifest=["src"]`，分别启动 allow 与 deny 两条独立任务；每条任务都必须在 `wait` 观察到真实的 `state == pending && respondable` request，首次 `respond` 后再用完全相同的 `request_id` 重复响应验证幂等，最后 `result → close`。没有观察到真实可响应 request 时脚本失败，不允许伪造 request_id。
 
 ```sh
 python3 tests/live-agent/non-git-based/respond_case.py --transport cli --repository <absolute-fixture-repo>

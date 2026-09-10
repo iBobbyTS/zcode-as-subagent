@@ -21,6 +21,7 @@ test('packaged public schema is the reduced zcode_subagent catalog', () => {
   assert.equal(schema.properties.list.properties.limit.default, 100);
   assert.equal(schema.properties.wait.properties.after_revision.default, 0);
   assert.equal(schema.properties.wait.properties.wait_time.default, 290);
+  assert.match(schema.properties.wait.description, /state is pending and respondable is true/u);
   assert.equal(schema.properties.result.properties.offset.default, 0);
   assert.equal(schema.properties.result.properties.limit.default, 262144);
   assert.deepEqual(schema.properties.observe.required, ['agent_id']);
@@ -31,6 +32,11 @@ test('packaged public schema is the reduced zcode_subagent catalog', () => {
   ]);
   assert.deepEqual(schema.properties.contracts.properties.zcode_subagent_status.output, [
     'components', 'capabilities', 'identity',
+  ]);
+  assert.deepEqual(schema.properties.contracts.properties.zcode_subagent_wait.output, [
+    'task', 'revision', 'next_revision', 'pending_requests', 'command_pending_approval',
+    'result_available', 'activity', 'latest_progress', 'result', 'instruction', 'timed_out',
+    'message_receipt',
   ]);
   assert.deepEqual(schema.properties.error_projection.required, ['error']);
   assert.deepEqual(schema.properties.error_projection.properties.error.required, ['code', 'message']);

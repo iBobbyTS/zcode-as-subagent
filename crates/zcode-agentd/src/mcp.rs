@@ -393,6 +393,26 @@ mod tests {
         assert_eq!(validation.body.code, "validation");
         assert!(validation.legacy_text.contains("agent_id is invalid"));
     }
+
+    #[test]
+    fn public_wait_projection_keeps_non_bash_respondable_pending_requests() {
+        let view = PendingRequestView {
+            request_id: "read-request".into(),
+            kind: "permission".into(),
+            state: PendingRequestStateView::Pending,
+            respondable: true,
+            tool_name: Some("Read".into()),
+            operation: "read".into(),
+            summary: "target input.txt".into(),
+            policy_preview: "official_permission_request".into(),
+        };
+        let projected: PublicPendingRequest = view.into();
+        assert_eq!(projected.kind, PublicPendingKind::Permission);
+        assert_eq!(projected.state, PublicPendingState::Pending);
+        assert!(projected.respondable);
+        assert_eq!(projected.tool_name.as_deref(), Some("Read"));
+        assert_eq!(projected.operation, PublicOperation::Read);
+    }
 }
 
 mod server {
@@ -1583,7 +1603,7 @@ mod server {
         #[tool(
         name = "zcode_subagent_wait",
         output_schema = tool_output_schema::<AgentWaitOutput>(),
-        description = "Wait up to 290 seconds by default for terminal completion or a pending Bash permission request. Set wait_time manually when other work or subagents need attention; avoid unnecessarily short waits across multiple tasks; use 0 for current status.",
+        description = "Wait up to 290 seconds by default for terminal completion or any respondable pending request (state pending and respondable true), regardless of tool kind or name. The ordered pending-request projection is capped at 100 records, so a qualifying request beyond that projection does not wake this wait. Set wait_time manually when other work or subagents need attention; avoid unnecessarily short waits across multiple tasks; use 0 for current status.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1790,7 +1810,7 @@ mod server {
         #[tool(
         name = "zcode_subagent_respond",
         output_schema = tool_output_schema::<AgentRespondOutput>(),
-        description = "Respond idempotently to a typed pending permission request",
+        description = "Respond idempotently to a typed respondable pending request",
         annotations(
             read_only_hint = false,
             destructive_hint = false,

@@ -38,14 +38,14 @@ test('CLI sends daemon RPC and preserves success result', async () => {
           task: { agent_id: '10000001', phase: 'RUNNING', outcome: null, reason_code: null, stop_requested: false, close_requested: false, closed: false, reaped: false },
           revision: 0,
           next_revision: 0,
-          pending_requests: [],
-          command_pending_approval: false,
+          pending_requests: [{ request_id: 'read-1', kind: 'permission', state: 'pending', respondable: true, tool_name: 'Read', operation: 'read', summary: 'target input.txt', policy_preview: 'official_permission_request' }],
+          command_pending_approval: true,
           result_available: false,
           activity: { state: 'active', latest_progress: 'private duplicate', active_tools: [], window_60s: {}, telemetry_status: 'healthy' },
           latest_progress: null,
           result: null,
           instruction: 'Use wait for progress',
-          timed_out: true,
+          timed_out: false,
         },
       }) + '\n');
     });
@@ -57,7 +57,10 @@ test('CLI sends daemon RPC and preserves success result', async () => {
     assert.equal(result.task.resources_reaped, false);
     assert.equal(result.activity.latest_progress, undefined);
     assert.equal(result.result, null);
-    assert.equal(result.timed_out, true);
+    assert.equal(result.command_pending_approval, true);
+    assert.equal(result.pending_requests[0].tool_name, 'Read');
+    assert.equal(result.pending_requests[0].respondable, true);
+    assert.equal(result.timed_out, false);
     assert.equal(result.kind, undefined);
   }
   finally { await new Promise((resolve) => server.close(resolve)); }

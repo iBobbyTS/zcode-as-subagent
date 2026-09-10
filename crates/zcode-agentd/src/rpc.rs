@@ -1086,7 +1086,7 @@ impl RpcService {
                 .into_iter()
                 .map(pending_request_view)
                 .collect::<Vec<_>>();
-            let command_pending_approval = pending_requests.iter().any(pending_bash_request);
+            let command_pending_approval = pending_requests.iter().any(respondable_pending_request);
             let stored_result = self.store.task_result(&task.agent_id).map_err(map_store)?;
             let result_available = stored_result.is_some();
             let activity = self.scheduler.passive_activity_snapshot(&task.agent_id);
@@ -1124,14 +1124,8 @@ impl RpcService {
     }
 }
 
-fn pending_bash_request(request: &PendingRequestView) -> bool {
-    request.kind == "permission"
-        && request.state == PendingRequestStateView::Pending
-        && request.respondable
-        && request
-            .tool_name
-            .as_deref()
-            .is_some_and(|name| name.eq_ignore_ascii_case("bash"))
+fn respondable_pending_request(request: &PendingRequestView) -> bool {
+    request.state == PendingRequestStateView::Pending && request.respondable
 }
 
 // Measure the complete envelope with the largest valid request ID. Large result
@@ -1343,37 +1337,55 @@ pub(crate) mod wait_tests {
     }
 
     #[test]
-    fn wait_bash_only_and_pending_state_filter() {
-        for (kind, tool, state, wakes) in [
-            ("permission", "bAsH", PendingRequestStateView::Pending, true),
+    fn wait_respondable_pending_predicate_ignores_tool_kind_and_state() {
+        for (kind, tool, state, respondable, wakes) in [
+            (
+                "permission",
+                "bAsH",
+                PendingRequestStateView::Pending,
+                true,
+                true,
+            ),
             (
                 "permission",
                 "Read",
                 PendingRequestStateView::Pending,
-                false,
+                true,
+                true,
             ),
             (
                 "permission",
                 "Other",
                 PendingRequestStateView::Pending,
+                true,
+                true,
+            ),
+            (
+                "unsupported_input",
+                "Read",
+                PendingRequestStateView::Pending,
+                true,
+                true,
+            ),
+            (
+                "permission",
+                "Bash",
+                PendingRequestStateView::Pending,
+                false,
                 false,
             ),
             (
                 "permission",
                 "Bash",
                 PendingRequestStateView::Sending,
+                true,
                 false,
             ),
             (
                 "permission",
                 "Bash",
                 PendingRequestStateView::Responded,
-                false,
-            ),
-            (
-                "unsupported_input",
-                "Bash",
-                PendingRequestStateView::Pending,
+                true,
                 false,
             ),
         ] {
@@ -1381,14 +1393,18 @@ pub(crate) mod wait_tests {
                 request_id: "r".into(),
                 kind: kind.into(),
                 state,
-                respondable: true,
+                respondable,
                 tool_name: Some(tool.into()),
                 operation: "command".into(),
                 summary: "fixture".into(),
                 policy_preview: "unknown".into(),
             };
-            assert_eq!(pending_bash_request(&request), wakes);
+            assert_eq!(respondable_pending_request(&request), wakes);
         }
+    }
+
+    #[test]
+    fn wait_wakes_for_non_bash_respondable_permission() {
         let (_, service, id) = fixture();
         service
             .store
@@ -1397,7 +1413,80 @@ pub(crate) mod wait_tests {
                 &id,
                 "correlation",
                 "permission",
-                r#"{"toolName":"bAsH"}"#,
+                r#"{"toolName":"Read"}"#,
+            )
+            .unwrap();
+        let RpcSuccess::TaskWait {
+            command_pending_approval,
+            pending_requests,
+            timed_out,
+            ..
+        } = service
+            .dispatch(RpcMethod::TaskWait(query(&id, 299)))
+            .unwrap()
+        else {
+            panic!("expected wait response")
+        };
+        assert!(command_pending_approval);
+        assert!(!timed_out);
+        assert_eq!(pending_requests.len(), 1);
+        assert_eq!(pending_requests[0].tool_name.as_deref(), Some("Read"));
+        assert!(pending_requests[0].respondable);
+    }
+
+    #[test]
+    fn wait_projection_cap_does_not_promote_the_101st_request() {
+        let (_, service, id) = fixture();
+        for index in 0..=MAX_PENDING_REQUESTS {
+            let (request_type, payload) = if index < MAX_PENDING_REQUESTS {
+                ("unsupported_input", r#"{}"#)
+            } else {
+                ("permission", r#"{"toolName":"Read"}"#)
+            };
+            service
+                .store
+                .insert_pending_request(
+                    &format!("request-{index}"),
+                    &id,
+                    &format!("correlation-{index}"),
+                    request_type,
+                    payload,
+                )
+                .unwrap();
+        }
+        let start = Instant::now();
+        let response = service
+            .task_wait(query(&id, 1), start + Duration::from_millis(60), &|| false)
+            .unwrap();
+        let RpcSuccess::TaskWait {
+            command_pending_approval,
+            pending_requests,
+            timed_out,
+            ..
+        } = response
+        else {
+            panic!("expected wait response")
+        };
+        assert_eq!(pending_requests.len(), MAX_PENDING_REQUESTS);
+        assert!(pending_requests
+            .iter()
+            .all(|request| !respondable_pending_request(request)));
+        assert!(!command_pending_approval);
+        assert!(timed_out);
+        assert!(start.elapsed() >= Duration::from_millis(40));
+    }
+
+    #[test]
+    fn wait_bash_state_transition_stops_early_wake() {
+        let (_, service, id) = fixture();
+        service
+            .store
+            .insert_pending_request(
+                "request",
+                &id,
+                "correlation",
+                "permission",
+                r#"{"toolName":"Bash"}"#,
             )
             .unwrap();
         assert!(matches!(

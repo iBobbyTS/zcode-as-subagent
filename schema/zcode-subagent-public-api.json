@@ -40,6 +40,7 @@
     },
     "wait": {
       "type": "object",
+      "description": "Wait returns on terminal completion or any request in the ordered pending_requests projection whose state is pending and respondable is true, regardless of tool kind or name. The projection is capped at 100 records; a qualifying request outside that projection does not wake this wait.",
       "required": ["agent_id"],
       "properties": {
         "agent_id": { "type": "integer", "minimum": 10000000, "maximum": 99999999 },
@@ -108,7 +109,7 @@
       "properties": {
         "zcode_subagent_status": { "input": [], "output": ["components", "capabilities", "identity"] },
         "zcode_subagent_spawn": { "input": ["repository", "permission_mode", "prompt", "write_manifest"], "output": ["agent_id", "submission_disposition", "phase"], "idempotent": false },
-        "zcode_subagent_wait": { "input": ["agent_id", "after_revision", "wait_time", "message_id"], "output": ["task", "revision", "next_revision", "pending_requests", "result_available", "activity", "latest_progress", "result", "instruction", "timed_out", "message_receipt"] },
+        "zcode_subagent_wait": { "input": ["agent_id", "after_revision", "wait_time", "message_id"], "output": ["task", "revision", "next_revision", "pending_requests", "command_pending_approval", "result_available", "activity", "latest_progress", "result", "instruction", "timed_out", "message_receipt"] },
         "zcode_subagent_observe": { "input": ["agent_id"], "output": ["tools", "reasoning", "coverage"], "idempotent": true },
         "zcode_subagent_list": { "input": ["repository", "phase", "outcome", "cursor", "limit"], "output": ["tasks", "next_cursor"] },
         "zcode_subagent_send": { "input": ["agent_id", "message_id", "content"], "output": ["message_id", "disposition"] },
