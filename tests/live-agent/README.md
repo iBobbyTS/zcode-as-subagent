@@ -32,7 +32,7 @@ flow. Run it only when the local daemon and official ZCode runtime are ready:
 python3 tests/live-agent/non-git-based/real_completion_case.py
 ```
 
-It performs one isolated read-only `plan` lifecycle (`spawn`, repeated `poll`,
+It performs one isolated read-only `plan` lifecycle (`spawn`, repeated `wait`,
 `result`, `close`) and emits the observed task/activity/result payloads. The
 harness does not classify the outcome or decide goal success; that decision is
 left to the executing Agent or human. It exits non-zero only when a transport or
@@ -61,7 +61,7 @@ LaunchAgent plist 中的 socket/database/runtime，记录当前 HEAD、二进制
 哈希及服务状态，使用分发的 MCP 二进制通过 stdio 调用官方 ZCode。
 
 流程：复制 `fixtures/terminal-send` → MCP spawn 并要求真实 Read
-`initial.txt` → 按 `next_revision` poll → result → 确认 COMPLETED 且未
+`initial.txt` → 按 `next_revision` wait → result → 确认 COMPLETED 且未
 close → 重启本用例的 MCP 接入进程 → 向同一 agent 发送读取
 `followup.txt` 的消息 → 用相同 message_id 重试 → 持续观察 → result
 → 只读采集消息状态及 diagnose → close 并复查。

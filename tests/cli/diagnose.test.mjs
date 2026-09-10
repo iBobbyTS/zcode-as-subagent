@@ -60,7 +60,7 @@ test('diagnose preserves daemon self identity and does not promote packaged faca
   });
 });
 
-test('agent diagnose reads only the public poll projection and exports a bounded report', async () => {
+test('agent diagnose reads only the public wait projection and exports a bounded report', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-diagnose-agent-'));
   const paths = pathsFor(home);
   fs.mkdirSync(paths.logs, { recursive: true });
