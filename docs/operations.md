@@ -36,7 +36,7 @@ a direct command-line flag. Filtering occurs in the Store before the limit.
 
 The wait projection exposes bounded visible text, active tool classes, model request clocks, and rolling 60-second counts. Reasoning content, tool arguments, cwd, command output, and absolute internal paths are never public. Runtime activity is liveness evidence, not semantic progress.
 
-Pending requests and terminal transitions wake long waits immediately. Unknown telemetry shapes degrade telemetry status without failing the Agent.
+Terminal transitions and currently respondable `PENDING` Bash permission requests wake long waits immediately. Non-Bash, `SENDING`, `RESPONDED`, and unsupported pending requests remain observable in projections but do not independently wake a wait; they return at expiry or another allowed wake. Unknown telemetry shapes degrade telemetry status without failing the Agent.
 
 Tool execution failures preserve the bounded text and also return
 `structuredContent.error`. The object always has `code` and `message`;
