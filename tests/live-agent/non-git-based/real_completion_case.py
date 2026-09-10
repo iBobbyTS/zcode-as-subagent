@@ -42,7 +42,7 @@ def main() -> int:
     execution = create_execution_root("real-completion-")
     repository = materialize(SOURCE, execution)
     evidence: dict = {
-        "flow": "spawn -> poll -> result -> close",
+        "flow": "spawn -> wait -> result -> close",
         "repository": str(repository),
         "observations": [],
     }
@@ -61,17 +61,17 @@ def main() -> int:
         revision = int(spawned.get("revision", task.get("revision", 0)))
         deadline = time.monotonic() + args.timeout_sec
         while time.monotonic() < deadline:
-            poll = call("wait", {"agent_id": agent_id, "after_revision": revision, "wait_time": 5})
-            revision = int(poll.get("next_revision", revision))
+            wait = call("wait", {"agent_id": agent_id, "after_revision": revision, "wait_time": 5})
+            revision = int(wait.get("next_revision", revision))
             evidence["observations"].append({
-                "revision": poll.get("revision"),
-                "next_revision": poll.get("next_revision"),
-                "task": poll.get("task"),
-                "activity": poll.get("activity"),
-                "pending_requests": poll.get("pending_requests", []),
-                "result_available": poll.get("result_available"),
+                "revision": wait.get("revision"),
+                "next_revision": wait.get("next_revision"),
+                "task": wait.get("task"),
+                "activity": wait.get("activity"),
+                "pending_requests": wait.get("pending_requests", []),
+                "result_available": wait.get("result_available"),
             })
-            if poll.get("task", {}).get("phase") == "TERMINAL":
+            if wait.get("task", {}).get("phase") == "TERMINAL":
                 break
         evidence["result"] = call("result", {"agent_id": agent_id, "offset": 0, "limit": 1024})
         evidence["close"] = call("close", {"agent_id": agent_id})

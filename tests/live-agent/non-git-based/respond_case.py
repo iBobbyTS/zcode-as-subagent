@@ -42,9 +42,9 @@ def one_cli(repository: Path, decision: str) -> dict:
     deadline = time.monotonic() + 300
     terminal = None
     while time.monotonic() < deadline:
-        poll = cli_call("wait", {"agent_id": agent_id, "after_revision": revision, "wait_time": 5})
-        revision = int(poll.get("next_revision", revision))
-        for request in poll.get("pending_requests", []):
+        wait = cli_call("wait", {"agent_id": agent_id, "after_revision": revision, "wait_time": 5})
+        revision = int(wait.get("next_revision", revision))
+        for request in wait.get("pending_requests", []):
             if request.get("state") not in ("pending", "sending"):
                 continue
             if not request.get("respondable"):
@@ -55,8 +55,8 @@ def one_cli(repository: Path, decision: str) -> dict:
             first = cli_call("respond", args)
             second = cli_call("respond", args)
             responses.append({"request": request, "first": first, "repeat": second})
-        if poll.get("task", {}).get("phase") == "TERMINAL":
-            terminal = poll["task"]
+        if wait.get("task", {}).get("phase") == "TERMINAL":
+            terminal = wait["task"]
             break
         time.sleep(0.25)
     if terminal is None:
@@ -72,7 +72,7 @@ def one_cli(repository: Path, decision: str) -> dict:
 
 def run_mcp(repository: Path) -> None:
     proc = subprocess.run(["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--json",
-        f"Use only zcode_as_subagent MCP in {repository}. Run one edit task: execute Bash `python3 src/permission_probe.py`; poll until a pending permission request is visible and return its agent_id, request_id, and revision as JSON. Do not respond or close."], cwd=ROOT, text=True, capture_output=True, check=False)
+        f"Use only zcode_as_subagent MCP in {repository}. Run one edit task: execute Bash `python3 src/permission_probe.py`; wait until a pending permission request is visible and return its agent_id, request_id, and revision as JSON. Do not respond or close."], cwd=ROOT, text=True, capture_output=True, check=False)
     print(proc.stdout)
     if proc.returncode:
         raise RuntimeError(proc.stderr)

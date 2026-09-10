@@ -121,13 +121,13 @@ def run(daemon, root):
         facts['agent_id'] = agent_id
         deadline = time.monotonic() + 15
         while True:
-            poll = old.tool('wait', {'agent_id': agent_id, 'wait_time': 0})
-            if poll['task']['phase'] == 'TERMINAL':
+            wait = old.tool('wait', {'agent_id': agent_id, 'wait_time': 0})
+            if wait['task']['phase'] == 'TERMINAL':
                 break
             if time.monotonic() > deadline:
                 raise TimeoutError('fixture task did not become terminal')
             time.sleep(.1)
-        facts['poll_before'] = poll
+        facts['wait_before'] = wait
         facts['result_before'] = old.tool('result', {'agent_id': agent_id})
         if facts['result_before']['result'] is None:
             raise RuntimeError('terminal fixture has no durable result')
@@ -146,12 +146,12 @@ def run(daemon, root):
         except (EOFError, BrokenPipeError, ConnectionResetError):
             facts['old_connection_failed'] = True
         second, fresh, second_tools = start('second')
-        facts['poll_after'] = fresh.tool('wait', {'agent_id': agent_id, 'wait_time': 0})
+        facts['wait_after'] = fresh.tool('wait', {'agent_id': agent_id, 'wait_time': 0})
         facts['result_after'] = fresh.tool('result', {'agent_id': agent_id})
         facts['list_after'] = fresh.tool('list', {'repository': str(repository)})
         facts['task_recovery'] = (
-            facts['poll_after']['task']['agent_id'] == agent_id
-            and facts['poll_after']['task']['phase'] == 'TERMINAL'
+            facts['wait_after']['task']['agent_id'] == agent_id
+            and facts['wait_after']['task']['phase'] == 'TERMINAL'
             and facts['result_after']['result'] == facts['result_before']['result']
             and any(task['agent_id'] == agent_id for task in facts['list_after']['tasks']))
         after = state(db)

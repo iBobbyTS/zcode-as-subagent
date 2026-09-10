@@ -4,7 +4,7 @@ command = "/absolute/path/to/zcode-mcp/target/release/zcode-as-subagent-mcp"
 enabled = true
 required = true
 startup_timeout_sec = 10
-tool_timeout_sec = 299
+tool_timeout_sec = 304
 enabled_tools = [
   "zcode_subagent_cancel",
   "zcode_subagent_close",

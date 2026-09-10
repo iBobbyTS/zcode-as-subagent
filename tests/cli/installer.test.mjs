@@ -93,6 +93,9 @@ test('install-mcp writes an idempotent Codex config under CODEX_HOME', () => {
     assert.equal((twice.match(/\[mcp_servers\.zcode_as_subagent\]/g) || []).length, 1);
     assert.match(twice, /zcode-as-subagent-mcp/);
     assert.match(twice, /"zcode_subagent_status"/);
+    assert.match(twice, /^tool_timeout_sec = 304$/m);
+    const staticConfig = fs.readFileSync(new URL('../../config/codex-zcode-subagent-mcp.toml', import.meta.url), 'utf8');
+    assert.match(staticConfig, /^tool_timeout_sec = 304$/m);
     assert.doesNotMatch(twice, /zcode_subagent_system_status/);
     assert.match(twice, new RegExp(paths.socket.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')));
   } finally {

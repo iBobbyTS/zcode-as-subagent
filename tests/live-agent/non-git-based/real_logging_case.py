@@ -173,12 +173,12 @@ def main() -> int:
         revision = 0
         deadline = time.monotonic() + args.timeout_sec
         while time.monotonic() < deadline:
-            poll = client.tool_success("wait", {
+            wait = client.tool_success("wait", {
                 "agent_id": agent_id, "after_revision": revision, "wait_time": 5,
             })
-            emit("wait", poll)
-            revision = poll.get("next_revision", revision)
-            if poll.get("task", {}).get("phase") == "TERMINAL":
+            emit("wait", wait)
+            revision = wait.get("next_revision", revision)
+            if wait.get("task", {}).get("phase") == "TERMINAL":
                 break
         else:
             raise TimeoutError("task did not become terminal")
