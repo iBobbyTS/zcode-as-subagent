@@ -408,7 +408,8 @@ mod server {
     use rmcp::{
         handler::server::{router::tool::ToolRouter, tool::schema_for_type, wrapper::Parameters},
         model::{Implementation, JsonObject, ServerCapabilities, ServerInfo},
-        tool, tool_handler, tool_router, Json, ServerHandler, ServiceExt,
+        service::RequestContext,
+        tool, tool_handler, tool_router, Json, RoleServer, ServerHandler, ServiceExt,
     };
     use schemars::{JsonSchema, Schema, SchemaGenerator};
     use serde::{Deserialize, Deserializer, Serialize};
@@ -1288,7 +1289,11 @@ mod server {
             self.rpc_interruptible(method, &|| false)
         }
 
-        async fn rpc_wait(&self, query: TaskWaitQuery) -> Result<RpcSuccess, ToolError> {
+        async fn rpc_wait(
+            &self,
+            query: TaskWaitQuery,
+            request_cancelled: impl Fn() -> bool + Send + 'static,
+        ) -> Result<RpcSuccess, ToolError> {
             struct InterruptOnDrop(Arc<AtomicBool>);
             impl Drop for InterruptOnDrop {
                 fn drop(&mut self) {
@@ -1303,7 +1308,7 @@ mod server {
                 .max(Duration::from_secs(query.wait_time.saturating_add(5)));
             tokio::task::spawn_blocking(move || {
                 facade.rpc_interruptible(RpcMethod::TaskWait(query), &|| {
-                    interrupted.load(Ordering::Acquire)
+                    interrupted.load(Ordering::Acquire) || request_cancelled()
                 })
             })
             .await
@@ -1567,6 +1572,7 @@ mod server {
         async fn agent_poll(
             &self,
             Parameters(input): Parameters<AgentPollInput>,
+            context: RequestContext<RoleServer>,
         ) -> Result<Json<AgentPollOutput>, ToolError> {
             let agent_id =
                 internal_task_id(input.agent_id).map_err(|error| error.with_operation("poll"))?;
@@ -1576,13 +1582,16 @@ mod server {
                     .with_agent_id(Some(agent_id)));
             }
             match self
-                .rpc_wait(TaskWaitQuery {
-                    agent_id,
-                    after_revision: input.after_revision,
-                    // S02 replaces the public milliseconds field with wait_time.
-                    wait_time: input.timeout_ms.div_ceil(1000),
-                    message_id: input.message_id,
-                })
+                .rpc_wait(
+                    TaskWaitQuery {
+                        agent_id,
+                        after_revision: input.after_revision,
+                        // S02 replaces the public milliseconds field with wait_time.
+                        wait_time: input.timeout_ms.div_ceil(1000),
+                        message_id: input.message_id,
+                    },
+                    move || context.ct.is_cancelled(),
+                )
                 .await?
             {
                 RpcSuccess::TaskWait {
@@ -1909,8 +1918,10 @@ mod server {
         use std::{
             collections::{BTreeMap, HashSet},
             path::PathBuf,
+            sync::{atomic::Ordering, Arc},
             time::Duration,
         };
+        use rmcp::ServiceExt;
 
         #[test]
         fn omitted_public_fields_use_the_frozen_defaults() {
@@ -1949,7 +1960,7 @@ mod server {
             let store = service.store_for_wait_test();
             let facade = SubagentMcp::from_service(service);
             let start = std::time::Instant::now();
-            let waiting = facade.rpc_wait(crate::rpc::wait_tests::query(&id, 1));
+            let waiting = facade.rpc_wait(crate::rpc::wait_tests::query(&id, 1), || false);
             let other_work = async {
                 tokio::task::yield_now().await;
                 assert!(matches!(
@@ -1995,7 +2006,7 @@ mod server {
             let facade = SubagentMcp::from_service(service);
             let waiting = tokio::spawn(async move {
                 facade
-                    .rpc_wait(crate::rpc::wait_tests::query(&id, 299))
+                    .rpc_wait(crate::rpc::wait_tests::query(&id, 299), || false)
                     .await
             });
             tokio::task::yield_now().await;
@@ -2005,6 +2016,83 @@ mod server {
                 before.clone(),
                 store.get_task(&before.unwrap().agent_id).unwrap()
             );
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn mcp_cancelled_notification_interrupts_wait_without_mutating_task() {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+            let (_directory, service, id) = crate::rpc::wait_tests::fixture();
+            let store = service.store_for_wait_test();
+            let before = store.get_task(&id).unwrap();
+            let facade = SubagentMcp::from_service(service);
+            let requests = Arc::clone(&facade.next_request);
+            let (client, transport) = tokio::io::duplex(64 * 1024);
+            let serving = tokio::spawn(async move {
+                let server = facade.serve(transport).await.unwrap();
+                server.waiting().await.unwrap();
+            });
+            let (reader, mut writer) = tokio::io::split(client);
+            let mut lines = BufReader::new(reader).lines();
+            writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"cancel-test\",\"version\":\"1\"}}}\n").await.unwrap();
+            let initialized = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            tokio::task::yield_now().await;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&initialized).unwrap()["id"],
+                1
+            );
+            writer
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+                .await
+                .unwrap();
+            let call = serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "zcode_subagent_poll", "arguments": {
+                    "agent_id": super::super::public_task_id(&id).unwrap(), "timeout_ms": 5000
+                }}
+            });
+            writer
+                .write_all(format!("{call}\n").as_bytes())
+                .await
+                .unwrap();
+            // Wait until the real tool handler has dispatched its blocking RPC.
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while requests.load(Ordering::Relaxed) == 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), lines.next_line())
+                    .await
+                    .is_err()
+            );
+            writer.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"2\",\"reason\":\"caller stopped waiting\"}}\n").await.unwrap();
+            // rmcp drops the cancelled request's response after cancelling its
+            // context token. The connection remains usable for subsequent calls.
+            assert!(
+                tokio::time::timeout(Duration::from_millis(300), lines.next_line())
+                    .await
+                    .is_err()
+            );
+            writer
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\",\"params\":{}}\n")
+                .await
+                .unwrap();
+            let status = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+                .await
+                .expect("connection did not remain serviceable after cancellation")
+                .unwrap()
+                .unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&status).unwrap()["id"], 3);
+            assert_eq!(before, store.get_task(&id).unwrap());
+            serving.abort();
+            let _ = serving.await;
         }
 
         #[test]
