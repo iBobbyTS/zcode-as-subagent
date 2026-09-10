@@ -2045,6 +2045,72 @@ mod server {
         }
 
         #[tokio::test(flavor = "current_thread")]
+        async fn mcp_wait_wakes_for_respondable_pending_read_request() {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+            let (_directory, service, id) = crate::rpc::wait_tests::fixture();
+            service
+                .store_for_wait_test()
+                .insert_pending_request(
+                    "request",
+                    &id,
+                    "correlation",
+                    "permission",
+                    r#"{"toolName":"Read"}"#,
+                )
+                .unwrap();
+            let facade = SubagentMcp::from_service(service);
+            let (client, transport) = tokio::io::duplex(64 * 1024);
+            let serving = tokio::spawn(async move {
+                let server = facade.serve(transport).await.unwrap();
+                server.waiting().await.unwrap();
+            });
+            let (reader, mut writer) = tokio::io::split(client);
+            let mut lines = BufReader::new(reader).lines();
+            writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"wait-test\",\"version\":\"1\"}}}\n").await.unwrap();
+            let initialized = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&initialized).unwrap()["id"],
+                1
+            );
+            writer
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+                .await
+                .unwrap();
+            let call = serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "zcode_subagent_wait", "arguments": {
+                    "agent_id": super::super::public_task_id(&id).unwrap(), "wait_time": 299
+                }}
+            });
+            writer
+                .write_all(format!("{call}\n").as_bytes())
+                .await
+                .unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+                .await
+                .expect("respondable Read did not wake MCP wait")
+                .unwrap()
+                .unwrap();
+            let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+            let wait = &response["result"]["structuredContent"];
+            assert_eq!(response["id"], 2);
+            assert_eq!(wait["command_pending_approval"], true);
+            assert_eq!(wait["timed_out"], false);
+            assert_eq!(wait["pending_requests"][0]["kind"], "permission");
+            assert_eq!(wait["pending_requests"][0]["state"], "pending");
+            assert_eq!(wait["pending_requests"][0]["respondable"], true);
+            assert_eq!(wait["pending_requests"][0]["tool_name"], "Read");
+            assert_eq!(wait["pending_requests"][0]["operation"], "read");
+            serving.abort();
+            let _ = serving.await;
+        }
+
+        #[tokio::test(flavor = "current_thread")]
         async fn dropped_embedded_wait_leaves_durable_task_unchanged() {
             let (_directory, service, id) = crate::rpc::wait_tests::fixture();
             let store = service.store_for_wait_test();
