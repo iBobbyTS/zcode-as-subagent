@@ -223,8 +223,8 @@ def main() -> int:
         disconnected = False
         while time.monotonic() < deadline:
             snapshot = client.call(
-                "poll",
-                {"agent_id": agent_id, "after_revision": revision, "timeout_ms": 5000},
+                "wait",
+                {"agent_id": agent_id, "after_revision": revision, "wait_time": 5},
             )
             revision = snapshot.get("next_revision", revision)
             emit("observe", client.call("observe", {"agent_id": agent_id}))
@@ -260,11 +260,11 @@ def main() -> int:
             emit("before_cancel_observe", before_cancel)
             if before_cancel.get("tools"):
                 break
-            client.call("poll", {"agent_id": cancel_id, "timeout_ms": 1000})
+            client.call("wait", {"agent_id": cancel_id, "wait_time": 1})
         emit("cancel", client.call("cancel", {"agent_id": cancel_id}))
         cancel_deadline = time.monotonic() + min(args.timeout_sec, 30)
         while time.monotonic() < cancel_deadline:
-            cancelled = client.call("poll", {"agent_id": cancel_id, "timeout_ms": 1000})
+            cancelled = client.call("wait", {"agent_id": cancel_id, "wait_time": 1})
             if cancelled.get("task", {}).get("phase") == "TERMINAL" and cancelled.get("task", {}).get("resources_reaped"):
                 break
         else:

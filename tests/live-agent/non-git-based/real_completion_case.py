@@ -61,7 +61,7 @@ def main() -> int:
         revision = int(spawned.get("revision", task.get("revision", 0)))
         deadline = time.monotonic() + args.timeout_sec
         while time.monotonic() < deadline:
-            poll = call("poll", {"agent_id": agent_id, "after_revision": revision, "timeout_ms": 5000})
+            poll = call("wait", {"agent_id": agent_id, "after_revision": revision, "wait_time": 5})
             revision = int(poll.get("next_revision", revision))
             evidence["observations"].append({
                 "revision": poll.get("revision"),
@@ -85,7 +85,7 @@ def main() -> int:
     finally:
         if agent_id:
             try:
-                snapshot = call("poll", {"agent_id": agent_id, "timeout_ms": 0})
+                snapshot = call("wait", {"agent_id": agent_id, "wait_time": 0})
                 if snapshot.get("task", {}).get("phase") != "TERMINAL":
                     call("cancel", {"agent_id": agent_id})
             except Exception:

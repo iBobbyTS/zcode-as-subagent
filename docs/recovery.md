@@ -2,13 +2,13 @@
 
 ## Facade restart
 
-The MCP facade is stateless. Restart it with the same `ZCODE_AGENTD_SOCKET`, then use `zcode_subagent_poll` or `zcode_subagent_result` with the durable `agent_id`. Hook provenance and service generation are optional integration metadata and are not required for daemon startup. Do not confuse a daemon restart with a facade restart or a task identity.
+The MCP facade is stateless. Restart it with the same `ZCODE_AGENTD_SOCKET`, then use `zcode_subagent_wait` or `zcode_subagent_result` with the durable `agent_id`. Hook provenance and service generation are optional integration metadata and are not required for daemon startup. Do not confuse a daemon restart with a facade restart or a task identity.
 
 ## Daemon restart
 
 Stop the daemon with SIGTERM or SIGINT and wait for its exact socket to disappear. Restart with the same canonical database and socket paths. Startup reconciliation runs before publication. Live runtime reconnect is unsupported; interrupted work becomes runtime-lost or orphaned without signaling an unverified PID or process group.
 
-After restart, call `zcode_subagent_list` with explicit repository, feature, or ownership scope. Inspect tasks with `poll` and `result`, then close them after verifying durable state. Start a new Agent for further work.
+After restart, call `zcode_subagent_list` with explicit repository, feature, or ownership scope. Inspect tasks with `wait` and `result`, then close them after verifying durable state. Start a new Agent for further work.
 
 Observation snapshots are intentionally memory-only. After a daemon restart,
 `zcode_subagent_observe` can return an empty bounded snapshot for a retained
@@ -16,7 +16,7 @@ task only with `tool_history_complete=false` and
 `reasoning_complete=false`; it never presents the missing pre-restart history
 as a complete empty lifetime. A runtime path or SHA-256 mismatch makes the
 observation source unavailable and sets the status capability to false. Use
-`poll` and `result` for durable lifecycle facts.
+`wait` and `result` for durable lifecycle facts.
 
 Within one daemon lifetime, observation retains at most 64 KiB of accumulated
 public reasoning source so the 200-character projection can be maintained
@@ -29,7 +29,7 @@ unlimited reasoning history.
 
 ## Data and terminal history
 
-For a consistent SQLite backup, stop the sole daemon and preserve the database with any WAL/SHM companions. Terminal history is read through `zcode_subagent_result` and running state through poll. 恢复已结束的 session 暂不可用；发送恢复失败时保留原终态历史，具体限制见下文。 Never read private stored locators directly.
+For a consistent SQLite backup, stop the sole daemon and preserve the database with any WAL/SHM companions. Terminal history is read through `zcode_subagent_result` and running state through wait. 恢复已结束的 session 暂不可用；发送恢复失败时保留原终态历史，具体限制见下文。 Never read private stored locators directly.
 
 This product intentionally has no compatibility framework or migration for removed unpublished records. Use `cleanup-legacy --yes` only for explicit deletion; it never imports or aliases legacy data.
 
@@ -82,7 +82,7 @@ python3 tests/live-agent/non-git-based/real_terminal_send_case.py
 
 - `conflict: WORKSPACE_BUSY`：工作区已有活动任务；可查询 `active_agent_id`。
 - `conflict: MESSAGE_ID_CONFLICT`：消息 ID 已绑定其他 Agent 或内容。新消息使用新 ID；只有同一消息的重试才复用 ID。
-- `runtime_command_failed`：daemon 已处理请求，但 runtime 命令失败。先用 `poll`、`result` 和 `diagnose` 查看状态；此错误不表示 daemon 离线。
+- `runtime_command_failed`：daemon 已处理请求，但 runtime 命令失败。先用 `wait`、`result` 和 `diagnose` 查看状态；此错误不表示 daemon 离线。
 - `daemon_unavailable`：MCP 无法通过 socket 联系 daemon。检查服务与 socket；不要因上述两类业务拒绝自动重启服务。
 
 MCP `status` 只保留 daemon 与 facade 的运行路径供快速定位。需要比较运行中

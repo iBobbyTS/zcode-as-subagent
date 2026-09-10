@@ -42,7 +42,7 @@ unrelated settings. The binary has one startup-static catalog:
 ```text
 zcode_subagent_status
 zcode_subagent_spawn
-zcode_subagent_poll
+zcode_subagent_wait
 zcode_subagent_list
 zcode_subagent_send
 zcode_subagent_respond

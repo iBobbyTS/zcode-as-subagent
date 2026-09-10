@@ -5,12 +5,12 @@
 The `zas` CLI forwards business commands to the configured daemon
 Unix socket (`ZCODE_AGENTD_SOCKET`, or the product socket under Application
 Support). Pass a JSON object with `--json` or on stdin. `create`/`spawn` submit
-the general task contract; `get`/`poll` read task progress. The remaining
+the general task contract; `wait` reads task progress. The remaining
 commands map to the corresponding daemon task RPCs:
 
 ```sh
 zas create --json '{"repository":"/abs/repo","prompt":"..."}'
-zas poll --json '{"agent_id":"...","timeout_ms":5000}'
+zas wait --json '{"agent_id":10000000,"wait_time":5}'
 zas result --json '{"agent_id":"..."}'
 ```
 
@@ -21,11 +21,11 @@ Successful responses are structured JSON. Daemon errors preserve their `code`,
 ## Generic lifecycle
 
 1. Call `zcode_subagent_spawn` with a canonical workspace and one of `build|edit|plan|yolo` (`build` is the default).
-2. Call `zcode_subagent_poll` with the returned `agent_id`, `after_revision`, and bounded `timeout_ms`.
+2. Call `zcode_subagent_wait` with the returned `agent_id`, `after_revision`, and bounded `wait_time`.
 3. Reuse `next_revision`; do not restart polling from zero.
 4. Answer only daemon-published typed requests through `zcode_subagent_respond`.
 5. Queue clarification for a running Agent with `zcode_subagent_send`. 恢复已结束的 session 暂不可用（包括尚未 close 的 COMPLETED 任务）；继续工作请新建 Agent 并提供所需上下文。失败的追加发送不改变原终态结果，详见 [恢复限制](recovery.md#session-恢复暂不可用)。
-6. Read final text through `zcode_subagent_result`; use poll for running progress.
+6. Read final text through `zcode_subagent_result`; use wait for running progress.
 7. Use `zcode_subagent_cancel` for authoritative stop/kill/reap and `zcode_subagent_close` for idempotent cleanup.
 
 `zcode_subagent_list` requires a repository scope. The CLI also accepts
@@ -44,7 +44,7 @@ Tool execution failures preserve the bounded text and also return
 when their producer supplied a trustworthy value. JSON-RPC protocol failures
 remain outer JSON-RPC errors. The rmcp pre-handler argument decoder retains its
 SDK-owned `isError` text and does not masquerade as a product structured error.
-Reading a terminal `FAILED` or `CANCELLED` task through `poll` or `result` is
+Reading a terminal `FAILED` or `CANCELLED` task through `wait` or `result` is
 still a successful tool query.
 
 `zcode_subagent_status.identity` separates daemon and facade build/process

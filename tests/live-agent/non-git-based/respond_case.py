@@ -42,7 +42,7 @@ def one_cli(repository: Path, decision: str) -> dict:
     deadline = time.monotonic() + 300
     terminal = None
     while time.monotonic() < deadline:
-        poll = cli_call("poll", {"agent_id": agent_id, "after_revision": revision, "timeout_ms": 5000})
+        poll = cli_call("wait", {"agent_id": agent_id, "after_revision": revision, "wait_time": 5})
         revision = int(poll.get("next_revision", revision))
         for request in poll.get("pending_requests", []):
             if request.get("state") not in ("pending", "sending"):

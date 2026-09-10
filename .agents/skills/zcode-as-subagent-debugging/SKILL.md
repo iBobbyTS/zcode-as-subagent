@@ -1,6 +1,6 @@
 ---
 name: zcode-as-subagent-debugging
-description: Debug this repository's zcode-as-subagent MCP, daemon, runtime, and lifecycle failures using source-to-process evidence. Use when spawn/poll/result behavior, validation, stale binaries, logs, permissions, or MCP transport state is unclear.
+description: Debug this repository's zcode-as-subagent MCP, daemon, runtime, and lifecycle failures using source-to-process evidence. Use when spawn/wait/result behavior, validation, stale binaries, logs, permissions, or MCP transport state is unclear.
 ---
 
 # Zcode As Subagent Debugging
@@ -18,7 +18,7 @@ Use this skill for diagnosis and narrowly scoped repairs in `/Users/ibobby/Proje
 
 - When the user requires MCP, use the `zcode_as_subagent` MCP tools; do not replace the experiment with the CLI.
 - `zcode_subagent_spawn` requires an absolute repository. `plan` is read-only and omits `write_manifest`; `build`, `edit`, and `yolo` require a non-empty repository-relative `write_manifest`.
-- Record the returned `agent_id` and `revision`. Poll with `after_revision` set to the previous response's `next_revision`, respecting the bounded timeout. Continue until `task.phase` is terminal and `result_available` is true; inspect pending typed requests before declaring failure.
+- Record the returned `agent_id` and `revision`. Wait with `after_revision` set to the previous response's `next_revision`, respecting `wait_time` in seconds (0..=299). Continue until `task.phase` is terminal and `result_available` is true; inspect pending typed requests before declaring failure.
 - Read the terminal result through `zcode_subagent_result`. Report `outcome`, `final_text`, `partial`, and `residual_gaps`; a generic `validation: request validation failed` is facade-level evidence, not proof that ZCode executed.
 
 ## Permission and write-manifest boundary

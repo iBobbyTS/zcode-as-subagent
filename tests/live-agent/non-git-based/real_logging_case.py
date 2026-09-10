@@ -173,10 +173,10 @@ def main() -> int:
         revision = 0
         deadline = time.monotonic() + args.timeout_sec
         while time.monotonic() < deadline:
-            poll = client.tool_success("poll", {
-                "agent_id": agent_id, "after_revision": revision, "timeout_ms": 5000,
+            poll = client.tool_success("wait", {
+                "agent_id": agent_id, "after_revision": revision, "wait_time": 5,
             })
-            emit("poll", poll)
+            emit("wait", poll)
             revision = poll.get("next_revision", revision)
             if poll.get("task", {}).get("phase") == "TERMINAL":
                 break

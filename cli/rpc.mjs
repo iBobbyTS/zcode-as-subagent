@@ -19,6 +19,13 @@ function taskId(value) {
 
 function daemonTaskId(value) { return String(taskId(value)); }
 
+export function waitTransportTimeoutMs(waitTime = 290) {
+  if (!Number.isInteger(waitTime) || waitTime < 0 || waitTime > 299) {
+    throw new CliError('INVALID_ARGUMENT', 'wait_time must be an integer between 0 and 299', 2);
+  }
+  return waitTime * 1000 + 5000;
+}
+
 function publicTaskId(value) {
   const id = Number(value);
   if (!Number.isSafeInteger(id) || String(id) !== String(value) || id < MIN_TASK_ID || id > MAX_TASK_ID) {
@@ -54,7 +61,7 @@ function methodFor(command, input) {
   switch (command) {
     case 'status': return { method: 'system_status' };
     case 'create': case 'spawn': return { method: 'submit_general', params: { input: { manifest: manifest(input) } } };
-    case 'get': case 'poll': return { method: 'task_poll', params: { agent_id: daemonTaskId(input.agent_id), after_revision: input.after_revision || 0, timeout_ms: input.timeout_ms ?? 0, ...(input.message_id ? { message_id: input.message_id } : {}) } };
+    case 'wait': return { method: 'task_wait', params: { agent_id: daemonTaskId(input.agent_id), after_revision: input.after_revision ?? 0, wait_time: input.wait_time ?? 290, ...(input.message_id ? { message_id: input.message_id } : {}) } };
     case 'list': {
       const repository = input.repository ?? input.workspace;
       if (!repository) throw new CliError('INVALID_ARGUMENT', 'list requires repository or workspace scope', 2);
@@ -103,7 +110,7 @@ export function projectDaemonResult(command, result) {
     case 'status': return result.status;
     case 'create': case 'spawn':
       return { agent_id: publicTaskId(result.task.agent_id), submission_disposition: result.disposition, phase: result.task.phase };
-    case 'get': case 'poll': {
+    case 'wait': {
       const { latest_progress, result: taskResult, task, activity, kind: _kind, ...rest } = result;
       const { latest_progress: _activityProgress, ...publicActivity } = activity;
       return { ...rest, task: publicTask(task), activity: publicActivity, latest_progress, result: publicResult(taskResult) };
@@ -118,8 +125,9 @@ export function projectDaemonResult(command, result) {
   }
 }
 
-export function callDaemon(socketPath, command, input, timeoutMs = 6000) {
+export function callDaemon(socketPath, command, input, timeoutMs) {
   const { method, params } = methodFor(command, input);
+  const effectiveTimeoutMs = timeoutMs ?? (command === 'wait' ? waitTransportTimeoutMs(params.wait_time) : 6000);
   const request_id = requestId();
   const request = JSON.stringify({ version: RPC_VERSION, request_id, method, params }) + '\n';
   if (Buffer.byteLength(request, 'utf8') > MAX_FRAME_BYTES) {
@@ -128,7 +136,7 @@ export function callDaemon(socketPath, command, input, timeoutMs = 6000) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath); let data = ''; let dataBytes = 0; let settled = false;
     const finish = (fn, value) => { if (!settled) { settled = true; socket.destroy(); fn(value); } };
-    const timer = setTimeout(() => finish(reject, new CliError('SOCKET_UNAVAILABLE', `daemon socket unavailable: ${socketPath}`)), timeoutMs);
+    const timer = setTimeout(() => finish(reject, new CliError('SOCKET_UNAVAILABLE', `daemon socket unavailable: ${socketPath}`)), effectiveTimeoutMs);
     socket.setEncoding('utf8');
     socket.on('connect', () => socket.end(request));
     socket.on('data', (chunk) => {

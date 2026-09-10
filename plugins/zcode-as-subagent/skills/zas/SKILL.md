@@ -25,7 +25,7 @@ pages are read and hashes/paths are recorded.
 
 Use `zcode_subagent_send` with the task ID and preserve the returned receipt. `queued`
 means accepted for delivery; `delivered` means the remote agent acknowledged it; these
-are distinct outcomes. Poll with `zcode_subagent_poll` and a maximum 5-second timeout.
+are distinct outcomes. Wait with `zcode_subagent_wait` and `wait_time` up to 299 seconds; use 0 for current status.
 Use `zcode_subagent_result` to read the complete result, following its pagination until
 the end before summarizing. Keep completion state, semantic verdict (for example CLEAN),
 and telemetry/health as separate facts; none alone proves review or business success.

@@ -4,12 +4,12 @@ command = "/absolute/path/to/zcode-mcp/target/release/zcode-as-subagent-mcp"
 enabled = true
 required = true
 startup_timeout_sec = 10
-tool_timeout_sec = 10
+tool_timeout_sec = 299
 enabled_tools = [
   "zcode_subagent_cancel",
   "zcode_subagent_close",
   "zcode_subagent_list",
-  "zcode_subagent_poll",
+  "zcode_subagent_wait",
   "zcode_subagent_respond",
   "zcode_subagent_result",
   "zcode_subagent_send",
@@ -27,7 +27,7 @@ approval_mode = "auto"
 [mcp_servers.zcode_as_subagent.tools.zcode_subagent_list]
 approval_mode = "auto"
 
-[mcp_servers.zcode_as_subagent.tools.zcode_subagent_poll]
+[mcp_servers.zcode_as_subagent.tools.zcode_subagent_wait]
 approval_mode = "auto"
 
 [mcp_servers.zcode_as_subagent.tools.zcode_subagent_result]

@@ -74,12 +74,12 @@ test('agent diagnose reads only the public poll projection and exports a bounded
       socket.end(JSON.stringify({ version: 13, request_id: request.request_id, outcome: 'success', result: { status: { protocol_version: 13 } } }) + '\n');
       return;
     }
-    assert.equal(request.method, 'task_poll');
+    assert.equal(request.method, 'task_wait');
     socket.end(JSON.stringify({ version: 13, request_id: request.request_id, outcome: 'success', result: {
-      kind: 'task_poll', task: { agent_id: 10000001, phase: 'RUNNING', outcome: null, reason_code: null, stop_requested: false, close_requested: false, closed: false, reaped: false },
+      kind: 'task_wait', task: { agent_id: 10000001, phase: 'RUNNING', outcome: null, reason_code: null, stop_requested: false, close_requested: false, closed: false, reaped: false },
       revision: 3, next_revision: 3, pending_requests: [], result_available: false,
       activity: { state: 'active', active_tools: [], window_60s: {}, telemetry_status: 'healthy' }, latest_progress: null,
-      result: null, instruction: 'Use poll for progress', timed_out: false,
+      result: null, instruction: 'Use wait for progress', timed_out: false,
     } }) + '\n');
   }));
   await new Promise((resolve) => server.listen(paths.socket, resolve));
@@ -173,7 +173,7 @@ async function withDaemon(paths, respond, run) {
 
 function statusOrTask(request, agentId = '10000001') {
   if (request.method === 'system_status') return { outcome: 'success', result: { status: { protocol_version: 13 } } };
-  assert.equal(request.method, 'task_poll');
+  assert.equal(request.method, 'task_wait');
   assert.equal(request.params.agent_id, agentId);
   return { outcome: 'success', result: {
     task: { agent_id: agentId, phase: 'TERMINAL', outcome: 'FAILED', reason_code: 'RUNTIME_START_FAILED', reaped: true },

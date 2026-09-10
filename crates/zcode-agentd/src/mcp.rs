@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn structured_error_keeps_legacy_text_and_machine_fields_in_sync() {
         let result = public_transport_error(std::io::Error::from(std::io::ErrorKind::TimedOut))
-            .with_operation("poll")
+            .with_operation("wait")
             .with_request_id("request-7")
             .with_agent_id(Some("10000007".into()))
             .into_call_tool_result()
@@ -355,7 +355,7 @@ mod tests {
         let error = &result.structured_content.unwrap()["error"];
         assert_eq!(error["code"], "timeout");
         assert_eq!(error["component"], "daemon_transport");
-        assert_eq!(error["operation"], "poll");
+        assert_eq!(error["operation"], "wait");
         assert_eq!(error["request_id"], "request-7");
         assert_eq!(error["agent_id"], serde_json::json!(10000007));
     }
@@ -463,12 +463,12 @@ mod server {
         "zcode_subagent_close",
         "zcode_subagent_list",
         "zcode_subagent_observe",
-        "zcode_subagent_poll",
         "zcode_subagent_respond",
         "zcode_subagent_result",
         "zcode_subagent_send",
         "zcode_subagent_spawn",
         "zcode_subagent_status",
+        "zcode_subagent_wait",
     ];
 
     const MAX_ID_BYTES: usize = 512;
@@ -476,6 +476,10 @@ mod server {
     const MAX_PROMPT_BYTES: usize = 256 * 1024;
     const MAX_MESSAGE_BYTES: usize = 16 * 1024;
     const MAX_REASON_BYTES: usize = 2048;
+
+    fn default_wait_time() -> u64 {
+        290
+    }
 
     #[derive(Debug, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
@@ -1008,14 +1012,14 @@ mod server {
 
     #[derive(Debug, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
-    pub struct AgentPollInput {
+    pub struct AgentWaitInput {
         #[schemars(range(min = 10000000, max = 99999999))]
         pub agent_id: u64,
         #[serde(default)]
         pub after_revision: u64,
-        #[serde(default)]
-        #[schemars(range(min = 0, max = 5000))]
-        pub timeout_ms: u64,
+        #[serde(default = "default_wait_time")]
+        #[schemars(range(min = 0, max = 299))]
+        pub wait_time: u64,
         #[serde(default)]
         pub message_id: Option<String>,
     }
@@ -1140,7 +1144,7 @@ mod server {
 
     #[derive(Debug, Serialize, JsonSchema)]
     #[schemars(deny_unknown_fields)]
-    pub struct AgentPollOutput {
+    pub struct AgentWaitOutput {
         pub task: PublicTask,
         pub revision: u64,
         pub next_revision: u64,
@@ -1577,9 +1581,9 @@ mod server {
         }
 
         #[tool(
-        name = "zcode_subagent_poll",
-        output_schema = tool_output_schema::<AgentPollOutput>(),
-        description = "Long-poll a task revision with typed pending requests and passive runtime activity",
+        name = "zcode_subagent_wait",
+        output_schema = tool_output_schema::<AgentWaitOutput>(),
+        description = "Wait up to 290 seconds by default for terminal completion or a pending Bash permission request. Set wait_time manually when other work or subagents need attention; avoid unnecessarily short waits across multiple tasks; use 0 for current status.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1587,16 +1591,16 @@ mod server {
             open_world_hint = false
         )
     )]
-        async fn agent_poll(
+        async fn agent_wait(
             &self,
-            Parameters(input): Parameters<AgentPollInput>,
+            Parameters(input): Parameters<AgentWaitInput>,
             context: RequestContext<RoleServer>,
-        ) -> Result<Json<AgentPollOutput>, ToolError> {
+        ) -> Result<Json<AgentWaitOutput>, ToolError> {
             let agent_id =
-                internal_task_id(input.agent_id).map_err(|error| error.with_operation("poll"))?;
-            if input.timeout_ms > 5000 {
-                return Err(validation_error("timeout_ms must be between 0 and 5000")
-                    .with_operation("poll")
+                internal_task_id(input.agent_id).map_err(|error| error.with_operation("wait"))?;
+            if input.wait_time > 299 {
+                return Err(validation_error("wait_time must be between 0 and 299")
+                    .with_operation("wait")
                     .with_agent_id(Some(agent_id)));
             }
             match self
@@ -1604,8 +1608,7 @@ mod server {
                     TaskWaitQuery {
                         agent_id,
                         after_revision: input.after_revision,
-                        // S02 replaces the public milliseconds field with wait_time.
-                        wait_time: input.timeout_ms.div_ceil(1000),
+                        wait_time: input.wait_time,
                         message_id: input.message_id,
                     },
                     move || context.ct.is_cancelled(),
@@ -1625,7 +1628,7 @@ mod server {
                     instruction,
                     timed_out,
                     message_receipt,
-                } => Ok(Json(AgentPollOutput {
+                } => Ok(Json(AgentWaitOutput {
                     task: task.try_into()?,
                     revision,
                     next_revision,
@@ -1646,7 +1649,7 @@ mod server {
                         delivered_at_ms: r.delivered_at_ms,
                     }),
                 })),
-                _ => Err(protocol_error().with_operation("poll")),
+                _ => Err(protocol_error().with_operation("wait")),
             }
         }
 
@@ -1920,7 +1923,7 @@ mod server {
     #[cfg(test)]
     mod contract_default_tests {
         use super::{
-            default_result_limit, rpc_context, AgentListInput, AgentObserveOutput, AgentPollInput,
+            default_result_limit, rpc_context, AgentListInput, AgentObserveOutput, AgentWaitInput,
             AgentResultInput, AgentSendInput, PublicArtifactIdentity, PublicComponentIdentity,
             SubagentMcp, SystemStatusOutput, PUBLIC_TOOLS,
         };
@@ -1955,10 +1958,12 @@ mod server {
             assert!(list.outcome.is_none());
             assert!(list.cursor.is_none());
 
-            let poll: AgentPollInput =
+            let wait: AgentWaitInput =
                 serde_json::from_value(serde_json::json!({"agent_id": 10000000})).unwrap();
-            assert_eq!(poll.after_revision, 0);
-            assert_eq!(poll.timeout_ms, 0);
+            assert_eq!(wait.after_revision, 0);
+            assert_eq!(wait.wait_time, 290);
+            let immediate: AgentWaitInput = serde_json::from_value(serde_json::json!({"agent_id": 10000000, "wait_time": 0})).unwrap();
+            assert_eq!(immediate.wait_time, 0);
 
             let result: AgentResultInput =
                 serde_json::from_value(serde_json::json!({"agent_id": 10000000})).unwrap();
@@ -2074,8 +2079,8 @@ mod server {
                 .unwrap();
             let call = serde_json::json!({
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                "params": {"name": "zcode_subagent_poll", "arguments": {
-                    "agent_id": super::super::public_task_id(&id).unwrap(), "timeout_ms": 5000
+                "params": {"name": "zcode_subagent_wait", "arguments": {
+                    "agent_id": super::super::public_task_id(&id).unwrap(), "wait_time": 299
                 }}
             });
             writer
@@ -2185,7 +2190,7 @@ mod server {
                 capabilities: AgentCapabilitiesView {
                     max_rpc_request_frame_bytes: 512 * 1024,
                     max_rpc_response_frame_bytes: 2 * 1024 * 1024,
-                    max_wait_ms: 5000,
+                    max_wait_ms: 299000,
                     maturity: BTreeMap::from([("spawn".into(), CapabilityMaturityView::BetaReady)]),
                     observation: ObservationCapabilityView {
                         protocol: "zas-observation/1.1".into(),
@@ -2302,14 +2307,14 @@ mod server {
                 "path":"/running/component"
             });
             let status = serde_json::json!({
-                "components":{},"capabilities":{"max_rpc_request_frame_bytes":524288,"max_rpc_response_frame_bytes":2097152,"max_wait_ms":5000,
+                "components":{},"capabilities":{"max_rpc_request_frame_bytes":524288,"max_rpc_response_frame_bytes":2097152,"max_wait_ms":299000,
                     "maturity":{},"observation":{"public_reasoning_default":true,
                         "defaults":{"top_tools":3,"recent_calls_per_tool":5,"reasoning_chars":200}}},
                 "identity":{"daemon":{"artifact":artifact.clone()},
                     "facade":{"artifact":artifact},
                     "models":{}}
             });
-            let poll = serde_json::json!({
+            let wait = serde_json::json!({
                 "task":task.clone(),"revision":0,"next_revision":0,"pending_requests":[],
                 "command_pending_approval":false,"result_available":false,"activity":activity,
                 "latest_progress":null,"result":null,"instruction":null,"timed_out":false
@@ -2320,7 +2325,7 @@ mod server {
                     "zcode_subagent_spawn",
                     serde_json::json!({"agent_id":10000001,"submission_disposition":"created","phase":"RUNNING"}),
                 ),
-                ("zcode_subagent_poll", poll),
+                ("zcode_subagent_wait", wait),
                 ("zcode_subagent_observe", observation),
                 (
                     "zcode_subagent_list",

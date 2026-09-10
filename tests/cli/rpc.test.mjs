@@ -3,7 +3,13 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { callDaemon, MAX_RESULT_CHUNK_BYTES, projectDaemonResult } from '../../cli/rpc.mjs';
+import { callDaemon, MAX_RESULT_CHUNK_BYTES, projectDaemonResult, waitTransportTimeoutMs } from '../../cli/rpc.mjs';
+
+test('wait transport timeout covers maximum wait without sleeping', () => {
+  assert.equal(waitTransportTimeoutMs(0), 5000);
+  assert.equal(waitTransportTimeoutMs(299), 304000);
+  assert.throws(() => waitTransportTimeoutMs(300), /wait_time/);
+});
 import { CliError } from '../../cli/errors.mjs';
 import { DAEMON_HELP } from '../../cli/main.mjs';
 
@@ -21,14 +27,14 @@ test('CLI sends daemon RPC and preserves success result', async () => {
       if (!body.includes('\n')) return;
       const request = JSON.parse(body);
       assert.equal(request.version, 13);
-      assert.equal(request.method, 'task_poll');
+      assert.equal(request.method, 'task_wait');
       assert.equal(request.params.agent_id, '10000001');
       socket.end(JSON.stringify({
         version: 13,
         request_id: request.request_id,
         outcome: 'success',
         result: {
-          kind: 'task_poll',
+          kind: 'task_wait',
           task: { agent_id: '10000001', phase: 'RUNNING', outcome: null, reason_code: null, stop_requested: false, close_requested: false, closed: false, reaped: false },
           revision: 0,
           next_revision: 0,
@@ -38,7 +44,7 @@ test('CLI sends daemon RPC and preserves success result', async () => {
           activity: { state: 'active', latest_progress: 'private duplicate', active_tools: [], window_60s: {}, telemetry_status: 'healthy' },
           latest_progress: null,
           result: null,
-          instruction: 'Use poll for progress',
+          instruction: 'Use wait for progress',
           timed_out: true,
         },
       }) + '\n');
@@ -46,7 +52,7 @@ test('CLI sends daemon RPC and preserves success result', async () => {
   });
   await new Promise((resolve) => server.listen(socketPath, resolve));
   try {
-    const result = await callDaemon(socketPath, 'poll', { agent_id: 10000001 });
+    const result = await callDaemon(socketPath, 'wait', { agent_id: 10000001, wait_time: 0 });
     assert.equal(result.task.cancel_requested, false);
     assert.equal(result.task.resources_reaped, false);
     assert.equal(result.activity.latest_progress, undefined);

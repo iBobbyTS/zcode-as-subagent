@@ -121,7 +121,7 @@ def run(daemon, root):
         facts['agent_id'] = agent_id
         deadline = time.monotonic() + 15
         while True:
-            poll = old.tool('poll', {'agent_id': agent_id, 'timeout_ms': 0})
+            poll = old.tool('wait', {'agent_id': agent_id, 'wait_time': 0})
             if poll['task']['phase'] == 'TERMINAL':
                 break
             if time.monotonic() > deadline:
@@ -146,7 +146,7 @@ def run(daemon, root):
         except (EOFError, BrokenPipeError, ConnectionResetError):
             facts['old_connection_failed'] = True
         second, fresh, second_tools = start('second')
-        facts['poll_after'] = fresh.tool('poll', {'agent_id': agent_id, 'timeout_ms': 0})
+        facts['poll_after'] = fresh.tool('wait', {'agent_id': agent_id, 'wait_time': 0})
         facts['result_after'] = fresh.tool('result', {'agent_id': agent_id})
         facts['list_after'] = fresh.tool('list', {'repository': str(repository)})
         facts['task_recovery'] = (

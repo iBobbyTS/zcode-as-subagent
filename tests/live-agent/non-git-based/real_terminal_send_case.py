@@ -129,7 +129,7 @@ def main() -> int:
         revision = spawned.get('revision', 0)
         deadline = time.monotonic() + args.timeout_sec
         while time.monotonic() < deadline:
-            snapshot = client.call('poll', {'agent_id': agent_id, 'after_revision': revision, 'timeout_ms': 5000})
+            snapshot = client.call('wait', {'agent_id': agent_id, 'after_revision': revision, 'wait_time': 5})
             revision = snapshot.get('next_revision', revision)
             if snapshot.get('pending_requests'):
                 emit('pending_requests', snapshot['pending_requests'])
@@ -154,7 +154,7 @@ def main() -> int:
         # Observe the whole window: old COMPLETED is not proof of a new turn.
         deadline = time.monotonic() + args.observe_sec
         while time.monotonic() < deadline:
-            snapshot = client.call('poll', {'agent_id': agent_id, 'after_revision': revision, 'timeout_ms': 1000})
+            snapshot = client.call('wait', {'agent_id': agent_id, 'after_revision': revision, 'wait_time': 1})
             revision = snapshot.get('next_revision', revision)
             time.sleep(.25)
         emit('followup_result', client.call('result', {'agent_id': agent_id}))
@@ -169,7 +169,7 @@ def main() -> int:
         if agent_id and client:
             try:
                 emit('close', client.call('close', {'agent_id': agent_id}))
-                emit('after_close', client.call('poll', {'agent_id': agent_id, 'timeout_ms': 0}))
+                emit('after_close', client.call('wait', {'agent_id': agent_id, 'wait_time': 0}))
             except Exception as exc:
                 error('cleanup', exc)
         if client:
