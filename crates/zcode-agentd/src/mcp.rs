@@ -2072,7 +2072,8 @@ mod server {
                     .await
                     .is_err()
             );
-            writer.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"2\",\"reason\":\"caller stopped waiting\"}}\n").await.unwrap();
+            let cancellation_started = std::time::Instant::now();
+            writer.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":2,\"reason\":\"caller stopped waiting\"}}\n").await.unwrap();
             // rmcp drops the cancelled request's response after cancelling its
             // context token. The connection remains usable for subsequent calls.
             assert!(
@@ -2089,6 +2090,11 @@ mod server {
                 .expect("connection did not remain serviceable after cancellation")
                 .unwrap()
                 .unwrap();
+            assert!(
+                cancellation_started.elapsed() < Duration::from_secs(1),
+                "cancelled wait did not end promptly: {:?}",
+                cancellation_started.elapsed()
+            );
             assert_eq!(serde_json::from_str::<serde_json::Value>(&status).unwrap()["id"], 3);
             assert_eq!(before, store.get_task(&id).unwrap());
             serving.abort();
