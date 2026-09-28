@@ -400,11 +400,15 @@ impl PassiveActivityTracker {
     }
 
     fn snapshot(&self) -> PassiveActivitySnapshot {
-        self.snapshot_at(Instant::now())
+        self.snapshot_at(Instant::now(), false)
     }
 
-    fn snapshot_at(&self, now: Instant) -> PassiveActivitySnapshot {
-        let state = self.state.lock().unwrap();
+    fn take_snapshot(&self) -> PassiveActivitySnapshot {
+        self.snapshot_at(Instant::now(), true)
+    }
+
+    fn snapshot_at(&self, now: Instant, consume_text: bool) -> PassiveActivitySnapshot {
+        let mut state = self.state.lock().unwrap();
         let mut window = PassiveActivityWindow::default();
         for sample in state.samples.values() {
             if now.saturating_duration_since(sample.observed_at) > PASSIVE_ACTIVITY_WINDOW {
@@ -466,9 +470,20 @@ impl PassiveActivityTracker {
             model_last_delta_age_ms: state
                 .last_model_delta_at
                 .map(|at| duration_millis(now.saturating_duration_since(at))),
-            latest_text_tail: state.latest_text_tail.clone(),
+            // Text deltas are exposed as a read-consumed increment when the
+            // caller explicitly takes a snapshot. Internal polling uses a
+            // non-consuming snapshot so it cannot discard pending text.
+            latest_text_tail: if consume_text {
+                std::mem::take(&mut state.latest_text_tail)
+            } else {
+                state.latest_text_tail.clone()
+            },
             latest_text_updated_at: state.latest_text_updated_at,
-            latest_text_truncated: state.latest_text_truncated,
+            latest_text_truncated: if consume_text {
+                std::mem::replace(&mut state.latest_text_truncated, false)
+            } else {
+                state.latest_text_truncated
+            },
             latest_progress: state.latest_progress.clone(),
             active_tools,
             oldest_active_tool_age_ms: state
@@ -4979,6 +4994,19 @@ impl Scheduler {
             .map(|activity| activity.snapshot())
     }
 
+    pub(crate) fn take_passive_activity_snapshot(
+        &self,
+        agent_id: &str,
+    ) -> Option<PassiveActivitySnapshot> {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .activities
+            .get(agent_id)
+            .map(|activity| activity.take_snapshot())
+    }
+
     pub(crate) fn observation_snapshot(
         &self,
         agent_id: &str,
@@ -5659,6 +5687,41 @@ sleep 2
         assert_eq!(after.snapshot_seq, before.snapshot_seq + 2);
         assert_eq!(tracker.observation_snapshot(), after);
         assert_eq!(tracker.observation_snapshot(), after);
+    }
+
+    #[test]
+    fn activity_snapshot_consumes_text_tail_between_reads() {
+        let tracker = PassiveActivityTracker::new(true);
+        let event = |event_id: &str, delta: &str| {
+            RuntimeEvent::Driver(Inbound::Message(WireMessage::Event(
+                zcode_protocol::EventEnvelope {
+                    method: "session/event".into(),
+                    params: serde_json::json!({
+                        "type": "model.streaming",
+                        "eventId": event_id,
+                        "turnId": "turn-1",
+                        "payload": {
+                            "kind": "text_delta",
+                            "delta": delta,
+                            "assistantMessageId": "message-1"
+                        }
+                    }),
+                },
+            )))
+        };
+
+        tracker.observe(&event("text-1", "hello "));
+        let first = tracker.take_snapshot();
+        assert_eq!(first.latest_text_tail, "hello ");
+        assert!(!first.latest_text_truncated);
+
+        let second = tracker.take_snapshot();
+        assert!(second.latest_text_tail.is_empty());
+        assert!(!second.latest_text_truncated);
+
+        tracker.observe(&event("text-2", "world"));
+        let third = tracker.take_snapshot();
+        assert_eq!(third.latest_text_tail, "world");
     }
 
     #[test]

@@ -1089,8 +1089,8 @@ impl RpcService {
             let command_pending_approval = pending_requests.iter().any(respondable_pending_request);
             let stored_result = self.store.task_result(&task.agent_id).map_err(map_store)?;
             let result_available = stored_result.is_some();
-            let activity = self.scheduler.passive_activity_snapshot(&task.agent_id);
-            let revision = activity
+            let observed_activity = self.scheduler.passive_activity_snapshot(&task.agent_id);
+            let revision = observed_activity
                 .as_ref()
                 .map(|activity| activity.revision)
                 .unwrap_or(0)
@@ -1099,6 +1099,9 @@ impl RpcService {
             let now = Instant::now();
             if command_pending_approval || terminal || now >= deadline {
                 let timed_out = !command_pending_approval && !terminal && now >= deadline;
+                let activity = self
+                    .scheduler
+                    .take_passive_activity_snapshot(&task.agent_id);
                 let mut response = RpcSuccess::TaskWait {
                     activity: task_activity_view(task.phase, activity),
                     task: task_view(task.clone()),
