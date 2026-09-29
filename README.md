@@ -5,6 +5,14 @@ one durable Agent in a caller-selected workspace. The package exposes the same
 Agent lifecycle through `zas` and the `zcode_subagent_*` MCP
 tools; there is no compatibility alias or migration layer.
 
+> **Deprecated / 已停止维护**
+>
+> This project has been superseded by [external-subagent](https://github.com/iBobbyTS/external-subagent) and is no longer updated.
+> external-subagent is the first N-to-N framework that lets agents call each other.
+>
+> 本项目已被 [external-subagent](https://github.com/iBobbyTS/external-subagent) 替代，不再更新。
+> external-subagent 是第一个 N-to-N 让 agent 之间互相调用的框架。
+
 ## Install and use
 
 ```bash
