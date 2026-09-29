@@ -38,3 +38,6 @@ __pycache__/
 # OS Junk
 *.DS_Store
 desktop.ini
+
+# 本地保留的原生二进制，不入库
+npm/native/darwin-arm64/
